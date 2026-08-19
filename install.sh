@@ -21,19 +21,19 @@ detect_asset() {
     case "$system" in
         Darwin|darwin|macOS|macos)
             case "$machine" in
-                arm64|aarch64) printf '%s\n' 'me-macos-arm64' ;;
-                x86_64|amd64) printf '%s\n' 'me-macos-x86_64' ;;
-                *) fail "me does not provide a macOS release for $machine" ;;
+                arm64|aarch64) printf '%s\n' 'me-s-macos-arm64' ;;
+                x86_64|amd64) printf '%s\n' 'me-s-macos-x86_64' ;;
+                *) fail "me-s does not provide a macOS release for $machine" ;;
             esac
             ;;
         Linux|linux)
             case "$machine" in
-                arm64|aarch64) printf '%s\n' 'me-linux-arm64' ;;
-                x86_64|amd64) printf '%s\n' 'me-linux-x86_64' ;;
-                *) fail "me does not provide a Linux release for $machine" ;;
+                arm64|aarch64) printf '%s\n' 'me-s-linux-arm64' ;;
+                x86_64|amd64) printf '%s\n' 'me-s-linux-x86_64' ;;
+                *) fail "me-s does not provide a Linux release for $machine" ;;
             esac
             ;;
-        *) fail "me does not support $system/$machine with this installer" ;;
+        *) fail "me-s does not support $system/$machine with this installer" ;;
     esac
 }
 
@@ -47,7 +47,7 @@ download() {
     elif command -v wget >/dev/null 2>&1; then
         wget --quiet --tries=3 --timeout=30 --output-document="$output" "$url"
     else
-        fail 'curl or wget is required to download me'
+        fail 'curl or wget is required to download me-s'
     fi
 }
 
@@ -81,7 +81,7 @@ actual_checksum() {
     elif command -v openssl >/dev/null 2>&1; then
         openssl dgst -sha256 "$file" | awk '{ print tolower($NF) }'
     else
-        fail 'sha256sum, shasum, or openssl is required to verify me'
+        fail 'sha256sum, shasum, or openssl is required to verify me-s'
     fi
 }
 
@@ -116,7 +116,7 @@ need_command install
 need_command mktemp
 
 ASSET=$(detect_asset)
-TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/me-install.XXXXXX") || fail 'cannot create temporary directory'
+TEMP_DIR=$(mktemp -d "${TMPDIR:-/tmp}/me-s-install.XXXXXX") || fail 'cannot create temporary directory'
 trap cleanup 0
 trap 'exit 130' HUP INT TERM
 
@@ -135,11 +135,11 @@ if ! "$TEMP_DIR/release-asset" version >/dev/null; then
     fail "downloaded $ASSET cannot run on this system"
 fi
 
-DESTINATION=$INSTALL_DIR/me
+DESTINATION=$INSTALL_DIR/me-s
 install_binary "$TEMP_DIR/release-asset" "$DESTINATION" "$INSTALL_DIR"
 
 if ! "$DESTINATION" version; then
-    fail "me was installed to $DESTINATION but could not be started"
+    fail "me-s was installed to $DESTINATION but could not be started"
 fi
 
-printf 'Installed me to %s\n' "$DESTINATION"
+printf 'Installed me-s to %s\n' "$DESTINATION"

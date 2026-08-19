@@ -27,9 +27,9 @@ if sys.version_info[:2] != (3, 12):
         f"received {sys.version_info.major}.{sys.version_info.minor}"
     )
 
-host = os.environ.get("ME_TOOLBOX_HOST") or shutil.which("me")
+host = os.environ.get("ME_TOOLBOX_HOST") or shutil.which("me-s")
 if not host:
-    fail("Terminal toolbox cannot find ME-RUST; set ME_TOOLBOX_HOST or install me")
+    fail("Terminal toolbox cannot find ME-RUST; set ME_TOOLBOX_HOST or install me-s")
 
 worker = subprocess.Popen(
     [host, "__toolbox-terminal-worker"],

@@ -6,9 +6,9 @@ function Get-MeReleaseAsset {
 
     $normalized = $Architecture.Trim().ToUpperInvariant()
     if ($normalized -eq "AMD64" -or $normalized -eq "X86_64") {
-        return "me-windows-x86_64.exe"
+        return "me-s-windows-x86_64.exe"
     }
-    throw "me does not provide a Windows release for $Architecture"
+    throw "me-s does not provide a Windows release for $Architecture"
 }
 
 function Get-MeExpectedChecksum {
@@ -40,7 +40,7 @@ function Invoke-MeDownload {
     $arguments = @{
         Uri                = $Uri
         OutFile            = $OutFile
-        Headers            = @{ "User-Agent" = "me-installer" }
+        Headers            = @{ "User-Agent" = "me-s-installer" }
         MaximumRedirection = 10
     }
     if ($PSVersionTable.PSVersion.Major -lt 6) {
@@ -124,11 +124,11 @@ function Install-Me {
     }
     $installDirectory = [System.IO.Path]::GetFullPath($installDirectory)
 
-    $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "me-install-$([Guid]::NewGuid().ToString('N'))"
+    $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "me-s-install-$([Guid]::NewGuid().ToString('N'))"
     $downloadedAsset = Join-Path $temporaryDirectory $asset
     $manifest = Join-Path $temporaryDirectory "SHA256SUMS"
-    $staging = Join-Path $installDirectory ".me-install-$([Guid]::NewGuid().ToString('N')).exe"
-    $destination = Join-Path $installDirectory "me.exe"
+    $staging = Join-Path $installDirectory ".me-s-install-$([Guid]::NewGuid().ToString('N')).exe"
+    $destination = Join-Path $installDirectory "me-s.exe"
 
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     try {
@@ -155,10 +155,10 @@ function Install-Me {
 
         & $destination version
         if ($LASTEXITCODE -ne 0) {
-            throw "me was installed to $destination but could not be started"
+            throw "me-s was installed to $destination but could not be started"
         }
-        Write-Host "Installed me to $destination"
-        Write-Host "Open a new terminal if the me command is not immediately available."
+        Write-Host "Installed me-s to $destination"
+        Write-Host "Open a new terminal if the me-s command is not immediately available."
     } finally {
         if (Test-Path -LiteralPath $staging) {
             Remove-Item -Force -LiteralPath $staging

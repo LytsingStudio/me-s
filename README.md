@@ -1,8 +1,8 @@
 # ME-RUST
 
-ME-RUST（命令名 `me`）是一个简单、轻量的本地 AI Agent，尤其适合需要连续工作较长时间的任务。
+ME-RUST（命令名 `me-s`）是一个简单、轻量的本地 AI Agent，尤其适合需要连续工作较长时间的任务。
 
-它可以在终端或浏览器中使用，能够操作文件、运行命令、浏览网页、查看图片，并支持多个 Agent 协作。不同界面可以同时连接到同一个运行中的 me，实时同步会话、输入草稿和执行状态。
+它可以在终端或浏览器中使用，能够操作文件、运行命令、浏览网页、查看图片，并支持多个 Agent 协作。不同界面可以同时连接到同一个运行中的 me-s，实时同步会话、输入草稿和执行状态。
 
 ME-RUST 本身也是开发者与 Codex 通过 vibe coding 协作完成的项目。
 
@@ -31,7 +31,7 @@ ME-RUST 本身也是开发者与 Codex 通过 vibe coding 协作完成的项目�
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/releases/latest/download/install.sh | sh
 ```
 
-默认安装到 `/usr/local/bin/me`，需要时会请求管理员权限。如需安装到其他目录：
+默认安装到 `/usr/local/bin/me-s`，需要时会请求管理员权限。如需安装到其他目录：
 
 ```bash
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/releases/latest/download/install.sh | ME_INSTALL_DIR="$HOME/.local/bin" sh
@@ -43,7 +43,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/r
 curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/releases/latest/download/install.sh | sh
 ```
 
-默认安装到 `/usr/local/bin/me`。Linux 版本兼容 glibc 2.17 及以上系统。
+默认安装到 `/usr/local/bin/me-s`。Linux 版本兼容 glibc 2.17 及以上系统。
 
 ### Windows
 
@@ -53,7 +53,9 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/r
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/LytsingStudio/me-rust/releases/latest/download/install.ps1 | iex
 ```
 
-脚本默认安装到 `%LOCALAPPDATA%\Programs\me`，并自动加入用户 `PATH`。如果当前窗口尚未识别 `me` 命令，请重新打开终端。
+脚本默认安装到 `%LOCALAPPDATA%\Programs\me\me-s.exe`，并把该目录加入用户 `PATH`。如果当前窗口尚未识别 `me-s` 命令，请重新打开终端。
+
+安装 me-s 不会覆盖或删除已有的 `me` 可执行文件；`me` 与 `me-s` 可以同时存在，并共同使用现有的 me 全局配置目录和工作区格式。
 
 ### 从源码构建
 
@@ -62,39 +64,40 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/r
 ```bash
 git clone https://github.com/LytsingStudio/me-rust.git && cd me-rust && cargo build --locked --release
 ```
+构建产物位于 `target/release/me-s`。
 
 ## 快速开始
 
 ```bash
 # 初始化全局配置
-me init
+me-s init
 
 # 在项目目录中创建工作区
 cd /path/to/project
-me create
+me-s create
 
 # 查看并选择模型
-me model list
-me model select MODEL_NAME
+me-s model list
+me-s model select MODEL_NAME
 
-# 启动 me
-me
+# 启动 me-s
+me-s
 ```
 
-直接在普通目录中运行 `me` 时，程序也会询问是否立即创建工作区。
+直接在普通目录中运行 `me-s` 时，程序也会询问是否立即创建工作区。
 
-默认情况下，`me` 会同时启动 TUI 和 WebUI。WebUI 可通过 `http://127.0.0.1:38199` 访问；如果端口已被占用，程序会自动选择后续可用端口。
+默认情况下，`me-s` 会同时启动 TUI 和 WebUI。WebUI 可通过 `http://127.0.0.1:38199` 访问；如果端口已被占用，程序会自动选择后续可用端口。
 
 只启动 WebUI：
 
 ```bash
-me --no-tui
+me-s --no-tui
 ```
 
 为 WebUI 设置访问密码：
 
 ```bash
-me --no-tui --webui-passkey "PASSWORD"
+me-s --no-tui --webui-passkey "PASSWORD"
 ```
 
 WebUI 可被局域网中的其他设备访问。访问密码不会加密 HTTP 流量；通过公网使用时，请另外配置 HTTPS 和适当的网络访问限制。
@@ -103,7 +106,7 @@ WebUI 可被局域网中的其他设备访问。访问密码不会加密 HTTP �
 
 ### 工作区与会话
 
-在项目目录执行 `me create` 后，该目录就是一个 me 工作区。每个工作区可以包含多个独立会话，并保留各自的聊天记录、工作进展和设置。
+在项目目录执行 `me-s create` 后，该目录就是一个 me 工作区。每个工作区可以包含多个独立会话，并保留各自的聊天记录、工作进展和设置。
 
 TUI 与 WebUI 可以同时使用。在一个界面中发送消息、修改输入草稿或创建会话，其他已连接界面会同步更新。
 
@@ -120,8 +123,8 @@ TUI 与 WebUI 可以同时使用。在一个界面中发送消息、修改输入
 使用下面的命令查看或设置新会话默认采用的模式：
 
 ```bash
-me orch
-me orch main-agent
+me-s orch
+me-s orch main-agent
 ```
 
 已经创建的会话不会因为修改默认模式而改变。
@@ -134,7 +137,7 @@ me orch main-agent
 
 ### 工具
 
-me 默认提供以下能力：
+me-s 默认提供以下能力：
 
 - 在真实终端中运行命令和交互式程序；
 - 读取、创建、修改和删除文件；
@@ -143,7 +146,7 @@ me 默认提供以下能力：
 - 创建子 Agent 协助工作；
 - 维护长任务的目标和计划。
 
-如需扩展功能，可以在工作区的 `.me/tools/` 中加入兼容的 Python 工具箱。首次创建工作区时，me 会自动准备默认工具。
+如需扩展功能，可以在工作区的 `.me/tools/` 中加入兼容的 Python 工具箱。首次创建工作区时，me-s 会自动准备默认工具。
 
 ## TUI 与 WebUI
 
@@ -164,26 +167,26 @@ WebUI 提供对应的会话、模型、上下文、终端和多 Agent 管理功�
 
 | 命令 | 说明 |
 | --- | --- |
-| `me` | 启动 TUI 与 WebUI。 |
-| `me --no-tui` | 只启动 WebUI。 |
-| `me --webui-passkey PASSWORD` | 为本次 WebUI 设置访问密码。 |
-| `me init` | 初始化或重置全局配置。 |
-| `me version` | 显示当前版本。 |
-| `me update` | 直接从公开 Release 更新，不需要 `gh`，且不修改全局配置。 |
-| `me create` | 在当前目录创建工作区。 |
-| `me workspace reset` | 永久删除当前目录的 me 工作区数据。 |
-| `me model list` | 列出可用模型。 |
-| `me model select NAME [EFFORT]` | 为当前工作区选择模型。 |
-| `me model select-default NAME` | 设置全局默认模型。 |
-| `me model test NAME` | 测试模型连接和响应速度。 |
-| `me model export PASSWORD` | 加密导出全部模型配置和凭据。 |
-| `me model import FILE PASSWORD` | 导入模型配置和凭据。 |
-| `me codex login` | 登录 Codex OAuth。 |
-| `me codex status` | 查看 Codex OAuth 登录状态。 |
-| `me codex logout` | 退出 Codex OAuth。 |
-| `me orch [NAME]` | 查看或设置默认工作模式。 |
+| `me-s` | 启动 TUI 与 WebUI。 |
+| `me-s --no-tui` | 只启动 WebUI。 |
+| `me-s --webui-passkey PASSWORD` | 为本次 WebUI 设置访问密码。 |
+| `me-s init` | 初始化或重置全局配置。 |
+| `me-s version` | 显示当前版本。 |
+| `me-s update` | 直接从公开 Release 更新当前 me-s 可执行文件，不需要 `gh`，且不修改全局配置或已有的 `me`。 |
+| `me-s create` | 在当前目录创建工作区。 |
+| `me-s workspace reset` | 永久删除当前目录的 me 工作区数据。 |
+| `me-s model list` | 列出可用模型。 |
+| `me-s model select NAME [EFFORT]` | 为当前工作区选择模型。 |
+| `me-s model select-default NAME` | 设置全局默认模型。 |
+| `me-s model test NAME` | 测试模型连接和响应速度。 |
+| `me-s model export PASSWORD` | 加密导出全部模型配置和凭据。 |
+| `me-s model import FILE PASSWORD` | 导入模型配置和凭据。 |
+| `me-s codex login` | 登录 Codex OAuth。 |
+| `me-s codex status` | 查看 Codex OAuth 登录状态。 |
+| `me-s codex logout` | 退出 Codex OAuth。 |
+| `me-s orch [NAME]` | 查看或设置默认工作模式。 |
 
-运行 `me --help` 可查看完整命令列表。
+运行 `me-s --help` 可查看完整命令列表。
 
 ## 配置模型
 
@@ -233,12 +236,12 @@ reasoning_effort = "high"
 请根据模型服务商的文档准确填写上下文长度、最大输出、输入类型和推理强度。`reserve_output_context = true` 表示在上下文窗口中为请求的最大输出量预留空间；设为 `false` 或省略时不预留。保存后可以执行：
 
 ```bash
-me model list
-me model test example-model
-me model select-default example-model
+me-s model list
+me-s model test example-model
+me-s model select-default example-model
 ```
 
-Codex OAuth 不需要手写预设。运行 `me codex login` 后，可用模型会自动出现在模型列表中。模型导出包会加密包含 Codex OAuth 凭据；导入时仅在当前设备尚未登录 Codex 时恢复，不会覆盖已有登录。
+Codex OAuth 不需要手写预设。运行 `me-s codex login` 后，可用模型会自动出现在模型列表中。模型导出包会加密包含 Codex OAuth 凭据；导入时仅在当前设备尚未登录 Codex 时恢复，不会覆盖已有登录。
 
 ## 开发
 

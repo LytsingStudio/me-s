@@ -46,12 +46,12 @@ impl UpdatePlatform {
 
     fn for_target(os: &str, arch: &str) -> Result<Self> {
         let asset = match (os, arch) {
-            ("macos", "aarch64") => "me-macos-arm64",
-            ("macos", "x86_64") => "me-macos-x86_64",
-            ("linux", "aarch64") => "me-linux-arm64",
-            ("linux", "x86_64") => "me-linux-x86_64",
-            ("windows", "x86_64") => "me-windows-x86_64.exe",
-            _ => return Err(format!("me update does not support {os}/{arch}").into()),
+            ("macos", "aarch64") => "me-s-macos-arm64",
+            ("macos", "x86_64") => "me-s-macos-x86_64",
+            ("linux", "aarch64") => "me-s-linux-arm64",
+            ("linux", "x86_64") => "me-s-linux-x86_64",
+            ("windows", "x86_64") => "me-s-windows-x86_64.exe",
+            _ => return Err(format!("me-s update does not support {os}/{arch}").into()),
         };
         Ok(Self { asset })
     }
@@ -64,17 +64,17 @@ pub fn update() -> Result<()> {
     let latest_tag = release.tag_name.as_str();
     let current_tag = format!("v{}", env!("CARGO_PKG_VERSION"));
     if latest_tag == current_tag {
-        println!("me is already up to date: {current_tag}");
+        println!("me-s is already up to date: {current_tag}");
         return Ok(());
     }
     if release_version(&latest_tag)? < release_version(&current_tag)? {
         println!(
-            "the running me version {current_tag} is newer than the latest published release {latest_tag}; no update was installed"
+            "the running me-s version {current_tag} is newer than the latest published release {latest_tag}; no update was installed"
         );
         return Ok(());
     }
 
-    println!("updating me: {current_tag} -> {latest_tag}");
+    println!("updating me-s: {current_tag} -> {latest_tag}");
     let download_client = update_download_client()?;
     let temporary = UpdateTempDirectory::create()?;
     download_release(&download_client, &release, platform.asset, temporary.path())?;
@@ -84,16 +84,16 @@ pub fn update() -> Result<()> {
     verify_release_asset(&executable, &checksums, platform.asset)?;
 
     let destination = env::current_exe()
-        .map_err(|error| format!("cannot locate the running me executable: {error}"))?;
+        .map_err(|error| format!("cannot locate the running me-s executable: {error}"))?;
     let scheduled_after_exit = deploy_executable(&executable, &destination)?;
     if scheduled_after_exit {
         println!(
-            "downloaded me {latest_tag}; Windows will replace the executable after this process exits\nexecutable: {}\nglobal configuration: unchanged",
+            "downloaded me-s {latest_tag}; Windows will replace the executable after this process exits\nexecutable: {}\nglobal configuration: unchanged",
             destination.display()
         );
     } else {
         println!(
-            "updated me to {latest_tag}\nexecutable: {}\nglobal configuration: unchanged",
+            "updated me-s to {latest_tag}\nexecutable: {}\nglobal configuration: unchanged",
             destination.display()
         );
     }
@@ -134,7 +134,7 @@ fn latest_release_from_sources(
     match latest_release_from_api(client, api_url) {
         Ok(release) => Ok(release),
         Err(api_error) => Err(format!(
-            "cannot query the latest public me release; public redirect failed: {public_error}; GitHub API fallback failed: {api_error}"
+            "cannot query the latest public me-s release; public redirect failed: {public_error}; GitHub API fallback failed: {api_error}"
         )
         .into()),
     }
@@ -149,7 +149,7 @@ fn latest_release_from_url(client: &reqwest::blocking::Client, url: &str) -> Res
     if !status.is_success() {
         let detail = response.text().unwrap_or_default();
         return Err(format!(
-            "cannot query the latest public me release: HTTP {status}{}",
+            "cannot query the latest public me-s release: HTTP {status}{}",
             response_detail(&detail)
         )
         .into());
@@ -283,9 +283,9 @@ fn release_version(tag: &str) -> Result<(u64, u64, u64)> {
         .split('.')
         .map(str::parse::<u64>)
         .collect::<std::result::Result<Vec<_>, _>>()
-        .map_err(|_| format!("invalid me release tag: {tag}"))?;
+        .map_err(|_| format!("invalid me-s release tag: {tag}"))?;
     let [major, minor, patch] = values.as_slice() else {
-        return Err(format!("invalid me release tag: {tag}").into());
+        return Err(format!("invalid me-s release tag: {tag}").into());
     };
     Ok((*major, *minor, *patch))
 }
@@ -434,7 +434,7 @@ fn deploy_executable(downloaded: &Path, destination: &Path) -> Result<bool> {
     let staging = sibling_staging_path(destination)?;
     fs::copy(downloaded, &staging).map_err(|error| {
         format!(
-            "cannot stage the Windows update beside {}: {error}; run me from an elevated terminal if it is installed in a protected directory",
+            "cannot stage the Windows update beside {}: {error}; run me-s from an elevated terminal if it is installed in a protected directory",
             destination.display()
         )
     })?;
@@ -486,7 +486,7 @@ fn powershell_literal_text(path: &str) -> String {
 
 #[cfg(not(any(unix, windows)))]
 fn deploy_executable(_downloaded: &Path, _destination: &Path) -> Result<bool> {
-    Err("me update is not supported on this platform".into())
+    Err("me-s update is not supported on this platform".into())
 }
 
 fn sibling_staging_path(destination: &Path) -> std::io::Result<PathBuf> {
@@ -570,27 +570,27 @@ mod tests {
             UpdatePlatform::for_target("macos", "aarch64")
                 .unwrap()
                 .asset,
-            "me-macos-arm64"
+            "me-s-macos-arm64"
         );
         assert_eq!(
             UpdatePlatform::for_target("macos", "x86_64").unwrap().asset,
-            "me-macos-x86_64"
+            "me-s-macos-x86_64"
         );
         assert_eq!(
             UpdatePlatform::for_target("linux", "aarch64")
                 .unwrap()
                 .asset,
-            "me-linux-arm64"
+            "me-s-linux-arm64"
         );
         assert_eq!(
             UpdatePlatform::for_target("linux", "x86_64").unwrap().asset,
-            "me-linux-x86_64"
+            "me-s-linux-x86_64"
         );
         assert_eq!(
             UpdatePlatform::for_target("windows", "x86_64")
                 .unwrap()
                 .asset,
-            "me-windows-x86_64.exe"
+            "me-s-windows-x86_64.exe"
         );
         assert!(UpdatePlatform::for_target("windows", "aarch64").is_err());
     }
@@ -631,10 +631,10 @@ mod tests {
             tag_name: "v0.0.267".into(),
         };
         assert_eq!(
-            release_asset_url(&release, "me-linux-x86_64")
+            release_asset_url(&release, "me-s-linux-x86_64")
                 .unwrap()
                 .as_str(),
-            "https://github.com/LytsingStudio/me-rust/releases/download/v0.0.267/me-linux-x86_64"
+            "https://github.com/LytsingStudio/me-rust/releases/download/v0.0.267/me-s-linux-x86_64"
         );
     }
 
@@ -812,58 +812,58 @@ mod tests {
                 .all(|argument| !argument.eq_ignore_ascii_case("-WindowStyle"))
         );
         assert_eq!(
-            powershell_literal_text(r"\\?\C:\Users\O'Brien\me.exe"),
-            r"C:\Users\O''Brien\me.exe"
+            powershell_literal_text(r"\\?\C:\Users\O'Brien\me-s.exe"),
+            r"C:\Users\O''Brien\me-s.exe"
         );
         assert_eq!(
-            powershell_literal_text(r"\\?\UNC\server\share\me.exe"),
-            r"\\server\share\me.exe"
+            powershell_literal_text(r"\\?\UNC\server\share\me-s.exe"),
+            r"\\server\share\me-s.exe"
         );
-        let script = windows_update_script(42, "C:\\staged-me.exe", "C:\\me.exe");
+        let script = windows_update_script(42, "C:\\staged-me-s.exe", "C:\\me-s.exe");
         assert!(script.contains("Wait-Process -Id 42"));
-        assert!(script.contains("Move-Item -LiteralPath 'C:\\staged-me.exe'"));
-        assert!(script.contains("Remove-Item -LiteralPath 'C:\\staged-me.exe'"));
+        assert!(script.contains("Move-Item -LiteralPath 'C:\\staged-me-s.exe'"));
+        assert!(script.contains("Remove-Item -LiteralPath 'C:\\staged-me-s.exe'"));
     }
 
     #[test]
     fn checksum_manifest_requires_one_exact_valid_entry() {
         let digest = "a".repeat(64);
         let manifest = format!(
-            "{}  me-linux-x86_64\n{} *me-windows-x86_64.exe\n",
+            "{}  me-s-linux-x86_64\n{} *me-s-windows-x86_64.exe\n",
             digest,
             "B".repeat(64)
         );
         assert_eq!(
-            checksum_for_asset(&manifest, "me-linux-x86_64").unwrap(),
+            checksum_for_asset(&manifest, "me-s-linux-x86_64").unwrap(),
             digest
         );
         assert_eq!(
-            checksum_for_asset(&manifest, "me-windows-x86_64.exe").unwrap(),
+            checksum_for_asset(&manifest, "me-s-windows-x86_64.exe").unwrap(),
             "b".repeat(64)
         );
         assert!(checksum_for_asset(&manifest, "me").is_err());
-        assert!(checksum_for_asset("bad  me-linux-x86_64", "me-linux-x86_64").is_err());
-        let duplicate = format!("{digest}  me\n{digest}  me\n");
-        assert!(checksum_for_asset(&duplicate, "me").is_err());
+        assert!(checksum_for_asset("bad  me-s-linux-x86_64", "me-s-linux-x86_64").is_err());
+        let duplicate = format!("{digest}  me-s\n{digest}  me-s\n");
+        assert!(checksum_for_asset(&duplicate, "me-s").is_err());
     }
 
     #[test]
     fn release_verification_hashes_the_exact_downloaded_bytes() {
         let directory = temporary_directory("checksum");
-        let asset = directory.join("me-linux-x86_64");
+        let asset = directory.join("me-s-linux-x86_64");
         let manifest = directory.join(CHECKSUM_ASSET);
         fs::write(&asset, b"abc").unwrap();
         fs::write(
             &manifest,
-            b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  me-linux-x86_64\n",
+            b"ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad  me-s-linux-x86_64\n",
         )
         .unwrap();
 
-        verify_release_asset(&asset, &manifest, "me-linux-x86_64").unwrap();
+        verify_release_asset(&asset, &manifest, "me-s-linux-x86_64").unwrap();
         fs::write(&asset, b"changed").unwrap();
-        assert!(verify_release_asset(&asset, &manifest, "me-linux-x86_64").is_err());
+        assert!(verify_release_asset(&asset, &manifest, "me-s-linux-x86_64").is_err());
         fs::write(&asset, b"").unwrap();
-        assert!(verify_release_asset(&asset, &manifest, "me-linux-x86_64").is_err());
+        assert!(verify_release_asset(&asset, &manifest, "me-s-linux-x86_64").is_err());
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -873,16 +873,19 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
 
         let directory = temporary_directory("install");
-        let downloaded = directory.join("downloaded-me");
-        let destination = directory.join("me");
+        let downloaded = directory.join("downloaded-me-s");
+        let destination = directory.join("me-s");
+        let original_me = directory.join("me");
         let configuration = directory.join("models.toml");
-        fs::write(&downloaded, b"new executable").unwrap();
-        fs::write(&destination, b"old executable").unwrap();
+        fs::write(&downloaded, b"new me-s executable").unwrap();
+        fs::write(&destination, b"old me-s executable").unwrap();
+        fs::write(&original_me, b"original me executable").unwrap();
         fs::write(&configuration, b"keep configuration").unwrap();
 
         atomic_install_unix(&downloaded, &destination).unwrap();
 
-        assert_eq!(fs::read(&destination).unwrap(), b"new executable");
+        assert_eq!(fs::read(&destination).unwrap(), b"new me-s executable");
+        assert_eq!(fs::read(&original_me).unwrap(), b"original me executable");
         assert_eq!(fs::read(&configuration).unwrap(), b"keep configuration");
         assert_eq!(
             fs::metadata(&destination).unwrap().permissions().mode() & 0o777,

@@ -299,7 +299,7 @@ fn is_version_command(arguments: &[String]) -> bool {
 }
 
 fn version_string() -> String {
-    format!("me {}", env!("CARGO_PKG_VERSION"))
+    format!("me-s {}", env!("CARGO_PKG_VERSION"))
 }
 
 fn run_user_interfaces(
@@ -938,7 +938,7 @@ fn reset_workspace(workspace: &Path) -> Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  me [--no-tui] [--webui-passkey <password>]\n  me init\n  me version\n  me update\n  me create\n  me workspace reset\n  me codex status\n  me codex login\n  me codex logout\n  me model list\n  me model select <name> [effort]\n  me model select-default <name>\n  me model test <name>\n  me model request <prompt>\n  me model export <password>\n  me model import <file> <password>\n  me orch [name]\n  me edb [detail]\n  me diag upload"
+        "usage:\n  me-s [--no-tui] [--webui-passkey <password>]\n  me-s init\n  me-s version\n  me-s update\n  me-s create\n  me-s workspace reset\n  me-s codex status\n  me-s codex login\n  me-s codex logout\n  me-s model list\n  me-s model select <name> [effort]\n  me-s model select-default <name>\n  me-s model test <name>\n  me-s model request <prompt>\n  me-s model export <password>\n  me-s model import <file> <password>\n  me-s orch [name]\n  me-s edb [detail]\n  me-s diag upload"
     );
 }
 
@@ -1019,7 +1019,7 @@ mod tests {
         assert!(!is_version_command(&["version".into(), "extra".into()]));
         assert_eq!(
             version_string(),
-            format!("me {}", env!("CARGO_PKG_VERSION"))
+            format!("me-s {}", env!("CARGO_PKG_VERSION"))
         );
     }
 

@@ -1,11 +1,16 @@
 [package]
 name = "me"
-version = "0.0.318"
+version = "0.0.319"
 edition = "2024"
+autobins = false
 description = "A lightweight local agent runtime optimized for long-running work"
 license = "MIT"
 readme = "README.md"
 repository = "https://github.com/LytsingStudio/me-rust"
+
+[[bin]]
+name = "me-s"
+path = "src/main.rs"
 
 [dependencies]
 argon2 = "0.5.3"

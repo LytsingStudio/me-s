@@ -71,7 +71,7 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         .args(arguments)
         .arg(script)
         .current_dir(&workspace)
-        .env("ME_TOOLBOX_HOST", env!("CARGO_BIN_EXE_me"))
+        .env("ME_TOOLBOX_HOST", env!("CARGO_BIN_EXE_me-s"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

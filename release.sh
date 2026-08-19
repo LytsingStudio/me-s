@@ -11,11 +11,11 @@ WINDOWS_TARGET="x86_64-pc-windows-gnu"
 HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' "$ROOT_DIR/Cargo.toml")"
 TAG="v$VERSION"
-MACOS_ARM64_NAME="me-macos-arm64"
-MACOS_X86_64_NAME="me-macos-x86_64"
-LINUX_ARM64_NAME="me-linux-arm64"
-LINUX_X86_64_NAME="me-linux-x86_64"
-WINDOWS_X86_64_NAME="me-windows-x86_64.exe"
+MACOS_ARM64_NAME="me-s-macos-arm64"
+MACOS_X86_64_NAME="me-s-macos-x86_64"
+LINUX_ARM64_NAME="me-s-linux-arm64"
+LINUX_X86_64_NAME="me-s-linux-x86_64"
+WINDOWS_X86_64_NAME="me-s-windows-x86_64.exe"
 
 case "$HOST_TARGET" in
     aarch64-apple-darwin|x86_64-apple-darwin) ;;
@@ -124,27 +124,27 @@ rustup target add \
 
 echo "building macOS $MACOS_ARM64_TARGET"
 cargo build --locked --release --target "$MACOS_ARM64_TARGET"
-cp "target/$MACOS_ARM64_TARGET/release/me" "$DIST_DIR/$MACOS_ARM64_NAME"
+cp "target/$MACOS_ARM64_TARGET/release/me-s" "$DIST_DIR/$MACOS_ARM64_NAME"
 chmod 755 "$DIST_DIR/$MACOS_ARM64_NAME"
 
 echo "building macOS $MACOS_X86_64_TARGET"
 cargo build --locked --release --target "$MACOS_X86_64_TARGET"
-cp "target/$MACOS_X86_64_TARGET/release/me" "$DIST_DIR/$MACOS_X86_64_NAME"
+cp "target/$MACOS_X86_64_TARGET/release/me-s" "$DIST_DIR/$MACOS_X86_64_NAME"
 chmod 755 "$DIST_DIR/$MACOS_X86_64_NAME"
 
 echo "building Linux $LINUX_ARM64_TARGET (glibc 2.17)"
 cargo zigbuild --locked --release --target "$LINUX_ARM64_TARGET.2.17"
-cp "target/$LINUX_ARM64_TARGET/release/me" "$DIST_DIR/$LINUX_ARM64_NAME"
+cp "target/$LINUX_ARM64_TARGET/release/me-s" "$DIST_DIR/$LINUX_ARM64_NAME"
 chmod 755 "$DIST_DIR/$LINUX_ARM64_NAME"
 
 echo "building Linux $LINUX_X86_64_TARGET (glibc 2.17)"
 cargo zigbuild --locked --release --target "$LINUX_X86_64_TARGET.2.17"
-cp "target/$LINUX_X86_64_TARGET/release/me" "$DIST_DIR/$LINUX_X86_64_NAME"
+cp "target/$LINUX_X86_64_TARGET/release/me-s" "$DIST_DIR/$LINUX_X86_64_NAME"
 chmod 755 "$DIST_DIR/$LINUX_X86_64_NAME"
 
 echo "building Windows $WINDOWS_TARGET"
 cargo build --locked --release --target "$WINDOWS_TARGET"
-cp "target/$WINDOWS_TARGET/release/me.exe" "$DIST_DIR/$WINDOWS_X86_64_NAME"
+cp "target/$WINDOWS_TARGET/release/me-s.exe" "$DIST_DIR/$WINDOWS_X86_64_NAME"
 chmod 755 "$DIST_DIR/$WINDOWS_X86_64_NAME"
 cp "$ROOT_DIR/install.sh" "$DIST_DIR/install.sh"
 cp "$ROOT_DIR/install.ps1" "$DIST_DIR/install.ps1"
@@ -218,7 +218,7 @@ ls -lh \
     "$DIST_DIR/SHA256SUMS"
 
 if [[ "$TAG_EXISTS" == 0 ]]; then
-    git tag -a "$TAG" -m "me $VERSION"
+    git tag -a "$TAG" -m "me-s $VERSION"
 fi
 git push origin "refs/tags/$TAG"
 
