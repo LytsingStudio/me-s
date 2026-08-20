@@ -36,7 +36,7 @@ const LOCAL_TOOLS: [&str; 10] = [
 
 const TOOLBOX_BRIEF: &str = r#"WorkMap is this Agent's private, persistent map for substantial work. It has three views:
 
-- Memory: durable Facts and explicit Agreements that remain useful across Objectives.
+- Memory: only globally applicable Facts and explicit Agreements expected to remain valid and useful after the current Objective ends and across future Objectives.
 - Current: at most one active Objective containing an ordered Plan list and every durable Note attached to those Plans.
 - History: closed Objectives, each retaining its complete Plans and Notes.
 
@@ -57,7 +57,7 @@ The mandatory first-message SetTitle call is the only ordering exception to this
 
 Plans are sequential stages of one Objective. Keep their scopes distinct and at comparable granularity. Internal actions, findings, decisions, validation, adjustments, blockers, and continuation points are Notes under the relevant Plan, not extra Plans. The route may be changed explicitly with ChangePlan, AddPlan, or terminal Plan states; never silently discard planned work.
 
-Memory is not work progress. Add only concise information likely to matter across Plans or Objectives. Facts require a basis: user_stated, observed, verified, or inferred. Agreements are explicit user requirements, preferences, or mutually established decisions; never label an Agent assumption as an Agreement. Do not duplicate existing active Memory. When an entry becomes false or an Agreement changes, use InvalidateMemory instead of rewriting history. A replacement atomically supersedes the old entry; no replacement retracts it.
+Memory is exclusively for concise, globally applicable information expected to remain valid and useful after the current Objective ends and across future Objectives. Relevance across multiple Plans within the current Objective is insufficient. Never store objective-specific requests or constraints, single-turn discussion, execution plans, progress, temporary decisions, local trade-offs, evidence, validation results, or completed-task status in Memory; keep them in Current's Objective, Plans, Notes, or the conversation. If unsure whether information is global and cross-Objective, do not call AddMemory. Facts require a basis: user_stated, observed, verified, or inferred. Agreements qualify only when the user explicitly establishes a requirement, preference, or mutually established decision as globally applicable beyond the current Objective; never label an Agent assumption as an Agreement. Do not duplicate existing active Memory. When an entry becomes false or an Agreement changes, use InvalidateMemory instead of rewriting history. A replacement must independently satisfy the same global cross-Objective eligibility rule; it atomically supersedes the old entry, while no replacement retracts it.
 
 ### While working
 
@@ -2302,10 +2302,10 @@ fn instructions(tool: &str) -> &'static str {
             "Cancel or supersede Current and atomically close every remaining open Plan."
         }
         "AddMemory" => {
-            "Add one durable Fact or explicit Agreement. Facts require basis; Agreements reject basis."
+            "Add one globally applicable Fact or explicit Agreement only when it is expected to remain valid and useful after the current Objective ends and across future Objectives. Current-Objective content is ineligible. Facts require basis; Agreements reject basis."
         }
         "InvalidateMemory" => {
-            "Retract active Memory, or atomically supersede it when replacement is supplied."
+            "Retract active Memory, or atomically supersede it with a replacement that independently satisfies the same global cross-Objective eligibility rule."
         }
         _ => "",
     }
@@ -2330,10 +2330,10 @@ fn route(tool: &str) -> &'static str {
         "AddPlan" => "Use when newly discovered future work belongs to Current's route.",
         "CloseObjective" => "Use only when the entire Objective is abandoned or replaced.",
         "AddMemory" => {
-            "Use only for concise durable context likely to remain useful across Plans or Objectives."
+            "Use only for globally applicable context expected to remain valid and useful after the current Objective ends and across future Objectives; if uncertain, do not use it."
         }
         "InvalidateMemory" => {
-            "Use when active Memory became false, obsolete, or was replaced by a newer fact or agreement."
+            "Use when active Memory became false or obsolete; a replacement is allowed only for a newer globally applicable fact or agreement, never for objective-specific content."
         }
         _ => "",
     }
@@ -2362,10 +2362,10 @@ fn examples(tool: &str) -> &'static str {
             r#"{"state":"superseded","reason":"The user replaced the overall requested outcome."}"#
         }
         "AddMemory" => {
-            r#"{"kind":"fact","basis":"verified","content":"The target environment uses a case-sensitive filesystem."}"#
+            r#"{"kind":"agreement","content":"Across all future Objectives, update the semantic specification whenever product behavior changes."}"#
         }
         "InvalidateMemory" => {
-            r#"{"memory_id":"memory-1234abcd","reason":"The user changed this agreement.","replacement":{"kind":"agreement","content":"Use the newly selected output format."}}"#
+            r#"{"memory_id":"memory-1234abcd","reason":"The user changed this global agreement.","replacement":{"kind":"agreement","content":"Across all future Objectives, use the newly selected output format."}}"#
         }
         _ => "{}",
     }
@@ -2491,6 +2491,77 @@ mod tests {
             .unwrap();
         assert!(add_note.route.contains("throughout execution"));
         assert!(add_note.route.contains("before proceeding to the next"));
+    }
+
+    #[test]
+    fn catalog_states_strict_global_cross_objective_memory_guidance() {
+        let (tools, brief) = catalog_parts();
+        for required in [
+            "after the current Objective ends and across future Objectives",
+            "Relevance across multiple Plans within the current Objective is insufficient",
+            "objective-specific requests or constraints",
+            "single-turn discussion",
+            "execution plans",
+            "progress",
+            "temporary decisions",
+            "local trade-offs",
+            "evidence",
+            "validation results",
+            "completed-task status",
+            "Current's Objective, Plans, Notes, or the conversation",
+            "If unsure whether information is global and cross-Objective, do not call AddMemory",
+            "globally applicable beyond the current Objective",
+            "A replacement must independently satisfy the same global cross-Objective eligibility rule",
+        ] {
+            assert!(
+                brief.1.contains(required),
+                "missing strict Memory guidance: {}",
+                required
+            );
+        }
+        assert!(
+            !brief
+                .1
+                .contains("likely to matter across Plans or Objectives")
+        );
+
+        let add_memory = tools
+            .iter()
+            .find(|tool| tool.full_name == ADD_MEMORY)
+            .unwrap();
+        assert!(
+            add_memory
+                .route
+                .contains("after the current Objective ends and across future Objectives")
+        );
+        assert!(add_memory.route.contains("if uncertain, do not use it"));
+        assert!(
+            add_memory
+                .instructions
+                .contains("Current-Objective content is ineligible")
+        );
+        assert!(add_memory.examples.contains("Across all future Objectives"));
+        assert!(!add_memory.route.contains("across Plans or Objectives"));
+
+        let invalidate_memory = tools
+            .iter()
+            .find(|tool| tool.full_name == INVALIDATE_MEMORY)
+            .unwrap();
+        assert!(
+            invalidate_memory.instructions.contains(
+                "independently satisfies the same global cross-Objective eligibility rule"
+            )
+        );
+        assert!(
+            invalidate_memory
+                .route
+                .contains("never for objective-specific content")
+        );
+        assert!(
+            invalidate_memory
+                .examples
+                .contains("Across all future Objectives")
+        );
     }
 
     #[test]
@@ -2739,19 +2810,19 @@ mod tests {
             &mut edb,
             prompt,
             ADD_MEMORY,
-            r#"{"kind":"agreement","content":"Keep the original interface."}"#,
+            r#"{"kind":"agreement","content":"Across all future Objectives, keep the original interface."}"#,
         );
         let id = added["memory"]["agreements"][0]["id"]
             .as_str()
             .unwrap()
             .to_owned();
-        let rewind_target = edb.append_user_prompt("temporary replacement").unwrap();
+        let rewind_target = edb.append_user_prompt("global replacement").unwrap();
         execute_call(
             &mut edb,
             rewind_target,
             INVALIDATE_MEMORY,
             &format!(
-                r#"{{"memory_id":"{id}","reason":"temporary change","replacement":{{"kind":"agreement","content":"Use the replacement interface."}}}}"#
+                r#"{{"memory_id":"{id}","reason":"The user changed this global agreement.","replacement":{{"kind":"agreement","content":"Across all future Objectives, use the replacement interface."}}}}"#
             ),
         );
         assert_eq!(
@@ -2887,7 +2958,7 @@ mod tests {
             &mut edb,
             prompt,
             ADD_MEMORY,
-            r#"{"kind":"agreement","content":"Preserve the public interface."}"#,
+            r#"{"kind":"agreement","content":"Across all future Objectives, preserve the public interface."}"#,
         );
         let memory_id = remembered["memory"]["agreements"][0]["id"]
             .as_str()
@@ -2905,7 +2976,7 @@ mod tests {
             branch,
             INVALIDATE_MEMORY,
             &format!(
-                r#"{{"memory_id":"{memory_id}","reason":"temporary replacement","replacement":{{"kind":"agreement","content":"Use a temporary interface."}}}}"#
+                r#"{{"memory_id":"{memory_id}","reason":"The user changed this global agreement.","replacement":{{"kind":"agreement","content":"Across all future Objectives, use the replacement interface."}}}}"#
             ),
         );
         let mutation = edb
