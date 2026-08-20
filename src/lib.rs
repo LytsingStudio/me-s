@@ -22,7 +22,7 @@ mod turn_history;
 pub mod ui_backend;
 pub mod updater;
 pub mod webui;
-pub mod workflow;
 pub mod workmap;
+pub mod workspace;
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;

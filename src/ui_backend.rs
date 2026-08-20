@@ -9,7 +9,7 @@ use crate::{
     config::UNSET_EFFORT,
     event::{AgentKind, EdbMutation, Event, EventId},
     terminal::{TerminalFrame, TerminalSessionPreview},
-    workflow::{AgentId, Workflow, WorkflowHandle},
+    workspace::{AgentId, Workspace, WorkspaceHandle},
 };
 
 pub const CHAT_HIDDEN_TOOL_NAMES: &[&str] = &[crate::agent_title::TOOL_NAME];
@@ -216,9 +216,9 @@ pub trait UiCommandGateway: Send + Sync {
 }
 
 #[derive(Clone)]
-pub struct WorkflowUiBackend {
-    workflow: Arc<Mutex<Workflow>>,
-    handle: WorkflowHandle,
+pub struct WorkspaceUiBackend {
+    workspace: Arc<Mutex<Workspace>>,
+    handle: WorkspaceHandle,
     environment: Arc<UiEnvironment>,
     models: Arc<[UiModelOption]>,
     orchestrators: Arc<[String]>,
@@ -226,19 +226,19 @@ pub struct WorkflowUiBackend {
 }
 
 #[derive(Clone)]
-pub struct WorkflowUiCommandGateway {
-    handle: WorkflowHandle,
+pub struct WorkspaceUiCommandGateway {
+    handle: WorkspaceHandle,
 }
 
-pub fn workflow_ui_ports(workflow: Workflow) -> (WorkflowUiBackend, WorkflowUiCommandGateway) {
-    let handle = workflow.handle();
+pub fn workspace_ui_ports(workspace: Workspace) -> (WorkspaceUiBackend, WorkspaceUiCommandGateway) {
+    let handle = workspace.handle();
     let environment = Arc::new(UiEnvironment {
-        workspace: workflow.workspace_path().to_owned(),
+        workspace: workspace.workspace_path().to_owned(),
         os: std::env::consts::OS.to_owned(),
         arch: std::env::consts::ARCH.to_owned(),
     });
     let models =
-        workflow
+        workspace
             .model_configs()
             .iter()
             .filter(|model| !crate::codex_oauth::is_legacy_model_name(&model.name))
@@ -266,56 +266,56 @@ pub fn workflow_ui_ports(workflow: Workflow) -> (WorkflowUiBackend, WorkflowUiCo
         .map(|name| (*name).to_owned())
         .collect::<Vec<_>>()
         .into();
-    let default_orchestrator = workflow.default_orchestrator().to_owned();
+    let default_orchestrator = workspace.default_orchestrator().to_owned();
     (
-        WorkflowUiBackend {
-            workflow: Arc::new(Mutex::new(workflow)),
+        WorkspaceUiBackend {
+            workspace: Arc::new(Mutex::new(workspace)),
             handle: handle.clone(),
             environment,
             models,
             orchestrators,
             default_orchestrator,
         },
-        WorkflowUiCommandGateway { handle },
+        WorkspaceUiCommandGateway { handle },
     )
 }
 
-impl UiBackend for WorkflowUiBackend {
+impl UiBackend for WorkspaceUiBackend {
     fn snapshot(&self) -> Result<UiSnapshot> {
-        let mut workflow = self
-            .workflow
+        let mut workspace = self
+            .workspace
             .lock()
-            .map_err(|_| "UI Workflow snapshot lock is poisoned")?;
-        workflow.poll()?;
-        let agents = workflow
+            .map_err(|_| "UI Workspace snapshot lock is poisoned")?;
+        workspace.poll()?;
+        let agents = workspace
             .visible_agent_ids()
             .into_iter()
             .map(|id| {
-                let events = workflow.edb_events_snapshot(&id)?;
+                let events = workspace.edb_events_snapshot(&id)?;
                 let definition = crate::event::agent_kind_definition(&events)?;
                 Ok(UiAgentSnapshot {
-                    title: workflow.agent_title(&id)?.map(str::to_owned),
+                    title: workspace.agent_title(&id)?.map(str::to_owned),
                     kind: definition.kind,
                     parent_agent_id: definition
                         .parent_agent_id
                         .as_deref()
                         .map(AgentId::new)
                         .transpose()?,
-                    orchestrator_name: workflow.orchestrator_name(&id)?.to_owned(),
-                    edb_path: workflow.edb_path(&id),
-                    edb_size_bytes: workflow.edb_size_bytes(&id)?,
-                    mutation_revision: workflow.edb_mutation_revision(&id)?,
-                    last_mutation: workflow.last_edb_mutation(&id)?.cloned(),
-                    prompt_submission_revision: workflow.prompt_submission_revision(&id)?,
-                    input_draft: workflow.input_draft(&id)?.content.clone(),
-                    input_draft_revision: workflow.input_draft(&id)?.revision,
+                    orchestrator_name: workspace.orchestrator_name(&id)?.to_owned(),
+                    edb_path: workspace.edb_path(&id),
+                    edb_size_bytes: workspace.edb_size_bytes(&id)?,
+                    mutation_revision: workspace.edb_mutation_revision(&id)?,
+                    last_mutation: workspace.last_edb_mutation(&id)?.cloned(),
+                    prompt_submission_revision: workspace.prompt_submission_revision(&id)?,
+                    input_draft: workspace.input_draft(&id)?.content.clone(),
+                    input_draft_revision: workspace.input_draft(&id)?.revision,
                     events,
                     id,
                 })
             })
             .collect::<Result<Vec<_>>>()?;
         Ok(UiSnapshot {
-            revision: workflow.revision(),
+            revision: workspace.revision(),
             environment: Arc::clone(&self.environment),
             agents,
             models: Arc::clone(&self.models),
@@ -353,7 +353,7 @@ impl UiBackend for WorkflowUiBackend {
     }
 }
 
-impl UiCommandGateway for WorkflowUiCommandGateway {
+impl UiCommandGateway for WorkspaceUiCommandGateway {
     fn submit(&self, command: UiCommand) -> Result<UiCommandReceipt> {
         match command {
             UiCommand::UpdateInputDraft {
@@ -514,8 +514,8 @@ mod tests {
         let directory = workspace();
         let mut manager_config = config();
         manager_config.orchestrator = "manager-agent".into();
-        let workflow = Workflow::open(&directory, manager_config, vec![model()]).unwrap();
-        let (backend, commands) = workflow_ui_ports(workflow);
+        let workspace = Workspace::open(&directory, manager_config, vec![model()]).unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
         let manager = match commands
             .submit(UiCommand::AddAgent {
                 orchestrator: "manager-agent".into(),
@@ -540,8 +540,8 @@ mod tests {
     #[test]
     fn multiple_ui_readers_share_authoritative_state_without_consuming_it() {
         let directory = workspace();
-        let workflow = Workflow::open(&directory, config(), vec![model()]).unwrap();
-        let (backend, commands) = workflow_ui_ports(workflow);
+        let workspace = Workspace::open(&directory, config(), vec![model()]).unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
         let reader_a = backend.clone();
         let reader_b = backend.clone();
 

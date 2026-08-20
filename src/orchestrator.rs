@@ -38,8 +38,8 @@ use crate::{
         WORKSPACE_TEMP_DIRECTORY, disabled_tool_full_name,
     },
     turn_history,
-    workflow::{AgentDefinition, AgentId, WorkflowHandle},
     workmap::{self, WorkMapProjection},
+    workspace::{AgentDefinition, AgentId, WorkspaceHandle},
 };
 
 pub const AVAILABLE_ORCHESTRATORS: &[&str] = &["main-agent", "manager-agent", "chatbot"];
@@ -603,7 +603,7 @@ pub trait Orchestrator: Send {
         Ok(())
     }
 
-    fn configure_workflow(&mut self, _workflow: WorkflowHandle, _agent_id: AgentId) -> Result<()> {
+    fn attach_workspace(&mut self, _workspace: WorkspaceHandle, _agent_id: AgentId) -> Result<()> {
         Ok(())
     }
 
@@ -1675,11 +1675,11 @@ impl Orchestrator for MainAgent {
         Ok(())
     }
 
-    fn configure_workflow(&mut self, workflow: WorkflowHandle, agent_id: AgentId) -> Result<()> {
-        self.workspace = workflow.workspace_path().to_owned();
+    fn attach_workspace(&mut self, workspace: WorkspaceHandle, agent_id: AgentId) -> Result<()> {
+        self.workspace = workspace.workspace_path().to_owned();
         self.environment_prompt =
             build_runtime_environment_prompt(&self.workspace, agent_id.as_str());
-        self.agent_toolbox.configure(workflow, agent_id);
+        self.agent_toolbox.configure(workspace, agent_id);
         Ok(())
     }
 

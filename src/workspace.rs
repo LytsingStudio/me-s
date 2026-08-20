@@ -95,8 +95,8 @@ struct AgentEntry {
     runtime: Arc<Mutex<AgentRuntime>>,
 }
 
-struct WorkflowShared {
-    workspace: PathBuf,
+struct WorkspaceShared {
+    root: PathBuf,
     config: WorkspaceConfig,
     models: Vec<ModelConfig>,
     agent_creation: Mutex<()>,
@@ -105,24 +105,24 @@ struct WorkflowShared {
 }
 
 #[derive(Clone)]
-pub struct WorkflowHandle {
-    shared: Arc<WorkflowShared>,
+pub struct WorkspaceHandle {
+    shared: Arc<WorkspaceShared>,
 }
 
-pub struct Workflow {
-    handle: WorkflowHandle,
+pub struct Workspace {
+    handle: WorkspaceHandle,
     agent_order: Vec<AgentId>,
-    snapshots: BTreeMap<AgentId, WorkflowAgentSnapshot>,
+    snapshots: BTreeMap<AgentId, WorkspaceAgentSnapshot>,
 }
 
-impl Drop for Workflow {
+impl Drop for Workspace {
     fn drop(&mut self) {
         self.handle.shutdown_all();
     }
 }
 
 #[derive(Clone)]
-struct WorkflowAgentSnapshot {
+struct WorkspaceAgentSnapshot {
     title: Option<String>,
     events: Arc<[Event]>,
     edb_size_bytes: u64,
@@ -134,9 +134,9 @@ struct WorkflowAgentSnapshot {
     agent_kind: AgentKind,
 }
 
-impl Workflow {
+impl Workspace {
     pub fn open(
-        workspace: impl Into<PathBuf>,
+        root: impl Into<PathBuf>,
         config: WorkspaceConfig,
         models: Vec<ModelConfig>,
     ) -> Result<Self> {
@@ -147,11 +147,11 @@ impl Workflow {
             )
             .into());
         }
-        let workspace = workspace.into();
-        crate::toolbox::ensure_default_toolboxes(&workspace)?;
-        let handle = WorkflowHandle {
-            shared: Arc::new(WorkflowShared {
-                workspace: workspace.clone(),
+        let root = root.into();
+        crate::toolbox::ensure_default_toolboxes(&root)?;
+        let handle = WorkspaceHandle {
+            shared: Arc::new(WorkspaceShared {
+                root: root.clone(),
                 config,
                 models,
                 agent_creation: Mutex::new(()),
@@ -159,7 +159,7 @@ impl Workflow {
                 revision: AtomicU64::new(0),
             }),
         };
-        let mut paths = edb_paths(&workspace)?;
+        let mut paths = edb_paths(&root)?;
         paths.sort_by_key(|path| {
             let name = path.file_stem().unwrap_or_default().to_string_lossy();
             (name != "main", name.into_owned())
@@ -189,20 +189,20 @@ impl Workflow {
             return Err(error);
         }
         handle.shared.revision.store(0, Ordering::Release);
-        let mut workflow = Self {
+        let mut workspace = Self {
             handle,
             agent_order: Vec::new(),
             snapshots: BTreeMap::new(),
         };
-        workflow.refresh_snapshots()?;
-        Ok(workflow)
+        workspace.refresh_snapshots()?;
+        Ok(workspace)
     }
 
     pub fn revision(&self) -> u64 {
         self.handle.revision()
     }
 
-    pub(crate) fn handle(&self) -> WorkflowHandle {
+    pub(crate) fn handle(&self) -> WorkspaceHandle {
         self.handle.clone()
     }
 
@@ -211,7 +211,7 @@ impl Workflow {
     }
 
     pub(crate) fn workspace_path(&self) -> &Path {
-        &self.handle.shared.workspace
+        &self.handle.shared.root
     }
 
     pub(crate) fn default_orchestrator(&self) -> &str {
@@ -437,7 +437,7 @@ impl Workflow {
                         .events,
                 )
             };
-            let next = WorkflowAgentSnapshot {
+            let next = WorkspaceAgentSnapshot {
                 title: agent_title::current_title(&events).map(str::to_owned),
                 agent_kind: agent_kind_definition(&events)?.kind,
                 events,
@@ -456,7 +456,7 @@ impl Workflow {
     }
 }
 
-impl WorkflowHandle {
+impl WorkspaceHandle {
     fn shutdown_all(&self) {
         let entries = self
             .shared
@@ -479,7 +479,7 @@ impl WorkflowHandle {
         self.shared
             .agents
             .lock()
-            .map_err(|_| "Workflow Agent registry lock is poisoned".into())
+            .map_err(|_| "Workspace Agent registry lock is poisoned".into())
     }
 
     fn runtime(&self, id: &AgentId) -> Result<Arc<Mutex<AgentRuntime>>> {
@@ -579,19 +579,16 @@ impl WorkflowHandle {
     }
 
     pub(crate) fn edb_path(&self, id: &AgentId) -> PathBuf {
-        self.shared
-            .workspace
-            .join(".me/edb")
-            .join(format!("{id}.edb"))
+        self.shared.root.join(".me/edb").join(format!("{id}.edb"))
     }
 
     pub(crate) fn workspace_path(&self) -> &Path {
-        &self.shared.workspace
+        &self.shared.root
     }
 
     pub(crate) fn temporary_directory(&self, id: &AgentId) -> PathBuf {
         self.shared
-            .workspace
+            .root
             .join(WORKSPACE_TEMP_DIRECTORY)
             .join(id.as_str())
     }
@@ -744,7 +741,7 @@ impl WorkflowHandle {
             .shared
             .agent_creation
             .lock()
-            .map_err(|_| "Workflow Agent creation lock is poisoned")?;
+            .map_err(|_| "Workspace Agent creation lock is poisoned")?;
         let id = self.next_agent_id()?;
         if orchestrator == "manager-agent" {
             let path = self.edb_path(&id);
@@ -783,7 +780,7 @@ impl WorkflowHandle {
             .shared
             .agent_creation
             .lock()
-            .map_err(|_| "Workflow Agent creation lock is poisoned")?;
+            .map_err(|_| "Workspace Agent creation lock is poisoned")?;
         let source_events = self.events(source)?;
         if agent_kind_definition(&source_events)?.kind == AgentKind::SubAgent {
             return Err(format!("sub-Agent {source} history is read-only").into());
@@ -897,7 +894,7 @@ impl WorkflowHandle {
             .shared
             .agent_creation
             .lock()
-            .map_err(|_| "Workflow Agent creation lock is poisoned")?;
+            .map_err(|_| "Workspace Agent creation lock is poisoned")?;
         let id = self.next_agent_id()?;
         self.add_agent_with_definition(
             id.clone(),
@@ -1023,7 +1020,7 @@ impl WorkflowHandle {
             .shared
             .agent_creation
             .lock()
-            .map_err(|_| "Workflow Agent creation lock is poisoned")?;
+            .map_err(|_| "Workspace Agent creation lock is poisoned")?;
         let managers = self
             .agent_ids()?
             .into_iter()
@@ -1220,13 +1217,13 @@ fn remove_incomplete_edb(path: &Path, original: &dyn std::fmt::Display) -> Resul
 }
 
 fn remove_incomplete_agent(
-    workflow: &WorkflowHandle,
+    workspace: &WorkspaceHandle,
     id: &AgentId,
     edb_path: &Path,
     original: &dyn std::fmt::Display,
 ) -> Result<()> {
     let edb_cleanup = remove_incomplete_edb(edb_path, original);
-    let temporary_cleanup = remove_agent_temporary_directory(&workflow.temporary_directory(id));
+    let temporary_cleanup = remove_agent_temporary_directory(&workspace.temporary_directory(id));
     edb_cleanup.and(temporary_cleanup)
 }
 
@@ -1259,18 +1256,18 @@ fn remove_agent_temporary_directory(path: &Path) -> Result<()> {
 }
 
 fn build_agent_runtime(
-    workflow: &WorkflowHandle,
+    workspace: &WorkspaceHandle,
     id: &AgentId,
     path: &Path,
     requested_definition: Option<AgentDefinition>,
     requested_model: Option<String>,
     requested_effort: Option<String>,
 ) -> Result<AgentRuntime> {
-    let temporary_directory = workflow.temporary_directory(id);
+    let temporary_directory = workspace.temporary_directory(id);
     let temporary_directory_existed = temporary_directory.exists();
     create_private_directory(&temporary_directory)?;
     let result = build_agent_runtime_inner(
-        workflow,
+        workspace,
         id,
         path,
         requested_definition,
@@ -1284,7 +1281,7 @@ fn build_agent_runtime(
 }
 
 fn build_agent_runtime_inner(
-    workflow: &WorkflowHandle,
+    workspace: &WorkspaceHandle,
     id: &AgentId,
     path: &Path,
     requested_definition: Option<AgentDefinition>,
@@ -1306,15 +1303,15 @@ fn build_agent_runtime_inner(
     let bootstrap_model = requested_model
         .as_deref()
         .or_else(|| latest_model(&edb))
-        .unwrap_or(&workflow.shared.config.model);
-    let mut models = ModelRuntime::new(workflow.shared.models.clone(), bootstrap_model)?;
-    let effort = requested_effort.unwrap_or_else(|| workflow.shared.config.effort.clone());
+        .unwrap_or(&workspace.shared.config.model);
+    let mut models = ModelRuntime::new(workspace.shared.models.clone(), bootstrap_model)?;
+    let effort = requested_effort.unwrap_or_else(|| workspace.shared.config.effort.clone());
     let orchestrator_name = definition.orchestrator.clone();
     let mut orchestrator = orchestrator::create(&orchestrator_name, Some(effort))?;
     orchestrator.configure_agent(definition)?;
     #[cfg(not(test))]
-    orchestrator.configure_workspace(&workflow.shared.workspace)?;
-    orchestrator.configure_workflow(workflow.clone(), id.clone())?;
+    orchestrator.configure_workspace(&workspace.shared.root)?;
+    orchestrator.attach_workspace(workspace.clone(), id.clone())?;
     orchestrator
         .supports_edb(&edb)
         .map_err(|reason| format!("orchestrator {}: {reason}", orchestrator_name))?;
@@ -1403,11 +1400,11 @@ mod tests {
     }
 
     #[test]
-    fn workflow_discovers_adds_and_permanently_deletes_idle_agents() {
+    fn workspace_discovers_adds_and_permanently_deletes_idle_agents() {
         let mut suffix = [0_u8; 8];
         getrandom::fill(&mut suffix).unwrap();
         let directory = std::env::temp_dir().join(format!(
-            "me-workflow-{}-{}",
+            "me-workspace-{}-{}",
             std::process::id(),
             u64::from_le_bytes(suffix)
         ));
@@ -1415,36 +1412,38 @@ mod tests {
         EventDataBase::open(&directory.join(".me/edb/main.edb")).unwrap();
         EventDataBase::open(&directory.join(".me/edb/agent-existing.edb")).unwrap();
 
-        let mut workflow =
-            Workflow::open(&directory, config(), vec![model()]).expect("open workflow");
+        let mut workspace =
+            Workspace::open(&directory, config(), vec![model()]).expect("open workspace");
         let main_temporary = directory.join(".me/tmp/main");
         let existing_temporary = directory.join(".me/tmp/agent-existing");
         assert!(main_temporary.is_dir());
         assert!(existing_temporary.is_dir());
         assert_ne!(main_temporary, existing_temporary);
         assert_eq!(
-            workflow.agent_ids(),
+            workspace.agent_ids(),
             vec![
                 AgentId::new("main").unwrap(),
                 AgentId::new("agent-existing").unwrap()
             ]
         );
         assert_eq!(
-            workflow.agent_kind(&AgentId::new("main").unwrap()).unwrap(),
+            workspace
+                .agent_kind(&AgentId::new("main").unwrap())
+                .unwrap(),
             AgentKind::Primary
         );
-        assert_eq!(workflow.revision(), 0);
-        let added = workflow.create_agent().unwrap();
+        assert_eq!(workspace.revision(), 0);
+        let added = workspace.create_agent().unwrap();
         let added_temporary = directory.join(".me/tmp").join(added.as_str());
         assert!(added_temporary.is_dir());
         fs::write(added_temporary.join("scratch.txt"), "temporary").unwrap();
         assert!(matches!(
-            workflow.edb_events(&added).unwrap().first(),
+            workspace.edb_events(&added).unwrap().first(),
             Some(Event::AgentKindDef(_))
         ));
-        let path = workflow.edb_path(&added);
-        workflow.delete_agent(&added).unwrap();
-        assert!(!workflow.contains(&added));
+        let path = workspace.edb_path(&added);
+        workspace.delete_agent(&added).unwrap();
+        assert!(!workspace.contains(&added));
         assert!(!path.exists());
         assert!(!added_temporary.exists());
         assert!(main_temporary.is_dir());
@@ -1457,7 +1456,7 @@ mod tests {
         let mut suffix = [0_u8; 8];
         getrandom::fill(&mut suffix).unwrap();
         let directory = std::env::temp_dir().join(format!(
-            "me-workflow-orchestrators-{}-{}",
+            "me-workspace-orchestrators-{}-{}",
             std::process::id(),
             u64::from_le_bytes(suffix)
         ));
@@ -1465,20 +1464,20 @@ mod tests {
         EventDataBase::open(&directory.join(".me/edb/main.edb")).unwrap();
 
         let (main_agent, chatbot, manager, worker) = {
-            let mut workflow = Workflow::open(&directory, config(), vec![model()]).unwrap();
+            let mut workspace = Workspace::open(&directory, config(), vec![model()]).unwrap();
             let primary = AgentId::new("main").unwrap();
-            assert_eq!(workflow.orchestrator_name(&primary).unwrap(), "chatbot");
+            assert_eq!(workspace.orchestrator_name(&primary).unwrap(), "chatbot");
 
-            let main_agent = workflow
+            let main_agent = workspace
                 .create_agent_with_orchestrator("main-agent")
                 .unwrap();
-            let chatbot = workflow.create_agent_with_orchestrator("chatbot").unwrap();
-            let manager = workflow
+            let chatbot = workspace.create_agent_with_orchestrator("chatbot").unwrap();
+            let manager = workspace
                 .create_agent_with_orchestrator("manager-agent")
                 .unwrap();
-            let worker = workflow.handle.child_agent_ids(&manager).unwrap()[0].clone();
+            let worker = workspace.handle.child_agent_ids(&manager).unwrap()[0].clone();
             assert!(
-                workflow
+                workspace
                     .create_agent_with_orchestrator("worker-agent")
                     .is_err()
             );
@@ -1489,9 +1488,9 @@ mod tests {
                 (&manager, "manager-agent"),
                 (&worker, "worker-agent"),
             ] {
-                assert_eq!(workflow.orchestrator_name(id).unwrap(), expected);
+                assert_eq!(workspace.orchestrator_name(id).unwrap(), expected);
                 assert_eq!(
-                    agent_kind_definition(workflow.edb_events(id).unwrap())
+                    agent_kind_definition(workspace.edb_events(id).unwrap())
                         .unwrap()
                         .orchestrator,
                     expected
@@ -1504,35 +1503,38 @@ mod tests {
             orchestrator: "main-agent".into(),
             ..config()
         };
-        let mut workflow = Workflow::open(&directory, changed_default, vec![model()]).unwrap();
+        let mut workspace = Workspace::open(&directory, changed_default, vec![model()]).unwrap();
         assert_eq!(
-            workflow
+            workspace
                 .orchestrator_name(&AgentId::new("main").unwrap())
                 .unwrap(),
             "chatbot"
         );
         assert_eq!(
-            workflow.orchestrator_name(&main_agent).unwrap(),
+            workspace.orchestrator_name(&main_agent).unwrap(),
             "main-agent"
         );
-        assert_eq!(workflow.orchestrator_name(&chatbot).unwrap(), "chatbot");
+        assert_eq!(workspace.orchestrator_name(&chatbot).unwrap(), "chatbot");
         assert_eq!(
-            workflow.orchestrator_name(&manager).unwrap(),
+            workspace.orchestrator_name(&manager).unwrap(),
             "manager-agent"
         );
-        assert_eq!(workflow.orchestrator_name(&worker).unwrap(), "worker-agent");
         assert_eq!(
-            workflow.handle.child_agent_ids(&manager).unwrap(),
+            workspace.orchestrator_name(&worker).unwrap(),
+            "worker-agent"
+        );
+        assert_eq!(
+            workspace.handle.child_agent_ids(&manager).unwrap(),
             vec![worker]
         );
 
-        let new_default_session = workflow.create_agent().unwrap();
+        let new_default_session = workspace.create_agent().unwrap();
         assert_eq!(
-            workflow.orchestrator_name(&new_default_session).unwrap(),
+            workspace.orchestrator_name(&new_default_session).unwrap(),
             "main-agent"
         );
 
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1549,35 +1551,38 @@ mod tests {
         EventDataBase::open(&directory.join(".me/edb/main.edb")).unwrap();
 
         let worker = {
-            let workflow = Workflow::open(&directory, manager_config(), vec![model()]).unwrap();
+            let workspace = Workspace::open(&directory, manager_config(), vec![model()]).unwrap();
             let main = AgentId::new("main").unwrap();
-            assert_eq!(workflow.orchestrator_name(&main).unwrap(), "manager-agent");
-            let children = workflow.handle.child_agent_ids(&main).unwrap();
+            assert_eq!(workspace.orchestrator_name(&main).unwrap(), "manager-agent");
+            let children = workspace.handle.child_agent_ids(&main).unwrap();
             assert_eq!(children.len(), 1);
             let worker = children[0].clone();
             assert!(directory.join(".me/tmp/main").is_dir());
             assert!(directory.join(".me/tmp").join(worker.as_str()).is_dir());
-            assert_eq!(workflow.orchestrator_name(&worker).unwrap(), "worker-agent");
+            assert_eq!(
+                workspace.orchestrator_name(&worker).unwrap(),
+                "worker-agent"
+            );
             assert!(
-                !workflow
+                !workspace
                     .edb_events(&worker)
                     .unwrap()
                     .iter()
                     .any(|event| matches!(event, Event::UserPrompt(_)))
             );
-            assert!(workflow.handle.delete_agent(&worker, false).is_err());
+            assert!(workspace.handle.delete_agent(&worker, false).is_err());
             worker
         };
 
-        let mut workflow = Workflow::open(&directory, manager_config(), vec![model()]).unwrap();
+        let mut workspace = Workspace::open(&directory, manager_config(), vec![model()]).unwrap();
         let main = AgentId::new("main").unwrap();
         assert_eq!(
-            workflow.handle.child_agent_ids(&main).unwrap(),
+            workspace.handle.child_agent_ids(&main).unwrap(),
             vec![worker.clone()]
         );
-        assert_eq!(workflow.agent_ids().len(), 2);
-        let added = workflow.create_agent().unwrap();
-        let added_worker = workflow.handle.child_agent_ids(&added).unwrap()[0].clone();
+        assert_eq!(workspace.agent_ids().len(), 2);
+        let added = workspace.create_agent().unwrap();
+        let added_worker = workspace.handle.child_agent_ids(&added).unwrap()[0].clone();
         assert!(directory.join(".me/tmp").join(added.as_str()).is_dir());
         assert!(
             directory
@@ -1585,8 +1590,8 @@ mod tests {
                 .join(added_worker.as_str())
                 .is_dir()
         );
-        assert_eq!(workflow.agent_ids().len(), 4);
-        workflow.delete_agent(&added).unwrap();
+        assert_eq!(workspace.agent_ids().len(), 4);
+        workspace.delete_agent(&added).unwrap();
         assert!(!directory.join(".me/tmp").join(added.as_str()).exists());
         assert!(
             !directory
@@ -1594,8 +1599,8 @@ mod tests {
                 .join(added_worker.as_str())
                 .exists()
         );
-        workflow.delete_agent(&main).unwrap();
-        assert!(workflow.agent_ids().is_empty());
+        workspace.delete_agent(&main).unwrap();
+        assert!(workspace.agent_ids().is_empty());
         assert!(!directory.join(".me/edb/main.edb").exists());
         assert!(!directory.join(".me/tmp/main").exists());
         assert!(!directory.join(".me/tmp").join(worker.as_str()).exists());
@@ -1625,22 +1630,22 @@ mod tests {
             model: "first".into(),
             ..manager_config()
         };
-        let mut workflow = Workflow::open(&directory, config, vec![first, second]).unwrap();
+        let mut workspace = Workspace::open(&directory, config, vec![first, second]).unwrap();
         let manager = AgentId::new("main").unwrap();
-        let worker = workflow.handle.child_agent_ids(&manager).unwrap()[0].clone();
+        let worker = workspace.handle.child_agent_ids(&manager).unwrap()[0].clone();
 
-        workflow
+        workspace
             .submit_model_change(&manager, "second".into())
             .unwrap();
-        workflow
+        workspace
             .submit_effort_change(&manager, "high".into())
             .unwrap();
 
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            workflow.poll().unwrap();
-            let manager_events = workflow.edb_events(&manager).unwrap();
-            let worker_events = workflow.edb_events(&worker).unwrap();
+            workspace.poll().unwrap();
+            let manager_events = workspace.edb_events(&manager).unwrap();
+            let worker_events = workspace.edb_events(&worker).unwrap();
             let event_model_is = |events: &[Event], expected: &str| {
                 events.iter().rev().find_map(|event| match event {
                     Event::ModelChanged(change) => Some(change.model == expected),
@@ -1667,17 +1672,17 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        workflow
+        workspace
             .submit_model_change(&worker, "second".into())
             .unwrap();
-        workflow
+        workspace
             .submit_effort_change(&worker, "high".into())
             .unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
-            workflow.poll().unwrap();
-            let manager_events = workflow.edb_events(&manager).unwrap();
-            let worker_events = workflow.edb_events(&worker).unwrap();
+            workspace.poll().unwrap();
+            let manager_events = workspace.edb_events(&manager).unwrap();
+            let worker_events = workspace.edb_events(&worker).unwrap();
             let event_model_is = |events: &[Event], expected: &str| {
                 events.iter().rev().find_map(|event| match event {
                     Event::ModelChanged(change) => Some(change.model == expected),
@@ -1704,7 +1709,7 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
 
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1740,45 +1745,45 @@ mod tests {
                 .unwrap()
         };
 
-        let workflow = Workflow::open(&directory, manager_config(), vec![model()]).unwrap();
+        let workspace = Workspace::open(&directory, manager_config(), vec![model()]).unwrap();
         let main = AgentId::new("main").unwrap();
-        let original_worker = workflow.handle.child_agent_ids(&main).unwrap()[0].clone();
-        let cloned = workflow
+        let original_worker = workspace.handle.child_agent_ids(&main).unwrap()[0].clone();
+        let cloned = workspace
             .handle
             .clone_agent_through_final_answer(&main, final_answer)
             .unwrap();
-        let cloned_children = workflow.handle.child_agent_ids(&cloned).unwrap();
+        let cloned_children = workspace.handle.child_agent_ids(&cloned).unwrap();
         assert_eq!(cloned_children.len(), 1);
         assert_ne!(cloned_children[0], original_worker);
         assert_eq!(
-            workflow.handle.orchestrator_name(&cloned).unwrap(),
+            workspace.handle.orchestrator_name(&cloned).unwrap(),
             "manager-agent"
         );
         assert_eq!(
-            workflow
+            workspace
                 .handle
                 .orchestrator_name(&cloned_children[0])
                 .unwrap(),
             "worker-agent"
         );
         assert!(
-            !workflow
+            !workspace
                 .handle
                 .events(&cloned_children[0])
                 .unwrap()
                 .iter()
                 .any(|event| matches!(event, Event::UserPrompt(_)))
         );
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn workflow_rejects_a_persisted_sub_agent_with_a_missing_parent() {
+    fn workspace_rejects_a_persisted_sub_agent_with_a_missing_parent() {
         let mut suffix = [0_u8; 8];
         getrandom::fill(&mut suffix).unwrap();
         let directory = std::env::temp_dir().join(format!(
-            "me-workflow-orphan-{}-{}",
+            "me-workspace-orphan-{}-{}",
             std::process::id(),
             u64::from_le_bytes(suffix)
         ));
@@ -1797,7 +1802,7 @@ mod tests {
         orphan.append_initial_reasoning_effort("unset").unwrap();
         drop(orphan);
 
-        let error = Workflow::open(&directory, config(), vec![model()])
+        let error = Workspace::open(&directory, config(), vec![model()])
             .err()
             .expect("orphaned sub-Agent must be rejected");
         assert!(error.to_string().contains("missing parent agent-missing"));
@@ -1809,7 +1814,7 @@ mod tests {
         let mut suffix = [0_u8; 8];
         getrandom::fill(&mut suffix).unwrap();
         let directory = std::env::temp_dir().join(format!(
-            "me-workflow-clone-{}-{}",
+            "me-workspace-clone-{}-{}",
             std::process::id(),
             u64::from_le_bytes(suffix)
         ));
@@ -1839,18 +1844,18 @@ mod tests {
             orchestrator: "main-agent".into(),
             ..config()
         };
-        let workflow = Workflow::open(&directory, changed_default, vec![model()]).unwrap();
-        let first = workflow
+        let workspace = Workspace::open(&directory, changed_default, vec![model()]).unwrap();
+        let first = workspace
             .handle
             .clone_agent_through_final_answer(&AgentId::new("main").unwrap(), final_answer)
             .unwrap();
-        let second = workflow
+        let second = workspace
             .handle
             .clone_agent_through_final_answer(&AgentId::new("main").unwrap(), final_answer)
             .unwrap();
 
-        let first_events = workflow.handle.events(&first).unwrap();
-        let second_events = workflow.handle.events(&second).unwrap();
+        let first_events = workspace.handle.events(&first).unwrap();
+        let second_events = workspace.handle.events(&second).unwrap();
         assert_eq!(
             agent_kind_definition(&first_events).unwrap().kind,
             AgentKind::Interactive
@@ -1866,7 +1871,7 @@ mod tests {
         }));
         assert!(first_events.iter().any(|event| event.id() == final_answer));
 
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1875,7 +1880,7 @@ mod tests {
         let mut suffix = [0_u8; 8];
         getrandom::fill(&mut suffix).unwrap();
         let directory = std::env::temp_dir().join(format!(
-            "me-workflow-delete-turn-{}-{}",
+            "me-workspace-delete-turn-{}-{}",
             std::process::id(),
             u64::from_le_bytes(suffix)
         ));
@@ -1899,13 +1904,13 @@ mod tests {
                 .unwrap();
             prompt
         };
-        let workflow = Workflow::open(&directory, config(), vec![model()]).unwrap();
+        let workspace = Workspace::open(&directory, config(), vec![model()]).unwrap();
         let main = AgentId::new("main").unwrap();
-        workflow.handle.delete_user_turn(&main, prompt).unwrap();
-        let events = workflow.handle.events(&main).unwrap();
+        workspace.handle.delete_user_turn(&main, prompt).unwrap();
+        let events = workspace.handle.events(&main).unwrap();
         assert!(!events.iter().any(|event| event.id() == prompt));
 
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 }

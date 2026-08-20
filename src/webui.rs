@@ -22,7 +22,7 @@ use crate::{
         CHAT_ACTIVITY_TOOL_NAMES, CHAT_HIDDEN_TOOL_NAMES, CHAT_HIDDEN_TOOL_PREFIXES, UiBackend,
         UiCommand, UiCommandGateway, UiCommandReceipt, UiModelOption, UiSnapshot,
     },
-    workflow::AgentId,
+    workspace::AgentId,
 };
 
 pub const DEFAULT_PORT: u16 = 38199;
@@ -1169,8 +1169,8 @@ mod tests {
     use crate::{
         config::{ModelCapabilities, ModelConfig, ProviderType, WorkspaceConfig},
         event::UserPromptEvent,
-        ui_backend::{UiAgentSnapshot, UiApiActivity, UiEnvironment, workflow_ui_ports},
-        workflow::Workflow,
+        ui_backend::{UiAgentSnapshot, UiApiActivity, UiEnvironment, workspace_ui_ports},
+        workspace::Workspace,
     };
 
     #[derive(Clone)]
@@ -2089,7 +2089,7 @@ mod tests {
     #[test]
     fn passkey_protects_every_operational_api_with_an_http_only_session() {
         let directory = workspace();
-        let workflow = Workflow::open(
+        let workspace = Workspace::open(
             &directory,
             WorkspaceConfig {
                 version: 2,
@@ -2100,7 +2100,7 @@ mod tests {
             vec![model()],
         )
         .unwrap();
-        let (backend, commands) = workflow_ui_ports(workflow);
+        let (backend, commands) = workspace_ui_ports(workspace);
         let server = start_from(backend, commands, 0, Some("correct horse")).unwrap();
         let address = server
             .address()
@@ -2227,7 +2227,7 @@ mod tests {
     #[test]
     fn http_polling_resumes_from_revisions_and_synchronizes_shared_drafts() {
         let directory = workspace();
-        let workflow = Workflow::open(
+        let workspace = Workspace::open(
             &directory,
             WorkspaceConfig {
                 version: 2,
@@ -2238,7 +2238,7 @@ mod tests {
             vec![model()],
         )
         .unwrap();
-        let (backend, commands) = workflow_ui_ports(workflow);
+        let (backend, commands) = workspace_ui_ports(workspace);
         let server = start_from(backend, commands, 0, None).unwrap();
         let address = server
             .address()
@@ -2413,7 +2413,7 @@ mod tests {
     #[test]
     fn real_http_clients_create_agents_atomically_and_read_without_consuming() {
         let directory = workspace();
-        let workflow = Workflow::open(
+        let workspace = Workspace::open(
             &directory,
             WorkspaceConfig {
                 version: 2,
@@ -2424,7 +2424,7 @@ mod tests {
             vec![model()],
         )
         .unwrap();
-        let (backend, commands) = workflow_ui_ports(workflow);
+        let (backend, commands) = workspace_ui_ports(workspace);
         let server = start_from(backend, commands, 0, None).unwrap();
         let bind_address = server.address().to_owned();
         assert!(bind_address.starts_with("http://0.0.0.0:"));

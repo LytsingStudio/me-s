@@ -30,11 +30,11 @@ use crate::{
         ChatToolPresentation, UiAgentSnapshot, UiApiActivity, UiBackend, UiCommand,
         UiCommandGateway, UiCommandReceipt, UiModelOption, UiSnapshot, tool_chat_presentation,
     },
-    workflow::AgentId,
     workmap::{
         MemoryBasis, MemoryKind, MemoryState, NoteKind, ObjectiveState, PlanState, WorkMapMemory,
         WorkMapObjectiveSnapshot, WorkMapPlanSnapshot, WorkMapProjection, WorkMapSnapshot,
     },
+    workspace::AgentId,
 };
 
 #[cfg(test)]
@@ -1190,7 +1190,7 @@ impl TuiSession {
     }
 
     fn empty(models: &[UiModelOption]) -> Result<Self> {
-        Self::new("<none>", "workflow", &[], 0, "unavailable", models)
+        Self::new("<none>", "workspace", &[], 0, "unavailable", models)
     }
 
     fn current_effort(&self) -> Option<&str> {
@@ -1551,7 +1551,7 @@ fn refresh_terminal_preview(
 }
 
 fn require_agent(agent_id: Option<&AgentId>) -> Result<&AgentId> {
-    agent_id.ok_or_else(|| "Workflow has no Agent; use /agent-add first".into())
+    agent_id.ok_or_else(|| "Workspace has no Agent; use /agent-add first".into())
 }
 
 fn sync_input_draft(
@@ -1772,7 +1772,7 @@ pub fn run(
         .and_then(|id| snapshot.agent(id))
         .map(|agent| agent.prompt_submission_revision)
         .unwrap_or(0);
-    let mut observed_workflow_revision = snapshot.revision;
+    let mut observed_workspace_revision = snapshot.revision;
 
     loop {
         if shutdown.load(Ordering::Acquire) {
@@ -1783,8 +1783,8 @@ pub fn run(
             snapshot.agent(id).map(UiAgentSnapshot::revision)
                 != next_snapshot.agent(id).map(UiAgentSnapshot::revision)
         });
-        let workflow_changed = observed_workflow_revision != next_snapshot.revision;
-        observed_workflow_revision = next_snapshot.revision;
+        let workspace_changed = observed_workspace_revision != next_snapshot.revision;
+        observed_workspace_revision = next_snapshot.revision;
         let current_agent_ids = next_snapshot.agent_ids();
         let (next_agent, selected_agent_was_removed) = reconcile_agent_selection(
             &observed_agent_ids,
@@ -1828,7 +1828,7 @@ pub fn run(
             .unwrap_or_default();
         let api_activity_changed = ui.api_activity != next_api_activity;
         ui.api_activity = next_api_activity;
-        if agent_changed || workflow_changed {
+        if agent_changed || workspace_changed {
             ui.worker_events = current_agent
                 .as_ref()
                 .map(|id| worker_events_for_agent(&snapshot, id))
@@ -2342,7 +2342,7 @@ pub fn run(
                             };
                             let id = draft.id;
                             snapshot = backend.snapshot()?;
-                            observed_workflow_revision = snapshot.revision;
+                            observed_workspace_revision = snapshot.revision;
                             observed_agent_ids = snapshot.agent_ids();
                             (current_agent, ui) =
                                 session_for_available_agent(backend, &snapshot, Some(id))?;
@@ -2371,7 +2371,7 @@ pub fn run(
                                 .cloned();
                             commands.submit(UiCommand::DeleteAgent { agent_id: id })?;
                             snapshot = backend.snapshot()?;
-                            observed_workflow_revision = snapshot.revision;
+                            observed_workspace_revision = snapshot.revision;
                             observed_agent_ids = snapshot.agent_ids();
                             (current_agent, ui) =
                                 session_for_available_agent(backend, &snapshot, adjacent)?;

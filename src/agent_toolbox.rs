@@ -15,7 +15,7 @@ use crate::{
         effective_conversation_events, latest_agent_turn, latest_context_usage,
     },
     toolbox::{ToolboxExecutionError, ToolboxTool, api_safe_name},
-    workflow::{AgentId, WorkflowHandle},
+    workspace::{AgentId, WorkspaceHandle},
 };
 
 pub const AGENT_TOOLBOX_NAME: &str = "Agent";
@@ -650,7 +650,7 @@ struct AgentSession {
 
 #[derive(Default)]
 pub struct NativeAgentToolbox {
-    workflow: Option<WorkflowHandle>,
+    workspace: Option<WorkspaceHandle>,
     parent_agent_id: Option<AgentId>,
     sessions: HashMap<String, AgentSession>,
 }
@@ -660,8 +660,8 @@ impl NativeAgentToolbox {
         Self::default()
     }
 
-    pub fn configure(&mut self, workflow: WorkflowHandle, parent_agent_id: AgentId) {
-        self.workflow = Some(workflow);
+    pub fn configure(&mut self, workspace: WorkspaceHandle, parent_agent_id: AgentId) {
+        self.workspace = Some(workspace);
         self.parent_agent_id = Some(parent_agent_id);
     }
 
@@ -850,7 +850,7 @@ impl NativeAgentToolbox {
             .get(session_id)
             .ok_or_else(|| session_not_found(session_id, surface))?;
         let events = self
-            .workflow()?
+            .workspace()?
             .events(&session.agent_id)
             .map_err(execution_error)?;
         let object = output
@@ -873,15 +873,15 @@ impl NativeAgentToolbox {
         surface: ToolSurface,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> std::result::Result<Value, ToolboxExecutionError> {
-        let workflow = self.workflow()?.clone();
+        let workspace = self.workspace()?.clone();
         let agent_id = self
             .sessions
             .get(session_id)
             .ok_or_else(|| session_not_found(session_id, surface))?
             .agent_id
             .clone();
-        let events = workflow.events(&agent_id).map_err(execution_error)?;
-        let advancing = workflow.is_advancing(&agent_id).map_err(execution_error)?;
+        let events = workspace.events(&agent_id).map_err(execution_error)?;
+        let advancing = workspace.is_advancing(&agent_id).map_err(execution_error)?;
         let session = self
             .sessions
             .get_mut(session_id)
@@ -901,7 +901,7 @@ impl NativeAgentToolbox {
         }
 
         let baseline = events.last().map(Event::id);
-        workflow
+        workspace
             .submit_context_clear(&agent_id)
             .map_err(execution_error)?;
         let started = Instant::now();
@@ -912,7 +912,7 @@ impl NativeAgentToolbox {
                     surface.tool("ClearContext")
                 )));
             }
-            let events = workflow.events(&agent_id).map_err(execution_error)?;
+            let events = workspace.events(&agent_id).map_err(execution_error)?;
             if events.iter().any(|event| {
                 matches!(event, Event::ContextCleared(clear) if baseline.is_none_or(|baseline| clear.id > baseline))
             }) {
@@ -935,11 +935,11 @@ impl NativeAgentToolbox {
         }
     }
 
-    fn workflow(&self) -> std::result::Result<&WorkflowHandle, ToolboxExecutionError> {
-        self.workflow.as_ref().ok_or_else(|| {
+    fn workspace(&self) -> std::result::Result<&WorkspaceHandle, ToolboxExecutionError> {
+        self.workspace.as_ref().ok_or_else(|| {
             tool_error(
                 "toolbox_unavailable",
-                "Agent toolbox is not attached to a Workflow",
+                "Agent toolbox is not attached to a Workspace",
                 true,
             )
         })
@@ -956,19 +956,21 @@ impl NativeAgentToolbox {
     }
 
     fn sync_sessions(&mut self) -> std::result::Result<(), ToolboxExecutionError> {
-        let Some(workflow) = self.workflow.clone() else {
+        let Some(workspace) = self.workspace.clone() else {
             return Ok(());
         };
         let Some(parent) = self.parent_agent_id.clone() else {
             return Ok(());
         };
-        let children = workflow.child_agent_ids(&parent).map_err(execution_error)?;
+        let children = workspace
+            .child_agent_ids(&parent)
+            .map_err(execution_error)?;
         for child in &children {
             let session_id = child.to_string();
             if self.sessions.contains_key(&session_id) {
                 continue;
             }
-            let events = workflow.events(child).map_err(execution_error)?;
+            let events = workspace.events(child).map_err(execution_error)?;
             let latest_turn = latest_agent_turn(&events).map_err(execution_error)?;
             self.sessions.insert(
                 session_id,
@@ -1002,9 +1004,9 @@ impl NativeAgentToolbox {
         if input.system_prompt.as_ref().is_some_and(String::is_empty) {
             input.system_prompt = None;
         }
-        let workflow = self.workflow()?.clone();
+        let workspace = self.workspace()?.clone();
         let parent = self.parent_id()?.clone();
-        let agent_id = workflow
+        let agent_id = workspace
             .create_sub_agent(
                 &parent,
                 input.system_prompt,
@@ -1013,7 +1015,7 @@ impl NativeAgentToolbox {
                 effort.to_owned(),
             )
             .map_err(execution_error)?;
-        let events = workflow.events(&agent_id).map_err(execution_error)?;
+        let events = workspace.events(&agent_id).map_err(execution_error)?;
         let latest_turn = latest_agent_turn(&events).map_err(execution_error)?;
         let session_id = agent_id.to_string();
         self.sessions.insert(
@@ -1051,18 +1053,18 @@ impl NativeAgentToolbox {
                     surface.tool("Wait")
                 )));
             }
-            let workflow = self.workflow()?.clone();
+            let workspace = self.workspace()?.clone();
             let session = self
                 .sessions
                 .get_mut(&input.session_id)
                 .ok_or_else(|| session_not_found(&input.session_id, surface))?;
-            let events = workflow
+            let events = workspace
                 .events(&session.agent_id)
                 .map_err(execution_error)?;
             let latest_event_id = events.last().map(Event::id);
             activity |= event_id_after(latest_event_id, session.last_wait_event_id);
             let turn = resolve_target_turn(session, &events).map_err(execution_error)?;
-            let advancing = workflow
+            let advancing = workspace
                 .is_advancing(&session.agent_id)
                 .map_err(execution_error)?;
             if let Some(turn) = turn.filter(|turn| turn.state.is_terminal() && !advancing) {
@@ -1117,15 +1119,15 @@ impl NativeAgentToolbox {
                 false,
             ));
         }
-        let workflow = self.workflow()?.clone();
+        let workspace = self.workspace()?.clone();
         let session = self
             .sessions
             .get_mut(&input.session_id)
             .ok_or_else(|| session_not_found(&input.session_id, surface))?;
-        let events = workflow
+        let events = workspace
             .events(&session.agent_id)
             .map_err(execution_error)?;
-        if workflow
+        if workspace
             .is_advancing(&session.agent_id)
             .map_err(execution_error)?
         {
@@ -1167,9 +1169,9 @@ impl NativeAgentToolbox {
         let baseline = events.last().map(Event::id);
         match surface {
             ToolSurface::Agent => {
-                workflow.submit_parent_agent_prompt(&session.agent_id, input.prompt)
+                workspace.submit_parent_agent_prompt(&session.agent_id, input.prompt)
             }
-            ToolSurface::Worker => workflow.submit_manager_prompt(&session.agent_id, input.prompt),
+            ToolSurface::Worker => workspace.submit_manager_prompt(&session.agent_id, input.prompt),
         }
         .map_err(execution_error)?;
         session.target_after_event_id = baseline;
@@ -1185,7 +1187,7 @@ impl NativeAgentToolbox {
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> std::result::Result<Value, ToolboxExecutionError> {
         let input: StopInput = parse_arguments(arguments)?;
-        let workflow = self.workflow()?.clone();
+        let workspace = self.workspace()?.clone();
         let started = Instant::now();
         let mut abort_submitted = false;
         loop {
@@ -1199,18 +1201,18 @@ impl NativeAgentToolbox {
                 .sessions
                 .get_mut(&input.session_id)
                 .ok_or_else(|| session_not_found(&input.session_id, surface))?;
-            let events = workflow
+            let events = workspace
                 .events(&session.agent_id)
                 .map_err(execution_error)?;
             let turn = resolve_target_turn(session, &events).map_err(execution_error)?;
-            let advancing = workflow
+            let advancing = workspace
                 .is_advancing(&session.agent_id)
                 .map_err(execution_error)?;
 
             match turn {
                 Some(turn) if turn.state == AgentTurnState::Started => {
                     if !abort_submitted {
-                        abort_submitted = workflow
+                        abort_submitted = workspace
                             .with_runtime_for_agent_tool(&session.agent_id, |runtime| {
                                 runtime.submit_turn_abort()
                             })
@@ -1270,20 +1272,20 @@ impl NativeAgentToolbox {
 
     fn kill(&mut self, arguments: &str) -> std::result::Result<Value, ToolboxExecutionError> {
         let input: KillInput = parse_arguments(arguments)?;
-        let workflow = self.workflow()?.clone();
+        let workspace = self.workspace()?.clone();
         let session = self
             .sessions
             .remove(&input.session_id)
             .ok_or_else(|| session_not_found(&input.session_id, ToolSurface::Agent))?;
-        if workflow
+        if workspace
             .is_advancing(&session.agent_id)
             .map_err(execution_error)?
         {
-            let _ = workflow.with_runtime_for_agent_tool(&session.agent_id, |runtime| {
+            let _ = workspace.with_runtime_for_agent_tool(&session.agent_id, |runtime| {
                 runtime.submit_turn_abort()
             });
         }
-        workflow
+        workspace
             .delete_agent(&session.agent_id, true)
             .map_err(execution_error)?;
         Ok(json!({"session_id": input.session_id, "state": "killed"}))
@@ -1587,7 +1589,7 @@ mod tests {
     use crate::{
         config::{ModelCapabilities, ProviderType, WorkspaceConfig},
         event::{AgentKind, EventDataBase, agent_kind_definition},
-        workflow::{AgentId, Workflow},
+        workspace::{AgentId, Workspace},
     };
 
     fn read_complete_http_request(stream: &mut std::net::TcpStream) {
@@ -1671,7 +1673,7 @@ mod tests {
         });
         for internal_term in [
             "EDB",
-            "Workflow",
+            "Workspace",
             "AgentRuntime",
             "ToolboxRuntime",
             "Orchestrator",
@@ -1914,11 +1916,11 @@ mod tests {
             effort: "unset".into(),
             orchestrator: "manager-agent".into(),
         };
-        let workflow = Workflow::open(&directory, config, vec![model.clone()]).unwrap();
+        let workspace = Workspace::open(&directory, config, vec![model.clone()]).unwrap();
         let parent = AgentId::new("main").unwrap();
-        let worker = workflow.handle().child_agent_ids(&parent).unwrap()[0].clone();
+        let worker = workspace.handle().child_agent_ids(&parent).unwrap()[0].clone();
         let mut toolbox = NativeAgentToolbox::new();
-        toolbox.configure(workflow.handle(), parent);
+        toolbox.configure(workspace.handle(), parent);
 
         for (tool, arguments) in [
             (WORKER_ASK, r#"{"prompt":"work","unexpected":true}"#),
@@ -1979,9 +1981,9 @@ mod tests {
         assert_eq!(waited["compact_count"], 0);
         assert!(waited.get("retained").is_none());
         assert!(waited.get("session_id").is_none());
-        assert!(workflow.contains(&worker));
+        assert!(workspace.contains(&worker));
         assert!(
-            workflow
+            workspace
                 .handle()
                 .events(&worker)
                 .unwrap()
@@ -2006,7 +2008,7 @@ mod tests {
             .unwrap();
         assert_eq!(cleared, json!({"worker": "worker", "state": "cleared"}));
         assert!(matches!(
-            workflow.handle().events(&worker).unwrap().last(),
+            workspace.handle().events(&worker).unwrap().last(),
             Some(Event::ContextCleared(_))
         ));
         let after_clear = toolbox
@@ -2017,7 +2019,7 @@ mod tests {
 
         server.join().unwrap();
         drop(toolbox);
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2077,10 +2079,10 @@ mod tests {
             effort: "unset".into(),
             orchestrator: "manager-agent".into(),
         };
-        let workflow = Workflow::open(&directory, config, vec![model]).unwrap();
+        let workspace = Workspace::open(&directory, config, vec![model]).unwrap();
         let parent = AgentId::new("main").unwrap();
         let mut toolbox = NativeAgentToolbox::new();
-        toolbox.configure(workflow.handle(), parent);
+        toolbox.configure(workspace.handle(), parent);
 
         toolbox
             .execute_worker_cancellable(
@@ -2120,7 +2122,7 @@ mod tests {
 
         server.join().unwrap();
         drop(toolbox);
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -2426,7 +2428,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_child_wait_ask_clear_stop_and_kill_share_the_normal_agent_runtime() {
+    fn workspace_child_wait_ask_clear_stop_and_kill_share_the_normal_agent_runtime() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let first_request_received = Arc::new(AtomicBool::new(false));
@@ -2523,10 +2525,10 @@ mod tests {
             effort: "unset".into(),
             orchestrator: "chatbot".into(),
         };
-        let workflow = Workflow::open(&directory, config.clone(), vec![model.clone()]).unwrap();
+        let workspace = Workspace::open(&directory, config.clone(), vec![model.clone()]).unwrap();
         let parent = AgentId::new("main").unwrap();
         let mut toolbox = NativeAgentToolbox::new();
-        toolbox.configure(workflow.handle(), parent.clone());
+        toolbox.configure(workspace.handle(), parent.clone());
 
         let created = toolbox
             .execute(
@@ -2538,13 +2540,13 @@ mod tests {
             .unwrap();
         let session_id = created["session_id"].as_str().unwrap().to_owned();
         let child = AgentId::new(&session_id).unwrap();
-        let child_path = workflow.edb_path(&child);
-        let child_events = workflow.handle().events(&child).unwrap();
+        let child_path = workspace.edb_path(&child);
+        let child_events = workspace.handle().events(&child).unwrap();
         let definition = agent_kind_definition(&child_events).unwrap();
         assert_eq!(definition.kind, AgentKind::SubAgent);
         assert_eq!(definition.parent_agent_id.as_deref(), Some("main"));
         assert_eq!(definition.system_prompt.as_deref(), Some("Be concise."));
-        assert!(workflow.agent_ids().contains(&child));
+        assert!(workspace.agent_ids().contains(&child));
         assert!(child_path.exists());
 
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -2553,7 +2555,7 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(
-            workflow
+            workspace
                 .handle()
                 .events(&child)
                 .unwrap()
@@ -2594,7 +2596,7 @@ mod tests {
         assert_eq!(follow_up_poll["reason"], "follow_up");
         assert_eq!(follow_up_poll["context_usage"], Value::Null);
         assert_eq!(follow_up_poll["compact_count"], 0);
-        assert!(workflow.contains(&child));
+        assert!(workspace.contains(&child));
         assert!(matches!(
             toolbox.execute(
                 AGENT_CLEAR_CONTEXT,
@@ -2633,7 +2635,7 @@ mod tests {
             first["final_answer"],
             "first answer",
             "events: {:#?}",
-            workflow.handle().events(&child).unwrap()
+            workspace.handle().events(&child).unwrap()
         );
         assert!(first.get("retained").is_none());
         assert_eq!(
@@ -2642,18 +2644,18 @@ mod tests {
         );
         assert_eq!(first["compact_count"], 0);
         assert!(
-            workflow
+            workspace
                 .deletion_blocker(&parent)
                 .unwrap()
                 .is_some_and(|reason| reason.contains("子 Agent"))
         );
 
         drop(toolbox);
-        drop(workflow);
-        let workflow = Workflow::open(&directory, config, vec![model.clone()]).unwrap();
-        assert!(workflow.contains(&child));
+        drop(workspace);
+        let workspace = Workspace::open(&directory, config, vec![model.clone()]).unwrap();
+        assert!(workspace.contains(&child));
         let mut toolbox = NativeAgentToolbox::new();
-        toolbox.configure(workflow.handle(), parent);
+        toolbox.configure(workspace.handle(), parent);
 
         toolbox
             .execute(
@@ -2674,7 +2676,7 @@ mod tests {
         assert_eq!(second["state"], "completed");
         assert_eq!(second["final_answer"], "second answer");
         assert_eq!(
-            workflow
+            workspace
                 .handle()
                 .events(&child)
                 .unwrap()
@@ -2684,7 +2686,7 @@ mod tests {
             2
         );
         assert!(second.get("retained").is_none());
-        assert!(workflow.contains(&child));
+        assert!(workspace.contains(&child));
         assert!(child_path.exists());
 
         let cleared = toolbox
@@ -2697,7 +2699,7 @@ mod tests {
             .unwrap();
         assert_eq!(cleared["state"], "cleared");
         assert!(matches!(
-            workflow.handle().events(&child).unwrap().last(),
+            workspace.handle().events(&child).unwrap().last(),
             Some(Event::ContextCleared(_))
         ));
         assert!(matches!(
@@ -2728,7 +2730,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(killed_second["state"], "killed");
-        assert!(!workflow.contains(&child));
+        assert!(!workspace.contains(&child));
         assert!(!child_path.exists());
 
         let third_created = toolbox
@@ -2749,7 +2751,7 @@ mod tests {
             .unwrap();
         assert_eq!(third["final_answer"], "third answer");
         let third_agent = AgentId::new(&third_id).unwrap();
-        let third_path = workflow.edb_path(&third_agent);
+        let third_path = workspace.edb_path(&third_agent);
         assert!(third_path.exists());
         let killed = toolbox
             .execute(
@@ -2760,7 +2762,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(killed["state"], "killed");
-        assert!(!workflow.contains(&third_agent));
+        assert!(!workspace.contains(&third_agent));
         assert!(!third_path.exists());
 
         let stopped_created = toolbox
@@ -2773,7 +2775,7 @@ mod tests {
             .unwrap();
         let stopped_id = stopped_created["session_id"].as_str().unwrap().to_owned();
         let stopped_agent = AgentId::new(&stopped_id).unwrap();
-        let stopped_path = workflow.edb_path(&stopped_agent);
+        let stopped_path = workspace.edb_path(&stopped_agent);
         let deadline = Instant::now() + Duration::from_secs(2);
         while !stopped_request_received.load(Ordering::Acquire) {
             assert!(Instant::now() < deadline, "stoppable request did not start");
@@ -2795,9 +2797,9 @@ mod tests {
         releaser.join().unwrap();
         assert_eq!(stopped["state"], "stopped");
         assert!(stopped.get("retained").is_none());
-        assert!(workflow.contains(&stopped_agent));
+        assert!(workspace.contains(&stopped_agent));
         assert!(stopped_path.exists());
-        let stopped_events = workflow.handle().events(&stopped_agent).unwrap();
+        let stopped_events = workspace.handle().events(&stopped_agent).unwrap();
         let stopped_turn = latest_agent_turn(&stopped_events).unwrap().unwrap();
         assert_eq!(stopped_turn.state, AgentTurnState::Interrupted);
         assert!(turn_was_explicitly_stopped(
@@ -2823,7 +2825,7 @@ mod tests {
             .unwrap();
         assert_eq!(after_stop["state"], "completed");
         assert_eq!(after_stop["final_answer"], "answer after stop");
-        assert!(workflow.contains(&stopped_agent));
+        assert!(workspace.contains(&stopped_agent));
         assert!(stopped_path.exists());
         toolbox
             .execute(
@@ -2833,7 +2835,7 @@ mod tests {
                 "unset",
             )
             .unwrap();
-        assert!(!workflow.contains(&stopped_agent));
+        assert!(!workspace.contains(&stopped_agent));
         assert!(!stopped_path.exists());
 
         let failed_created = toolbox
@@ -2889,7 +2891,7 @@ mod tests {
             .unwrap();
 
         server.join().unwrap();
-        drop(workflow);
+        drop(workspace);
         fs::remove_dir_all(directory).unwrap();
     }
 }

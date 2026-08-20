@@ -24,9 +24,9 @@ use me::{
     model_transfer,
     orchestrator::{AVAILABLE_ORCHESTRATORS, apply_model_selection, latest_effort, latest_model},
     toolbox, tui,
-    ui_backend::workflow_ui_ports,
+    ui_backend::workspace_ui_ports,
     updater, webui,
-    workflow::Workflow,
+    workspace::Workspace,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -303,14 +303,14 @@ fn version_string() -> String {
 }
 
 fn run_user_interfaces(
-    workspace: &Path,
+    workspace_root: &Path,
     local: WorkspaceConfig,
     models: Vec<me::config::ModelConfig>,
     options: UiLaunchOptions,
 ) -> Result<()> {
     let termination = TerminationSignals::install()?;
-    let workflow = Workflow::open(workspace, local, models)?;
-    let (ui_backend, ui_commands) = workflow_ui_ports(workflow);
+    let workspace = Workspace::open(workspace_root, local, models)?;
+    let (ui_backend, ui_commands) = workspace_ui_ports(workspace);
     match options.mode {
         UiLaunchMode::TuiAndWeb => {
             let webui = match webui::start(
@@ -1367,8 +1367,8 @@ mod tests {
     }
 
     #[test]
-    fn workspace_commands_do_not_recreate_main_in_an_empty_workflow() {
-        let workspace = env::temp_dir().join(format!("me-empty-workflow-{}", std::process::id()));
+    fn workspace_commands_do_not_recreate_main_in_an_empty_workspace() {
+        let workspace = env::temp_dir().join(format!("me-empty-workspace-{}", std::process::id()));
         let config_path = workspace_config_path(&workspace);
         let mut local = WorkspaceConfig {
             version: 2,
