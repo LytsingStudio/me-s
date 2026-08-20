@@ -4,17 +4,21 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
-function loadBottomFollowerFactory() {
+function loadBottomFollowRuntime() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI bottom-follow runtime");
   const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
-    return { createTranscriptBottomFollower };`);
+    return { createTranscriptBottomFollower, beginConfirmedPromptRender };`);
   return factory(
     { querySelector: () => null },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
-  ).createTranscriptBottomFollower;
+  );
+}
+
+function loadBottomFollowerFactory() {
+  return loadBottomFollowRuntime().createTranscriptBottomFollower;
 }
 
 function harness() {
@@ -127,5 +131,16 @@ describe("WebUI transcript bottom follower", () => {
     test.flushFrames();
     expect(test.follower.isFollowing()).toBe(true);
     expect(test.follower.isNearBottom()).toBe(true);
+  });
+
+  test("only this page's authoritative pending confirmation forces following", () => {
+    const { beginConfirmedPromptRender } = loadBottomFollowRuntime();
+    let followCount = 0;
+    const follower = { follow() { followCount += 1; } };
+
+    expect(beginConfirmedPromptRender({ promptConfirmed: false }, follower)).toBe(false);
+    expect(followCount).toBe(0);
+    expect(beginConfirmedPromptRender({ promptConfirmed: true }, follower)).toBe(true);
+    expect(followCount).toBe(1);
   });
 });

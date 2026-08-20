@@ -104,6 +104,8 @@ const elements = {
   input: $("#prompt-input"),
   stop: $("#stop-generation"),
   send: $("#send-prompt"),
+  sendSpinner: $("#send-prompt-spinner"),
+  sendLabel: $("#send-prompt-label"),
   inputHint: $("#input-hint"),
   slashMenu: $("#slash-menu"),
   userMessageMenu: $("#user-message-menu"),
@@ -605,7 +607,7 @@ function syncAgentEvents(meta, payload) {
       mutationRevision: meta.mutation_revision,
       promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
       inputDraftRevision: Number(meta.input_draft_revision || 0),
-      pendingPromptSubmissions: 0,
+      pendingPromptSubmission: null,
       projection: emptyProjection(),
       workmap: emptyWorkMap(),
       turnHistory: null,
@@ -653,6 +655,7 @@ function syncAgentEvents(meta, payload) {
 }
 
 function observeInputDraft(meta, store) {
+  if (store.pendingPromptSubmission) return false;
   const revision = Number(meta.input_draft_revision || 0);
   if (revision <= store.inputDraftRevision) return false;
   const sync = state.draftSync.get(meta.id);
@@ -724,11 +727,7 @@ function updateAgentSummary(summary, events) {
 
 function observePromptSubmission(meta, store) {
   const revision = Number(meta.prompt_submission_revision || 0);
-  if (revision < store.promptSubmissionRevision) {
-    store.promptSubmissionRevision = revision;
-    return false;
-  }
-  if (revision === store.promptSubmissionRevision || store.pendingPromptSubmissions > 0) return false;
+  if (revision === store.promptSubmissionRevision) return false;
   store.promptSubmissionRevision = revision;
   return true;
 }
@@ -847,7 +846,30 @@ function chatAppendNeedsReplay(events) {
 }
 
 function emptyProjectionChanges() {
-  return { transcript: false, transcriptFrom: null, status: false, turn: false };
+  return {
+    transcript: false, transcriptFrom: null, status: false, turn: false, promptConfirmed: false,
+  };
+}
+
+function pendingPromptReachedProjection(store) {
+  const pending = store?.pendingPromptSubmission;
+  if (!pending) return false;
+  return store.projection.messages.some((message) =>
+    message.kind === "user"
+      && message.key?.startsWith("user:")
+      && Number(message.eventId) > pending.afterEventId
+      && message.content === pending.content);
+}
+
+function markPendingPromptConfirmation(store, changes) {
+  changes.promptConfirmed = pendingPromptReachedProjection(store);
+  return changes;
+}
+
+function beginConfirmedPromptRender(changes, bottomFollower = transcriptBottomFollower) {
+  if (!changes.promptConfirmed) return false;
+  bottomFollower.follow();
+  return true;
 }
 
 function markTranscriptChanged(changes, index) {
@@ -1396,7 +1418,8 @@ function flushPendingRender() {
 
 function renderAll() {
   state.pendingRender = emptyRenderRequest();
-  advanceCurrentProjection();
+  const changes = advanceCurrentProjection();
+  const promptConfirmed = beginConfirmedPromptRender(changes);
   applyCompactApiActivity(currentProjection(), state.apiActivity);
   renderConnection();
   renderAgents();
@@ -1405,6 +1428,7 @@ function renderAll() {
   renderTranscript(true, 0);
   renderObjective();
   renderWorkMap();
+  if (promptConfirmed) finishPendingPromptSubmission(state.selectedAgent);
   renderComposer();
   renderStatus();
   transcriptBottomFollower.layoutChanged();
@@ -1422,6 +1446,7 @@ function renderIncremental(request) {
         : Math.min(changes.transcriptFrom, activityChanges.transcriptFrom);
     }
   }
+  const promptConfirmed = beginConfirmedPromptRender(changes);
   let transcriptChanged = false;
   if (request.connection) renderConnection();
   if (request.agents) renderAgents();
@@ -1437,9 +1462,10 @@ function renderIncremental(request) {
     renderObjective();
     if (state.view.kind === "workmap") renderWorkMap();
   }
-  if (changes.turn) renderComposer();
+  if (promptConfirmed) finishPendingPromptSubmission(state.selectedAgent);
+  if (changes.turn || promptConfirmed) renderComposer();
   if (request.status || changes.status) renderStatus();
-  if (transcriptChanged) {
+  if (transcriptChanged || promptConfirmed) {
     transcriptBottomFollower.layoutChanged();
   }
   if (state.view.kind === "terminal") void renderTerminal();
@@ -1453,10 +1479,12 @@ function advanceCurrentProjection() {
     store.workmap = projectWorkMap(store.events);
     store.projectedOrder = store.events.length;
     store.needsReplay = false;
-    return { transcript: true, status: true, turn: true, workmap: true, fullReplay: true };
+    return markPendingPromptConfirmation(store, {
+      transcript: true, status: true, turn: true, workmap: true, fullReplay: true,
+    });
   }
   const appended = store.events.slice(store.projectedOrder);
-  if (!appended.length) return emptyProjectionChanges();
+  if (!appended.length) return markPendingPromptConfirmation(store, emptyProjectionChanges());
   const fullReplay = chatAppendNeedsReplay(appended);
   const changes = fullReplay
     ? { transcript: true, transcriptFrom: 0, status: true, turn: true }
@@ -1465,7 +1493,7 @@ function advanceCurrentProjection() {
   changes.workmap = consumeWorkMapEvents(store.workmap, appended);
   changes.fullReplay = fullReplay;
   store.projectedOrder = store.events.length;
-  return changes;
+  return markPendingPromptConfirmation(store, changes);
 }
 
 function transcriptIsNearBottom() {
@@ -2380,13 +2408,22 @@ function renderComposer() {
   const meta = agentMeta();
   const readOnly = meta?.kind === "sub-agent";
   const worker = isWorkerAgent(meta);
+  const pending = currentStore()?.pendingPromptSubmission || null;
+  const sending = Boolean(pending);
   const canStop = canControlRuntime(meta) && currentProjection().turnState?.state === "active";
   elements.composer.classList.toggle("hidden", !meta);
-  elements.input.disabled = readOnly;
-  elements.send.disabled = readOnly;
+  elements.composer.classList.toggle("sending", sending);
+  elements.input.disabled = readOnly || sending;
+  elements.send.disabled = readOnly || sending;
+  elements.send.setAttribute("aria-busy", String(sending));
+  elements.sendSpinner.classList.toggle("hidden", !sending);
+  elements.sendLabel.textContent = pending?.status === "confirming" ? "正在确认" : sending ? "正在发送" : "发送";
   elements.stop.disabled = !canStop;
   elements.input.placeholder = readOnly ? `${worker ? "Worker" : "子 Agent"} 对话只读 · ${childStateLabel(currentStore()?.events || [])}` : "发送消息，输入 / 查看命令";
-  elements.inputHint.textContent = worker ? "可调整模型、推理强度或停止当前任务" : readOnly ? "子 Agent 仅允许查看" : `${sendShortcutHint()} · Esc 中止/撤回/清空`;
+  elements.inputHint.textContent = sending
+    ? "消息进入列表后即可继续输入"
+    : worker ? "可调整模型、推理强度或停止当前任务"
+      : readOnly ? "子 Agent 仅允许查看" : `${sendShortcutHint()} · Esc 中止/撤回/清空`;
   renderSlashMenu();
 }
 
@@ -2679,6 +2716,10 @@ function colorCss(color) {
 }
 
 function renderSlashMenu() {
+  if (currentStore()?.pendingPromptSubmission) {
+    elements.slashMenu.classList.add("hidden");
+    return;
+  }
   const value = elements.input.value;
   const matches = value.startsWith("/") && !value.includes(" ")
     ? COMMANDS.filter(([name]) => name.startsWith(value)) : [];
@@ -2879,7 +2920,11 @@ async function confirmModal() {
 }
 
 async function sendCommand(payload) {
-  if (!state.connected) throw new Error("连接尚未恢复，请稍候");
+  if (!state.connected) {
+    const error = new Error("连接尚未恢复，请稍候");
+    error.commandResultKnown = true;
+    throw error;
+  }
   try {
     const response = await api("/api/command", {
       method: "POST",
@@ -2895,38 +2940,109 @@ async function sendCommand(payload) {
   }
 }
 
+function promptSubmissionBoundary(meta, store) {
+  if (meta?.last_event_id != null) {
+    const snapshotBoundary = Number(meta.last_event_id);
+    if (Number.isSafeInteger(snapshotBoundary)) return snapshotBoundary;
+  }
+  const lastEvent = store.events[store.events.length - 1];
+  const eventBoundary = lastEvent ? Number(eventParts(lastEvent)[1].id) : -1;
+  return Number.isSafeInteger(eventBoundary) ? eventBoundary : -1;
+}
+
+function commandResultIsUnknown(error) {
+  return !error.commandResultKnown
+    && (!error.status || [502, 503, 504].includes(error.status));
+}
+
+function cancelPendingPromptSubmission(agentId, pending) {
+  const store = state.stores.get(agentId);
+  if (!store || store.pendingPromptSubmission !== pending) return false;
+  pending.settled = true;
+  store.pendingPromptSubmission = null;
+  state.drafts.set(agentId, pending.displayContent);
+  const sync = state.draftSync.get(agentId);
+  if (sync) {
+    sync.paused = false;
+    sync.desired = pending.displayContent;
+    if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
+  }
+  if (state.selectedAgent === agentId) {
+    elements.input.value = pending.displayContent;
+    autoSizeInput();
+    renderSlashMenu();
+    requestAnimationFrame(() => elements.input.focus());
+  }
+  return true;
+}
+
+function finishPendingPromptSubmission(agentId) {
+  const store = state.stores.get(agentId);
+  const pending = store?.pendingPromptSubmission;
+  if (!store || !pending) return false;
+  pending.settled = true;
+  store.pendingPromptSubmission = null;
+  const meta = state.snapshot.agents.find((agent) => agent.id === agentId);
+  const observedRevision = Number(meta?.input_draft_revision);
+  const hasCurrentDraft = Number.isSafeInteger(observedRevision)
+    && observedRevision >= store.inputDraftRevision;
+  const revision = hasCurrentDraft ? observedRevision : store.inputDraftRevision;
+  const content = hasCurrentDraft ? String(meta?.input_draft || "") : "";
+  const sync = state.draftSync.get(agentId);
+  if (sync) sync.paused = false;
+  adoptInputDraft(agentId, store, revision, content);
+  if (sync && sync.sent !== sync.desired) void runDraftSync(agentId, sync);
+  if (state.selectedAgent === agentId) {
+    requestAnimationFrame(() => {
+      if (state.selectedAgent === agentId && !store.pendingPromptSubmission) elements.input.focus();
+    });
+  }
+  return true;
+}
+
 async function submitPrompt() {
-  const content = elements.input.value.trim();
+  const displayContent = elements.input.value;
+  const content = displayContent.trim();
   if (!content || !state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
   if (content.startsWith("/") && COMMANDS.some(([name]) => name === content)) return openSlashCommand(content);
   const agentId = state.selectedAgent;
   const store = currentStore();
-  store.pendingPromptSubmissions += 1;
-  elements.input.value = "";
-  state.drafts.set(agentId, "");
-  autoSizeInput();
-  renderSlashMenu();
+  if (!store || store.pendingPromptSubmission) return;
+  const pending = {
+    content,
+    displayContent,
+    afterEventId: promptSubmissionBoundary(agentMeta(), store),
+    status: "sending",
+    settled: false,
+  };
+  store.pendingPromptSubmission = pending;
+  state.drafts.set(agentId, displayContent);
+  renderComposer();
   await pauseDraftSyncForSubmission(agentId);
   try {
     const response = await sendCommand({ command: "submit_user_prompt", agent_id: agentId, content });
     const revision = Number(response?.receipt?.prompt_submission_revision);
     const inputDraftRevision = Number(response?.receipt?.input_draft_revision);
     if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(inputDraftRevision)) {
-      throw new Error("消息发送失败：服务返回了无效结果");
+      const error = new Error("消息发送失败：服务返回了无效结果");
+      error.commandResultKnown = true;
+      throw error;
     }
     store.promptSubmissionRevision = Math.max(store.promptSubmissionRevision, revision);
     store.inputDraftRevision = Math.max(store.inputDraftRevision, inputDraftRevision);
+    if (pending.settled) return;
+    pending.status = "accepted";
+    if (state.selectedAgent === agentId) renderComposer();
   } catch (error) {
-    if (state.selectedAgent === agentId && !elements.input.value) {
-      elements.input.value = content;
-      autoSizeInput();
-      renderSlashMenu();
+    if (pending.settled) return;
+    if (commandResultIsUnknown(error)) {
+      pending.status = "confirming";
+      if (state.selectedAgent === agentId) renderComposer();
+      return;
     }
-    state.drafts.set(agentId, state.selectedAgent === agentId ? elements.input.value : content);
+    cancelPendingPromptSubmission(agentId, pending);
+    if (state.selectedAgent === agentId) renderComposer();
     toast(error.message, true);
-  } finally {
-    resumeDraftSync(agentId);
-    store.pendingPromptSubmissions = Math.max(0, store.pendingPromptSubmissions - 1);
   }
 }
 
@@ -2938,6 +3054,7 @@ function openSendSettings() {
 }
 
 function submitOrOpenSendSettings() {
+  if (currentStore()?.pendingPromptSubmission) return;
   if (!elements.input.value.trim()) {
     openSendSettings();
     return;
@@ -2955,6 +3072,10 @@ async function stopGeneration() {
 
 async function escapeAction() {
   if (!state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
+  if (currentStore()?.pendingPromptSubmission) {
+    toast("消息正在发送，请稍候");
+    return;
+  }
   flushPendingRender();
   const turn = currentProjection().turnState;
   try {
@@ -2968,6 +3089,7 @@ async function escapeAction() {
 function saveDraft() {
   if (!state.selectedAgent) return;
   const agentId = state.selectedAgent;
+  if (state.stores.get(agentId)?.pendingPromptSubmission) return;
   const content = elements.input.value;
   const previous = state.drafts.get(agentId) || "";
   state.drafts.set(agentId, content);
@@ -3098,30 +3220,20 @@ async function pauseDraftSyncForSubmission(agentId) {
   while (sync.sending) await new Promise((resolve) => sync.waiters.push(resolve));
 }
 
-function resumeDraftSync(agentId) {
-  const sync = state.draftSync.get(agentId);
-  if (!sync) return;
-  // The accepted prompt cleared the runtime draft. Treat that clear as the new
-  // synchronization baseline, then preserve text typed while submission was in flight.
-  sync.sent = "";
-  sync.desired = state.selectedAgent === agentId
-    ? elements.input.value
-    : (state.drafts.get(agentId) || "");
-  sync.paused = false;
-  void runDraftSync(agentId, sync);
-}
-
 function restoreDraft() {
-  elements.input.value = state.drafts.get(state.selectedAgent) || "";
+  const pending = currentStore()?.pendingPromptSubmission;
+  elements.input.value = pending?.displayContent ?? state.drafts.get(state.selectedAgent) ?? "";
   autoSizeInput();
 }
 
 function flushDraftBeforePageCloses() {
   const drafts = new Map();
   for (const [agentId, sync] of state.draftSync) {
+    if (state.stores.get(agentId)?.pendingPromptSubmission) continue;
     if (sync.sent !== sync.desired) drafts.set(agentId, sync.desired);
   }
-  if (state.selectedAgent && agentMeta()?.kind !== "sub-agent") {
+  if (state.selectedAgent && agentMeta()?.kind !== "sub-agent"
+      && !currentStore()?.pendingPromptSubmission) {
     drafts.set(state.selectedAgent, elements.input.value);
   }
   for (const [agentId, content] of drafts) {

@@ -1784,6 +1784,8 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"stop-generation\""));
         assert!(INDEX_HTML.contains(">停止</button>"));
         assert!(INDEX_HTML.contains("primary-button composer-button"));
+        assert!(INDEX_HTML.contains("id=\"send-prompt-spinner\""));
+        assert!(INDEX_HTML.contains("id=\"send-prompt-label\""));
         assert!(APP_JS.contains("function stopGeneration()"));
         assert!(APP_JS.contains("function isWorkerAgent(meta = agentMeta())"));
         assert!(APP_JS.contains("meta?.orchestrator === \"worker-agent\""));
@@ -1791,9 +1793,15 @@ mod tests {
         assert!(APP_JS.contains("meta.kind !== \"sub-agent\" || isWorkerAgent(meta)"));
         assert!(APP_JS.contains("elements.stop.addEventListener(\"click\", stopGeneration)"));
         assert!(APP_JS.contains("elements.stop.disabled = !canStop"));
+        assert!(APP_JS.contains("elements.input.disabled = readOnly || sending"));
+        assert!(APP_JS.contains("elements.send.disabled = readOnly || sending"));
+        assert!(APP_JS.contains("elements.send.setAttribute(\"aria-busy\", String(sending))"));
+        assert!(APP_JS.contains("pending?.status === \"confirming\" ? \"正在确认\""));
         assert!(APP_JS.contains("if (!state.selectedAgent || !canControlRuntime()) return;"));
         assert!(STYLE_CSS.contains(".composer-button {"));
         assert!(STYLE_CSS.contains(".stop-button {"));
+        assert!(STYLE_CSS.contains(".send-prompt-spinner {"));
+        assert!(STYLE_CSS.contains("@keyframes send-prompt-spin"));
     }
 
     #[test]
@@ -1855,7 +1863,7 @@ mod tests {
     #[test]
     fn embedded_webui_synchronizes_runtime_owned_input_drafts() {
         assert!(APP_JS.contains("function observePromptSubmission(meta, store)"));
-        assert!(APP_JS.contains("store.pendingPromptSubmissions > 0"));
+        assert!(APP_JS.contains("if (store.pendingPromptSubmission) return false;"));
         assert!(APP_JS.contains("function observeInputDraft(meta, store)"));
         assert!(APP_JS.contains("function adoptInputDraft(agentId, store, revision, content)"));
         assert!(APP_JS.contains("expected_revision: expectedRevision"));
@@ -1863,12 +1871,39 @@ mod tests {
         assert!(APP_JS.contains("command: \"update_input_draft\""));
         assert!(APP_JS.contains("function queueDraftUpdate(agentId, content)"));
         assert!(APP_JS.contains("async function pauseDraftSyncForSubmission(agentId)"));
+        assert!(
+            APP_JS.contains("pending?.displayContent ?? state.drafts.get(state.selectedAgent)")
+        );
         assert!(APP_JS.contains("window.addEventListener(\"pagehide\", () =>"));
         assert!(APP_JS.contains("flushDraftBeforePageCloses();"));
+        assert!(
+            APP_JS.contains("if (state.stores.get(agentId)?.pendingPromptSubmission) continue;")
+        );
         assert!(APP_JS.contains("navigator.sendBeacon?.(\"/api/command\""));
         assert!(APP_JS.contains("fetch(\"/api/command\""));
         assert!(APP_JS.contains("receipt?.prompt_submission_revision"));
         assert!(APP_JS.contains("store.promptSubmissionRevision = Math.max"));
+    }
+
+    #[test]
+    fn embedded_webui_waits_for_authoritative_prompt_projection() {
+        assert!(APP_JS.contains("pendingPromptSubmission: null"));
+        assert!(APP_JS.contains("function promptSubmissionBoundary(meta, store)"));
+        assert!(APP_JS.contains("function pendingPromptReachedProjection(store)"));
+        assert!(APP_JS.contains("message.key?.startsWith(\"user:\")"));
+        assert!(APP_JS.contains("Number(message.eventId) > pending.afterEventId"));
+        assert!(APP_JS.contains("message.content === pending.content"));
+        assert!(APP_JS.contains("function finishPendingPromptSubmission(agentId)"));
+        assert!(APP_JS.contains("function cancelPendingPromptSubmission(agentId, pending)"));
+        assert!(APP_JS.contains("function commandResultIsUnknown(error)"));
+        assert!(APP_JS.contains("pending.status = \"confirming\""));
+        assert!(APP_JS.contains("if (pending.settled) return;"));
+        assert!(APP_JS.contains("const promptConfirmed = beginConfirmedPromptRender(changes)"));
+        assert!(
+            APP_JS.contains(
+                "if (promptConfirmed) finishPendingPromptSubmission(state.selectedAgent)"
+            )
+        );
     }
 
     #[test]
@@ -2016,6 +2051,8 @@ mod tests {
         assert!(APP_JS.contains("for (let index = start; index < messages.length; index += 1)"));
         assert!(!APP_JS.contains("projection.messages.filter((message) =>"));
         assert!(APP_JS.contains("projection._messageByKey.get(`tool:${node.dataset.workerWait}`)"));
+        assert!(APP_JS.contains("function markPendingPromptConfirmation(store, changes)"));
+        assert!(APP_JS.contains("return markPendingPromptConfirmation(store, changes)"));
     }
 
     #[test]
@@ -2030,6 +2067,11 @@ mod tests {
         assert!(APP_JS.contains(
             "elements.transcript.addEventListener(\"wheel\", suspendTranscriptAutoFollow"
         ));
+        assert!(APP_JS.contains("function beginConfirmedPromptRender(changes,"));
+        assert!(APP_JS.contains("if (!changes.promptConfirmed) return false;"));
+        assert!(APP_JS.contains("bottomFollower.follow();"));
+        assert!(APP_JS.contains("if (transcriptChanged || promptConfirmed)"));
+        assert!(APP_JS.contains("transcriptBottomFollower.layoutChanged();"));
         assert_eq!(
             APP_JS
                 .matches("viewport.scrollTop = viewport.scrollHeight")

@@ -175,11 +175,19 @@ button { color: inherit; }
 .composer-shell { position: relative; margin: 0 max(24px, calc((100% - 1200px) / 2)) 13px; padding: 11px 13px 9px; border: 1px solid var(--border-bright); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
 .composer-shell:focus-within { border-color: #625bb0; box-shadow: 0 0 0 3px rgb(98 91 176 / 12%), var(--shadow); }
 #prompt-input { display: block; width: 100%; min-height: 29px; max-height: 180px; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); line-height: 1.55; }
+.composer-shell.sending { border-color: #625bb0; }
+#prompt-input:disabled { opacity: 1; color: var(--text); cursor: wait; -webkit-text-fill-color: var(--text); }
 #prompt-input::placeholder { color: var(--dim); }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; }
-.composer-actions span { color: var(--dim); font-size: 11px; }
+#input-hint { color: var(--dim); font-size: 11px; }
 .composer-buttons { display: flex; align-items: center; gap: 7px; margin-left: auto; }
 .composer-button { min-width: 50px; min-height: 29px; padding: 4px 10px; border-radius: 8px; font-size: 12px; }
+#send-prompt { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
+#send-prompt[aria-busy="true"]:disabled { opacity: 1; cursor: wait; }
+.send-prompt-spinner { display: inline-block; width: 12px; height: 12px; border: 2px solid rgb(255 255 255 / 35%); border-top-color: #fff; border-radius: 50%; animation: send-prompt-spin .7s linear infinite; }
+.send-prompt-spinner.hidden { display: none; }
+@keyframes send-prompt-spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) { .send-prompt-spinner { animation-duration: 1.6s; } }
 .stop-button { border: 1px solid #8f3944; background: #7b2b35; color: #fff; font-weight: 700; cursor: pointer; }
 .stop-button:hover:not(:disabled) { border-color: #b04b59; background: #963946; }
 .stop-button:disabled { opacity: .35; cursor: default; }
@@ -336,7 +344,7 @@ button { color: inherit; }
   .transcript, .document-view { padding-left: 16px; padding-right: 16px; }
   .objective-summary, .composer-shell { margin-left: 16px; margin-right: 16px; }
   .statusbar { padding: 5px 16px; }
-  .composer-actions span { display: none; }
+  #input-hint { display: none; }
 }
 
 @media (orientation: portrait) {
@@ -449,7 +457,7 @@ button { color: inherit; }
   }
   #prompt-input { max-height: 30dvh; font-size: 16px; }
   .composer-actions { margin-top: 5px; }
-  .composer-actions span { display: none; }
+  #input-hint { display: none; }
   .composer-actions::before { content: ""; }
   .composer-actions .composer-button { min-width: 50px; min-height: 30px; }
   .slash-menu { max-height: 38dvh; }
