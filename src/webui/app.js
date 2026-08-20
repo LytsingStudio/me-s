@@ -1706,7 +1706,7 @@ function renderTranscript(forceFull = false, changedFrom = 0) {
   if (!messages.length) {
     const environment = state.snapshot.environment;
     if (!elements.transcriptContent.querySelector(":scope > .empty-state")) {
-      elements.transcriptContent.innerHTML = `<div class="empty-state"><div><strong>ME-RUST</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
+      elements.transcriptContent.innerHTML = `<div class="empty-state"><div><strong>ME-S</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
     }
     return;
   }

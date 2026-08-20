@@ -2,6 +2,12 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+grep -F 'LytsingStudio/me-s' "$ROOT_DIR/install.sh" >/dev/null
+if grep -F 'LytsingStudio/me-rust' "$ROOT_DIR/install.sh" >/dev/null; then
+    printf 'install.sh still targets the legacy me-rust release repository\n' >&2
+    exit 1
+fi
+
 TEST_DIR=$(mktemp -d "${TMPDIR:-/tmp}/me-s-install-test.XXXXXX")
 RELEASE_DIR=$TEST_DIR/release
 mkdir -p "$RELEASE_DIR"

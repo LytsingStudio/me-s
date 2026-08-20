@@ -1,12 +1,16 @@
 [package]
-name = "me"
-version = "0.0.319"
+name = "me-s"
+version = "0.1.0"
 edition = "2024"
 autobins = false
 description = "A lightweight local agent runtime optimized for long-running work"
 license = "MIT"
 readme = "README.md"
-repository = "https://github.com/LytsingStudio/me-rust"
+repository = "https://github.com/LytsingStudio/me-s"
+
+[lib]
+name = "me"
+path = "src/lib.rs"
 
 [[bin]]
 name = "me-s"

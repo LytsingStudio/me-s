@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-# ME-RUST-MANAGED-TOOLBOX
-"""ME-RUST default WebBrowser toolbox.
+# ME-S-MANAGED-TOOLBOX
+"""ME-S default WebBrowser toolbox.
 
 The process is a standalone, persistent JSONL toolbox. It lazily installs
 pinned Camoufox, Playwright, and PySide6 runtimes plus the matching anti-detect
-Firefox build into ME-RUST's global configuration directory. Camoufox performs
+Firefox build into ME-S's global configuration directory. Camoufox performs
 real headed browser interaction on graphical desktops while its native window
 stays concealed outside explicit human handoffs. Page observation uses the
 browser-generated accessibility tree or a rendered viewport image; action
@@ -633,7 +633,7 @@ class DependencyRuntime:
                 if not self.browser_is_valid():
                     progress(
                         "Installing Camoufox browser "
-                        f"{CAMOUFOX_BROWSER_VERSION} in ME-RUST global storage"
+                        f"{CAMOUFOX_BROWSER_VERSION} in ME-S global storage"
                     )
                     self._install_browser()
         self._cleanup_legacy_runtime()
@@ -775,7 +775,7 @@ class DependencyRuntime:
     def reinstall_browser(self, progress: Callable[[str], None]) -> None:
         with install_lock(self.runtime_root, progress):
             self.browser_marker.unlink(missing_ok=True)
-            progress("Repairing Camoufox browser in ME-RUST global storage")
+            progress("Repairing Camoufox browser in ME-S global storage")
             subprocess.run(
                 [
                     sys.executable,
@@ -1762,8 +1762,8 @@ class HumanActionDialog:
         try:
             app = QApplication.instance()
             if app is None:
-                app = QApplication(["ME WebBrowser"])
-                app.setApplicationName("ME-RUST")
+                app = QApplication(["ME-S WebBrowser"])
+                app.setApplicationName("ME-S")
                 app.setQuitOnLastWindowClosed(False)
 
             dialog = QDialog()
@@ -2798,7 +2798,7 @@ def handle(request: Any) -> None:
     if command == "getBrief":
         result(
             request_id,
-            "Operate real web pages through a persistent headed Camoufox browser context on a graphical desktop. The native window remains concealed during automation and is revealed only for an explicit human handoff. Action tools perform one browser action and return no page content. WebBrowser.Snapshot is the sole page-content observation tool: after a fixed delay it returns Playwright's browser-generated ARIA accessibility tree verbatim, a reusable workspace path to the rendered viewport screenshot, or both. A screenshot is not shown to the model automatically; use Image.View on the returned path only when visual inspection is needed, then remove an unneeded screenshot with File.Stat followed by File.Delete. The normal loop is Create, Navigate, Snapshot(kind=text), act with a ref from that snapshot, then Snapshot again to observe the result. Text snapshots contain native [ref=…] values and viewport-relative boxes. Refs belong to the rendered document that produced them; refresh the text Snapshot after navigation or a structural page change, never invent a ref, and preserve iframe prefixes exactly. Native JavaScript dialogs are dismissed automatically and reported by the next Snapshot. If an operation returns operation_timeout, the unresponsive browser runtime has been restarted: discard every previous page_id and element_id, then Create a new page. When general web search is needed and the user did not select an engine, use Google first and Baidu second; if Google is unavailable, blocked by verification, or inadequate, continue with Baidu. Browser dependencies are installed once in ME-RUST's global directory; live page state remains private to this toolbox process and does not survive its restart.",
+            "Operate real web pages through a persistent headed Camoufox browser context on a graphical desktop. The native window remains concealed during automation and is revealed only for an explicit human handoff. Action tools perform one browser action and return no page content. WebBrowser.Snapshot is the sole page-content observation tool: after a fixed delay it returns Playwright's browser-generated ARIA accessibility tree verbatim, a reusable workspace path to the rendered viewport screenshot, or both. A screenshot is not shown to the model automatically; use Image.View on the returned path only when visual inspection is needed, then remove an unneeded screenshot with File.Stat followed by File.Delete. The normal loop is Create, Navigate, Snapshot(kind=text), act with a ref from that snapshot, then Snapshot again to observe the result. Text snapshots contain native [ref=…] values and viewport-relative boxes. Refs belong to the rendered document that produced them; refresh the text Snapshot after navigation or a structural page change, never invent a ref, and preserve iframe prefixes exactly. Native JavaScript dialogs are dismissed automatically and reported by the next Snapshot. If an operation returns operation_timeout, the unresponsive browser runtime has been restarted: discard every previous page_id and element_id, then Create a new page. When general web search is needed and the user did not select an engine, use Google first and Baidu second; if Google is unavailable, blocked by verification, or inadequate, continue with Baidu. Browser dependencies are installed once in ME-S's global directory; live page state remains private to this toolbox process and does not survive its restart.",
         )
         return
     tool = request.get("tool")

@@ -1,12 +1,12 @@
-# ME-RUST
+# ME-S
 
-ME-RUST（命令名 `me-s`）是一个简单、轻量的本地 AI Agent，尤其适合需要连续工作较长时间的任务。
+ME-S（命令名 `me-s`）是一个简单、轻量的本地 AI Agent，尤其适合需要连续工作较长时间的任务。
 
 它可以在终端或浏览器中使用，能够操作文件、运行命令、浏览网页、查看图片，并支持多个 Agent 协作。不同界面可以同时连接到同一个运行中的 me-s，实时同步会话、输入草稿和执行状态。
 
-ME-RUST 本身也是开发者与 Codex 通过 vibe coding 协作完成的项目。
+ME-S 本身也是开发者与 Codex 通过 vibe coding 协作完成的项目。
 
-> ME-RUST 仍处于早期阶段。功能和配置可能继续调整，请为重要项目保留独立备份。
+> ME-S 仍处于早期阶段。功能和配置可能继续调整，请为重要项目保留独立备份。
 
 ## 特点
 
@@ -21,26 +21,26 @@ ME-RUST 本身也是开发者与 Codex 通过 vibe coding 协作完成的项目�
 
 ## 安装
 
-预编译文件发布在 [GitHub Releases](https://github.com/LytsingStudio/me-rust/releases)。安装脚本会自动识别系统与处理器架构，并在安装前校验下载文件。
+预编译文件发布在 [GitHub Releases](https://github.com/LytsingStudio/me-s/releases)。安装脚本会自动识别系统与处理器架构，并在安装前校验下载文件。
 
 ### macOS
 
 在终端中执行：
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/releases/latest/download/install.sh | sh
 ```
 
 默认安装到 `/usr/local/bin/me-s`，需要时会请求管理员权限。如需安装到其他目录：
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/releases/latest/download/install.sh | ME_INSTALL_DIR="$HOME/.local/bin" sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/releases/latest/download/install.sh | ME_INSTALL_DIR="$HOME/.local/bin" sh
 ```
 
 ### Linux
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/releases/latest/download/install.sh | sh
 ```
 
 默认安装到 `/usr/local/bin/me-s`。Linux 版本兼容 glibc 2.17 及以上系统。
@@ -50,10 +50,10 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/r
 在 PowerShell 中执行：
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/LytsingStudio/me-rust/releases/latest/download/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/LytsingStudio/me-s/releases/latest/download/install.ps1 | iex
 ```
 
-脚本默认安装到 `%LOCALAPPDATA%\Programs\me\me-s.exe`，并把该目录加入用户 `PATH`。如果当前窗口尚未识别 `me-s` 命令，请重新打开终端。
+脚本默认安装到 `%LOCALAPPDATA%\Programs\me-s\me-s.exe`，并把该目录加入用户 `PATH`。如果当前窗口尚未识别 `me-s` 命令，请重新打开终端。
 
 安装 me-s 不会覆盖或删除已有的 `me` 可执行文件；`me` 与 `me-s` 可以同时存在，并共同使用现有的 me 全局配置目录和工作区格式。
 
@@ -62,7 +62,7 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-rust/r
 需要安装 Rust：
 
 ```bash
-git clone https://github.com/LytsingStudio/me-rust.git && cd me-rust && cargo build --locked --release
+git clone https://github.com/LytsingStudio/me-s.git && cd me-s && cargo build --locked --release
 ```
 构建产物位于 `target/release/me-s`。
 
@@ -255,4 +255,4 @@ bun test tests/webui_markdown.test.js tests/webui_projection.test.js
 
 ## License
 
-ME-RUST 使用 [MIT License](LICENSE)。
+ME-S 使用 [MIT License](LICENSE)。

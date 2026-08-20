@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-# ME-RUST-MANAGED-TOOLBOX
-"""ME-RUST default Terminal toolbox.
+# ME-S-MANAGED-TOOLBOX
+"""ME-S default Terminal toolbox.
 
 This program is a persistent JSONL toolbox process. Python 3.12 hosts
-the process while ME-RUST's terminal worker supplies the
+the process while ME-S's terminal worker supplies the
 cross-platform PTY and VT100 implementation.
 """
 
@@ -29,7 +29,7 @@ if sys.version_info[:2] != (3, 12):
 
 host = os.environ.get("ME_TOOLBOX_HOST") or shutil.which("me-s")
 if not host:
-    fail("Terminal toolbox cannot find ME-RUST; set ME_TOOLBOX_HOST or install me-s")
+    fail("Terminal toolbox cannot find ME-S; set ME_TOOLBOX_HOST or install me-s")
 
 worker = subprocess.Popen(
     [host, "__toolbox-terminal-worker"],

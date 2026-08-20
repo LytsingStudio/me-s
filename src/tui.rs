@@ -3320,13 +3320,13 @@ impl StartupBanner {
     }
 
     fn rows(&self, width: usize) -> Vec<UiRow> {
-        let mut rows = ME_RUST_LOGO
+        let mut rows = ME_S_LOGO
             .into_iter()
             .map(|line| UiRow::new(line, RowTone::BannerLogo))
             .collect::<Vec<_>>();
         rows.push(UiRow::new("", RowTone::Spacer));
         rows.push(UiRow::new(
-            format!("Welcome to ME-RUST v{}", env!("CARGO_PKG_VERSION")),
+            format!("Welcome to ME-S v{}", env!("CARGO_PKG_VERSION")),
             RowTone::BannerTitle,
         ));
         append_banner_field(&mut rows, "Workspace", &self.workspace, width);
@@ -3362,13 +3362,13 @@ fn format_byte_size(bytes: u64) -> String {
     }
 }
 
-const ME_RUST_LOGO: [&str; 6] = [
-    "███╗   ███╗███████╗      ██████╗ ██╗   ██╗███████╗████████╗",
-    "████╗ ████║██╔════╝      ██╔══██╗██║   ██║██╔════╝╚══██╔══╝",
-    "██╔████╔██║█████╗  █████╗██████╔╝██║   ██║███████╗   ██║   ",
-    "██║╚██╔╝██║██╔══╝  ╚════╝██╔══██╗██║   ██║╚════██║   ██║   ",
-    "██║ ╚═╝ ██║███████╗      ██║  ██║╚██████╔╝███████║   ██║   ",
-    "╚═╝     ╚═╝╚══════╝      ╚═╝  ╚═╝ ╚═════╝ ╚══════╝   ╚═╝   ",
+const ME_S_LOGO: [&str; 6] = [
+    "███╗   ███╗███████╗      ███████╗",
+    "████╗ ████║██╔════╝      ██╔════╝",
+    "██╔████╔██║█████╗  █████╗███████╗",
+    "██║╚██╔╝██║██╔══╝  ╚════╝╚════██║",
+    "██║ ╚═╝ ██║███████╗      ███████║",
+    "╚═╝     ╚═╝╚══════╝      ╚══════╝",
 ];
 
 fn append_banner_field(rows: &mut Vec<UiRow>, label: &str, value: &str, width: usize) {
@@ -3779,7 +3779,7 @@ fn print_terminal_preview_status<W: Write>(
     )?;
     let mut remaining = usize::from(width);
     for (text, color) in [
-        (" me", STATUS_ME_COLOR),
+        (" me-s", STATUS_PRODUCT_COLOR),
         (" · ", STATUS_HINT_COLOR),
         ("Terminal", STATUS_ORCHESTRATOR_COLOR),
         (" · ", STATUS_HINT_COLOR),
@@ -4401,7 +4401,7 @@ fn panel_status_text(
                 "Tab 切换"
             };
             format!(
-                "{spinner} me · {agent_id} · {orchestrator_name} · {model_name} · {effort} · {context} · {state}   只读 · {controls}"
+                "{spinner} me-s · {agent_id} · {orchestrator_name} · {model_name} · {effort} · {context} · {state}   只读 · {controls}"
             )
         }
         None => main_status_text(
@@ -4572,7 +4572,7 @@ fn render_workmap<W: Write>(
         "展开历史详情"
     };
     let status = format!(
-        " me · WorkMap · {agent_id} · {record_count} records · {} lines   Ctrl+O {history_action} · Tab 切换",
+        " me-s · WorkMap · {agent_id} · {record_count} records · {} lines   Ctrl+O {history_action} · Tab 切换",
         rows.len()
     );
     print_row(stdout, &UiRow::new(status, RowTone::Status), width)?;
@@ -4977,7 +4977,7 @@ fn main_status_text(
         api_activity,
     );
     format!(
-        "{spinner} me · {agent_id} · {orchestrator_name} · {model_name} · {effort} · {context}   Ctrl+O 工具详情 · Esc 中止/撤回/清空"
+        "{spinner} me-s · {agent_id} · {orchestrator_name} · {model_name} · {effort} · {context}   Ctrl+O 工具详情 · Esc 中止/撤回/清空"
     )
 }
 
@@ -5465,7 +5465,7 @@ fn markdown_color(role: MarkdownColorRole) -> Color {
 const MUTED_BULLET_COLOR: Color = Color::Grey;
 const TOOL_DETAIL_COLOR: Color = Color::DarkGrey;
 const SEPARATOR_COLOR: Color = Color::DarkGrey;
-const STATUS_ME_COLOR: Color = Color::Rgb {
+const STATUS_PRODUCT_COLOR: Color = Color::Rgb {
     r: 120,
     g: 100,
     b: 255,
@@ -5522,7 +5522,7 @@ fn print_main_status<W: Write>(stdout: &mut W, text: &str) -> io::Result<bool> {
 
 fn main_status_segments(text: &str) -> Option<Vec<(Color, &str)>> {
     let (spinner, text) = text.split_at(text.chars().next()?.len_utf8());
-    if !text.starts_with(" me") || (spinner != " " && !API_SPINNER_FRAMES.contains(&spinner)) {
+    if !text.starts_with(" me-s") || (spinner != " " && !API_SPINNER_FRAMES.contains(&spinner)) {
         return None;
     }
     let mut segments = vec![(
@@ -5538,7 +5538,7 @@ fn main_status_segments(text: &str) -> Option<Vec<(Color, &str)>> {
             segments.push((STATUS_HINT_COLOR, " · "));
         }
         match index {
-            0 => segments.push((STATUS_ME_COLOR, field)),
+            0 => segments.push((STATUS_PRODUCT_COLOR, field)),
             1 => segments.push((STATUS_ORCHESTRATOR_COLOR, field)),
             2 => segments.push((STATUS_ORCHESTRATOR_COLOR, field)),
             3 => segments.push((STATUS_MODEL_COLOR, field)),
@@ -7091,7 +7091,7 @@ mod tests {
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("run"));
         assert!(output.contains("好"));
-        assert!(output.contains(" me"));
+        assert!(output.contains(" me-s"));
         assert!(output.contains("Terminal"));
         assert!(output.contains("pty-27"));
         assert!(output.contains("\u{1b}[1m"), "{output:?}");
@@ -7208,9 +7208,9 @@ mod tests {
             edb_size_bytes: 1536,
         };
         let rows = banner.rows(80);
-        assert_eq!(rows[0], UiRow::new(ME_RUST_LOGO[0], RowTone::BannerLogo));
+        assert_eq!(rows[0], UiRow::new(ME_S_LOGO[0], RowTone::BannerLogo));
         assert!(rows.iter().any(|row| row.text
-            == format!("Welcome to ME-RUST v{}", env!("CARGO_PKG_VERSION"))
+            == format!("Welcome to ME-S v{}", env!("CARGO_PKG_VERSION"))
             && row.tone == RowTone::BannerTitle));
         assert!(rows.iter().any(|row| row.text.contains("Agent")
             && row.text.contains("main")
@@ -9579,7 +9579,7 @@ mod tests {
             text
         );
         for (expected_text, expected_color) in [
-            (" me", STATUS_ME_COLOR),
+            (" me-s", STATUS_PRODUCT_COLOR),
             ("main", STATUS_ORCHESTRATOR_COLOR),
             ("main-agent", STATUS_ORCHESTRATOR_COLOR),
             ("cometapi-deepseek-v4-flash", STATUS_MODEL_COLOR),

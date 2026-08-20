@@ -18,9 +18,9 @@ use sha2::{Digest, Sha256};
 
 use crate::Result;
 
-pub const RELEASE_REPOSITORY: &str = "LytsingStudio/me-rust";
+pub const RELEASE_REPOSITORY: &str = "LytsingStudio/me-s";
 const CHECKSUM_ASSET: &str = "SHA256SUMS";
-const UPDATE_USER_AGENT: &str = concat!("me-rust/", env!("CARGO_PKG_VERSION"));
+const UPDATE_USER_AGENT: &str = concat!("me-s/", env!("CARGO_PKG_VERSION"));
 const METADATA_CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -607,12 +607,12 @@ mod tests {
     #[test]
     fn public_release_urls_are_versioned_and_need_no_api_metadata() {
         let tagged =
-            reqwest::Url::parse("https://github.com/LytsingStudio/me-rust/releases/tag/v0.0.267")
+            reqwest::Url::parse("https://github.com/LytsingStudio/me-s/releases/tag/v0.0.267")
                 .unwrap();
         assert_eq!(release_tag_from_url(&tagged).unwrap(), "v0.0.267");
         assert!(
             release_tag_from_url(
-                &reqwest::Url::parse("https://github.com/LytsingStudio/me-rust/releases/latest")
+                &reqwest::Url::parse("https://github.com/LytsingStudio/me-s/releases/latest")
                     .unwrap()
             )
             .is_err()
@@ -620,7 +620,7 @@ mod tests {
         assert!(
             release_tag_from_url(
                 &reqwest::Url::parse(
-                    "https://github.com/LytsingStudio/me-rust/releases/tag/not-a-version"
+                    "https://github.com/LytsingStudio/me-s/releases/tag/not-a-version"
                 )
                 .unwrap()
             )
@@ -634,7 +634,7 @@ mod tests {
             release_asset_url(&release, "me-s-linux-x86_64")
                 .unwrap()
                 .as_str(),
-            "https://github.com/LytsingStudio/me-rust/releases/download/v0.0.267/me-s-linux-x86_64"
+            "https://github.com/LytsingStudio/me-s/releases/download/v0.0.267/me-s-linux-x86_64"
         );
     }
 

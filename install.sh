@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-REPOSITORY="${ME_INSTALL_REPOSITORY:-LytsingStudio/me-rust}"
+REPOSITORY="${ME_INSTALL_REPOSITORY:-LytsingStudio/me-s}"
 BASE_URL="${ME_INSTALL_BASE_URL:-https://github.com/$REPOSITORY/releases/latest/download}"
 INSTALL_DIR="${ME_INSTALL_DIR:-/usr/local/bin}"
 

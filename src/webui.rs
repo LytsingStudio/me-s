@@ -2658,7 +2658,7 @@ mod tests {
             .unwrap()
             .text()
             .unwrap();
-        assert!(html.contains("ME-RUST"));
+        assert!(html.contains("ME-S"));
         assert!(html.contains("/app.js"));
 
         let markdown_adapter = reqwest::blocking::get(format!("{address}/markdown.js"))

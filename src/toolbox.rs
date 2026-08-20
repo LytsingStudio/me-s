@@ -1367,7 +1367,8 @@ fn is_managed_default_toolbox(source: &str) -> bool {
     source
         .lines()
         .take(3)
-        .any(|line| line == "# ME-RUST-MANAGED-TOOLBOX")
+        .any(|line| matches!(line, "# ME-S-MANAGED-TOOLBOX" | "# ME-RUST-MANAGED-TOOLBOX"))
+        || source.starts_with("#!/usr/bin/env python3\n\"\"\"ME-S default ")
         || source.starts_with("#!/usr/bin/env python3\n\"\"\"ME-RUST default ")
 }
 
@@ -1530,7 +1531,7 @@ Every tool response uses this runtime envelope:
 
 `result.state` reports `succeeded`, `failed`, `interrupted`, or `indeterminate`. The `Result detail schema` shown under each tool describes only `result.detail`, including its actual JSON type; it does not describe this outer runtime envelope. `detail` is omitted when a tool has no detail. Streaming or structured activity may additionally appear in top-level `terminal_updates`, `updates`, or `other_updates` arrays.
 
-Every envelope has a top-level `truncate` boolean. `truncate:false` means the complete tool result is present. `truncate:true` means ME-RUST safely reduced only the tool's potentially large content before adding it to model context; read `truncate_info` for the retained and omitted original ranges. Existing tool-specific `truncated` fields have their documented collection-time meaning and are independent of this envelope.
+Every envelope has a top-level `truncate` boolean. `truncate:false` means the complete tool result is present. `truncate:true` means ME-S safely reduced only the tool's potentially large content before adding it to model context; read `truncate_info` for the retained and omitted original ranges. Existing tool-specific `truncated` fields have their documented collection-time meaning and are independent of this envelope.
 
 Safe truncation never cuts serialized JSON or leaves dangling references. Ordered logs and result lists omit their oldest complete items. `File.Read` keeps its first and last numbered line entries; missing numeric keys are omitted source lines, while an oversized individual line may use `text_fragments`. `File.Search` keeps each match object coherent: it removes complete numbered context-line entries from `before` and `after` before representing an oversized `match_text` value as `text_fragments`. Other documents and long text retain exact beginning and ending fragments. When a normal string cannot remain contiguous, it is represented as a `text_fragments` object whose fragments carry exact original byte offsets; never treat separated fragments as adjacent original text. A cropped browser accessibility tree uses `aria_fragments`, whose fragments carry exact source line ranges and remain separated by omitted source ranges."#.into()];
     for (toolbox, brief) in briefs {

@@ -1,7 +1,7 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Get-MeReleaseAsset {
+function Get-MeSReleaseAsset {
     param([string]$Architecture)
 
     $normalized = $Architecture.Trim().ToUpperInvariant()
@@ -11,7 +11,7 @@ function Get-MeReleaseAsset {
     throw "me-s does not provide a Windows release for $Architecture"
 }
 
-function Get-MeExpectedChecksum {
+function Get-MeSExpectedChecksum {
     param(
         [string]$Manifest,
         [string]$Asset
@@ -31,7 +31,7 @@ function Get-MeExpectedChecksum {
     return $entries[0]
 }
 
-function Invoke-MeDownload {
+function Invoke-MeSDownload {
     param(
         [string]$Uri,
         [string]$OutFile
@@ -49,7 +49,7 @@ function Invoke-MeDownload {
     Invoke-WebRequest @arguments
 }
 
-function Add-MeToUserPath {
+function Add-MeSToUserPath {
     param([string]$Directory)
 
     $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -93,7 +93,7 @@ function Add-MeToUserPath {
     }
 }
 
-function Install-Me {
+function Install-MeS {
     if ($PSVersionTable.PSVersion.Major -lt 6) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
@@ -105,10 +105,10 @@ function Install-Me {
     } else {
         $env:PROCESSOR_ARCHITECTURE
     }
-    $asset = Get-MeReleaseAsset $architecture
+    $asset = Get-MeSReleaseAsset $architecture
 
     $repository = if ([string]::IsNullOrWhiteSpace($env:ME_INSTALL_REPOSITORY)) {
-        "LytsingStudio/me-rust"
+        "LytsingStudio/me-s"
     } else {
         $env:ME_INSTALL_REPOSITORY
     }
@@ -118,7 +118,7 @@ function Install-Me {
         $env:ME_INSTALL_BASE_URL.TrimEnd('/')
     }
     $installDirectory = if ([string]::IsNullOrWhiteSpace($env:ME_INSTALL_DIR)) {
-        Join-Path $env:LOCALAPPDATA "Programs\me"
+        Join-Path $env:LOCALAPPDATA "Programs\me-s"
     } else {
         $env:ME_INSTALL_DIR
     }
@@ -133,10 +133,10 @@ function Install-Me {
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     try {
         Write-Host "Downloading $asset..."
-        Invoke-MeDownload "$baseUrl/$asset" $downloadedAsset
-        Invoke-MeDownload "$baseUrl/SHA256SUMS" $manifest
+        Invoke-MeSDownload "$baseUrl/$asset" $downloadedAsset
+        Invoke-MeSDownload "$baseUrl/SHA256SUMS" $manifest
 
-        $expected = Get-MeExpectedChecksum $manifest $asset
+        $expected = Get-MeSExpectedChecksum $manifest $asset
         $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloadedAsset).Hash.ToLowerInvariant()
         if ($actual -cne $expected) {
             throw "checksum verification failed for $asset"
@@ -151,7 +151,7 @@ function Install-Me {
         New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
         Copy-Item -LiteralPath $downloadedAsset -Destination $staging
         Move-Item -Force -LiteralPath $staging -Destination $destination
-        Add-MeToUserPath $installDirectory
+        Add-MeSToUserPath $installDirectory
 
         & $destination version
         if ($LASTEXITCODE -ne 0) {
@@ -170,5 +170,5 @@ function Install-Me {
 }
 
 if ($env:ME_INSTALL_NO_MAIN -ne "1") {
-    Install-Me
+    Install-MeS
 }

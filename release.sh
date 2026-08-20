@@ -11,6 +11,8 @@ WINDOWS_TARGET="x86_64-pc-windows-gnu"
 HOST_TARGET="$(rustc -vV | sed -n 's/^host: //p')"
 VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' "$ROOT_DIR/Cargo.toml")"
 TAG="v$VERSION"
+EXPECTED_REPOSITORY="${ME_RELEASE_REPOSITORY:-LytsingStudio/me-s}"
+EXPECTED_BRANCH="${ME_RELEASE_BRANCH:-s}"
 MACOS_ARM64_NAME="me-s-macos-arm64"
 MACOS_X86_64_NAME="me-s-macos-x86_64"
 LINUX_ARM64_NAME="me-s-linux-arm64"
@@ -76,6 +78,10 @@ if [[ -z "$BRANCH" ]]; then
     echo "error: release cannot run from a detached HEAD" >&2
     exit 1
 fi
+if [[ "$BRANCH" != "$EXPECTED_BRANCH" ]]; then
+    echo "error: release must run from $EXPECTED_BRANCH; current branch is $BRANCH" >&2
+    exit 1
+fi
 if ! git remote get-url origin >/dev/null 2>&1; then
     echo "error: release requires an origin remote" >&2
     exit 1
@@ -86,6 +92,10 @@ if ! gh auth status --hostname github.com >/dev/null 2>&1; then
 fi
 
 REPOSITORY="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
+if [[ "$REPOSITORY" != "$EXPECTED_REPOSITORY" ]]; then
+    echo "error: release repository must be $EXPECTED_REPOSITORY; current origin resolves to $REPOSITORY" >&2
+    exit 1
+fi
 git fetch --quiet origin "$BRANCH" --tags
 HEAD_COMMIT="$(git rev-parse HEAD)"
 REMOTE_COMMIT="$(git rev-parse "origin/$BRANCH")"

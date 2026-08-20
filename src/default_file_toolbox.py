@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# ME-RUST-MANAGED-TOOLBOX
-"""ME-RUST default filesystem File toolbox."""
+# ME-S-MANAGED-TOOLBOX
+"""ME-S default filesystem File toolbox."""
 
 from __future__ import annotations
 
@@ -2931,7 +2931,7 @@ def handle(request: Any) -> None:
         data = validate_object(request.get("input"))
         allowed = set(INPUT_SCHEMAS[tool]["properties"])
         if tool == "Edit":
-            # _edit_scope is injected by ME-RUST from persisted EDB state.
+            # _edit_scope is injected by ME-S from persisted EDB state.
             # expected_hash is accepted only as a harmless legacy field; Edit
             # never trusts it and always uses the remembered Read scope.
             allowed.update({"_edit_scope", "expected_hash"})

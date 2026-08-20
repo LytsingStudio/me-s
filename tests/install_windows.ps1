@@ -4,16 +4,27 @@ Set-StrictMode -Version Latest
 $env:ME_INSTALL_NO_MAIN = "1"
 . (Join-Path $PSScriptRoot "..\install.ps1")
 
-if ((Get-MeReleaseAsset "AMD64") -cne "me-s-windows-x86_64.exe") {
+$installerSource = Get-Content -Raw -LiteralPath (Join-Path $PSScriptRoot "..\install.ps1")
+if (-not $installerSource.Contains('"LytsingStudio/me-s"')) {
+    throw "install.ps1 does not target the me-s release repository"
+}
+if ($installerSource.Contains('"LytsingStudio/me-rust"')) {
+    throw "install.ps1 still targets the legacy me-rust release repository"
+}
+if (-not $installerSource.Contains('"Programs\me-s"')) {
+    throw "install.ps1 does not use the independent me-s install directory"
+}
+
+if ((Get-MeSReleaseAsset "AMD64") -cne "me-s-windows-x86_64.exe") {
     throw "AMD64 selected the wrong release asset"
 }
-if ((Get-MeReleaseAsset "x86_64") -cne "me-s-windows-x86_64.exe") {
+if ((Get-MeSReleaseAsset "x86_64") -cne "me-s-windows-x86_64.exe") {
     throw "x86_64 selected the wrong release asset"
 }
 
 $unsupportedFailed = $false
 try {
-    Get-MeReleaseAsset "ARM64" | Out-Null
+    Get-MeSReleaseAsset "ARM64" | Out-Null
 } catch {
     $unsupportedFailed = $true
 }
@@ -28,14 +39,14 @@ try {
     $asset = "me-s-windows-x86_64.exe"
     $checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     [System.IO.File]::WriteAllText($manifest, "$checksum  $asset`n")
-    if ((Get-MeExpectedChecksum $manifest $asset) -cne $checksum) {
+    if ((Get-MeSExpectedChecksum $manifest $asset) -cne $checksum) {
         throw "valid checksum entry was not parsed"
     }
 
     [System.IO.File]::AppendAllText($manifest, "$checksum *$asset`n")
     $duplicateFailed = $false
     try {
-        Get-MeExpectedChecksum $manifest $asset | Out-Null
+        Get-MeSExpectedChecksum $manifest $asset | Out-Null
     } catch {
         $duplicateFailed = $true
     }
@@ -46,7 +57,7 @@ try {
     [System.IO.File]::WriteAllText($manifest, "invalid  $asset`n")
     $invalidFailed = $false
     try {
-        Get-MeExpectedChecksum $manifest $asset | Out-Null
+        Get-MeSExpectedChecksum $manifest $asset | Out-Null
     } catch {
         $invalidFailed = $true
     }

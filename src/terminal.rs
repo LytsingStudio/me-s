@@ -73,7 +73,7 @@ pub fn tool_prompt(shell: &str) -> String {
         r##"Terminal provides real, stateful PTY shell sessions.
 
 Current PTY shell backend: `{shell}`. {shell_rule}
-ME-RUST's bundled Python 3.12 is available as `python` in every Terminal session. Do not probe for or install Python before using it.
+ME-S's bundled Python 3.12 is available as `python` in every Terminal session. Do not probe for or install Python before using it.
 
 Available actions:
 - Terminal.Create(width=120, height=40, cwd=".", wait_ms=1000, max_wait_ms=10000, max_output_chars=20000): create a persistent PTY shell, wait for its initial output to become idle, and return a session_id plus its initial structured terminal patch.
