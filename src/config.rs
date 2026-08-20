@@ -159,7 +159,7 @@ impl GlobalConfig {
     pub fn load(path: &Path) -> Result<Self> {
         if !path.exists() {
             return Err(format!(
-                "global config {} does not exist; run `me init` first",
+                "global config {} does not exist; run `me-s init` first",
                 path.display()
             )
             .into());

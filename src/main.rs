@@ -2,10 +2,6 @@ use std::{
     env, fs,
     io::{self, BufRead, Write},
     path::Path,
-    sync::{
-        Arc,
-        atomic::{AtomicBool, Ordering},
-    },
     time::{Duration, Instant},
 };
 
@@ -17,16 +13,19 @@ use me::{
     },
     diag,
     event::{EventBase, EventDataBase},
+    managed_child,
     model::{
         ModelApi, ModelContext, ModelRuntime, ModelUsage, OpenAiStreamEvent, openai_stream_event,
         openai_stream_usage,
     },
     model_transfer,
     orchestrator::{AVAILABLE_ORCHESTRATORS, apply_model_selection, latest_effort, latest_model},
+    termination::TerminationSignals,
     toolbox, tui,
     ui_backend::workspace_ui_ports,
     updater, webui,
     workspace::Workspace,
+    workspace_bootstrap,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -56,6 +55,9 @@ fn run() -> Result<()> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         return toolbox::run_default_terminal_toolbox(stdin.lock(), stdout, &workspace);
+    }
+    if arguments.as_slice() == ["__gateway-child"] {
+        return managed_child::run(&workspace);
     }
     if is_version_command(&arguments) {
         println!("{}", version_string());
@@ -183,7 +185,7 @@ fn run() -> Result<()> {
 
     match arguments.as_slice() {
         [command] if command == "create" => {
-            create_workspace(&workspace, &workspace_path, &global.default_model)?;
+            workspace_bootstrap::create(&workspace, &global.default_model)?;
             println!("created workspace {}", workspace.display());
         }
         [command, action] if command == "model" && action == "list" => {
@@ -343,65 +345,6 @@ fn run_user_interfaces(
     Ok(())
 }
 
-struct TerminationSignals {
-    requested: Arc<AtomicBool>,
-    registrations: Vec<signal_hook::SigId>,
-}
-
-impl TerminationSignals {
-    fn install() -> Result<Self> {
-        let requested = Arc::new(AtomicBool::new(false));
-        let mut signals = signal_hook::consts::TERM_SIGNALS.to_vec();
-        #[cfg(unix)]
-        signals.push(signal_hook::consts::SIGHUP);
-        signals.sort_unstable();
-        signals.dedup();
-        let mut registrations = Vec::with_capacity(signals.len());
-        for signal in signals {
-            match signal_hook::flag::register(signal, Arc::clone(&requested)) {
-                Ok(registration) => registrations.push(registration),
-                Err(error) => {
-                    for registration in registrations {
-                        signal_hook::low_level::unregister(registration);
-                    }
-                    return Err(error.into());
-                }
-            }
-        }
-        Ok(Self {
-            requested,
-            registrations,
-        })
-    }
-
-    fn flag(&self) -> &AtomicBool {
-        &self.requested
-    }
-
-    fn requested(&self) -> bool {
-        self.requested.load(Ordering::Acquire)
-    }
-}
-
-impl Drop for TerminationSignals {
-    fn drop(&mut self) {
-        for registration in self.registrations.drain(..) {
-            signal_hook::low_level::unregister(registration);
-        }
-    }
-}
-
-fn create_workspace(
-    workspace: &Path,
-    workspace_path: &Path,
-    default_model: &str,
-) -> Result<WorkspaceConfig> {
-    let local = WorkspaceConfig::create(workspace_path, default_model.to_owned())?;
-    EventDataBase::open(&workspace_edb_path(workspace))?;
-    toolbox::ensure_default_toolboxes(workspace)?;
-    Ok(local)
-}
-
 fn load_or_offer_workspace(
     workspace: &Path,
     workspace_path: &Path,
@@ -422,7 +365,7 @@ fn load_or_offer_workspace(
         return Ok(None);
     }
 
-    let local = create_workspace(workspace, workspace_path, default_model)?;
+    let local = workspace_bootstrap::create(workspace, default_model)?;
     writeln!(output, "created workspace {}", workspace.display())?;
     Ok(Some(local))
 }

@@ -13,11 +13,17 @@ VERSION="$(awk -F'"' '/^version = "/ { print $2; exit }' "$ROOT_DIR/Cargo.toml")
 TAG="v$VERSION"
 EXPECTED_REPOSITORY="${ME_RELEASE_REPOSITORY:-LytsingStudio/me-s}"
 EXPECTED_BRANCH="${ME_RELEASE_BRANCH:-s}"
-MACOS_ARM64_NAME="me-s-macos-arm64"
-MACOS_X86_64_NAME="me-s-macos-x86_64"
-LINUX_ARM64_NAME="me-s-linux-arm64"
-LINUX_X86_64_NAME="me-s-linux-x86_64"
-WINDOWS_X86_64_NAME="me-s-windows-x86_64.exe"
+
+MACOS_ARM64_ME_S="me-s-macos-arm64"
+MACOS_ARM64_GATEWAY="me-gateway-macos-arm64"
+MACOS_X86_64_ME_S="me-s-macos-x86_64"
+MACOS_X86_64_GATEWAY="me-gateway-macos-x86_64"
+LINUX_ARM64_ME_S="me-s-linux-arm64"
+LINUX_ARM64_GATEWAY="me-gateway-linux-arm64"
+LINUX_X86_64_ME_S="me-s-linux-x86_64"
+LINUX_X86_64_GATEWAY="me-gateway-linux-x86_64"
+WINDOWS_X86_64_ME_S="me-s-windows-x86_64.exe"
+WINDOWS_X86_64_GATEWAY="me-gateway-windows-x86_64.exe"
 
 case "$HOST_TARGET" in
     aarch64-apple-darwin|x86_64-apple-darwin) ;;
@@ -55,6 +61,8 @@ cd "$ROOT_DIR"
 
 sh -n "$ROOT_DIR/install.sh"
 "$ROOT_DIR/tests/install_scripts.sh"
+grep -F 'me-gateway-windows-x86_64.exe' "$ROOT_DIR/install.ps1" >/dev/null
+grep -F '$installed = @($false, $false)' "$ROOT_DIR/install.ps1" >/dev/null
 
 BUILD_CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
 REMAP_SEPARATOR=$'\x1f'
@@ -132,56 +140,83 @@ rustup target add \
     "$LINUX_X86_64_TARGET" \
     "$WINDOWS_TARGET"
 
+copy_unix_products() {
+    target=$1
+    me_s_name=$2
+    gateway_name=$3
+    cp "target/$target/release/me-s" "$DIST_DIR/$me_s_name"
+    cp "target/$target/release/me-gateway" "$DIST_DIR/$gateway_name"
+    chmod 755 "$DIST_DIR/$me_s_name" "$DIST_DIR/$gateway_name"
+}
+
+copy_windows_products() {
+    target=$1
+    me_s_name=$2
+    gateway_name=$3
+    cp "target/$target/release/me-s.exe" "$DIST_DIR/$me_s_name"
+    cp "target/$target/release/me-gateway.exe" "$DIST_DIR/$gateway_name"
+    chmod 755 "$DIST_DIR/$me_s_name" "$DIST_DIR/$gateway_name"
+}
+
 echo "building macOS $MACOS_ARM64_TARGET"
-cargo build --locked --release --target "$MACOS_ARM64_TARGET"
-cp "target/$MACOS_ARM64_TARGET/release/me-s" "$DIST_DIR/$MACOS_ARM64_NAME"
-chmod 755 "$DIST_DIR/$MACOS_ARM64_NAME"
+cargo build --locked --release --bins --target "$MACOS_ARM64_TARGET"
+copy_unix_products "$MACOS_ARM64_TARGET" "$MACOS_ARM64_ME_S" "$MACOS_ARM64_GATEWAY"
 
 echo "building macOS $MACOS_X86_64_TARGET"
-cargo build --locked --release --target "$MACOS_X86_64_TARGET"
-cp "target/$MACOS_X86_64_TARGET/release/me-s" "$DIST_DIR/$MACOS_X86_64_NAME"
-chmod 755 "$DIST_DIR/$MACOS_X86_64_NAME"
+cargo build --locked --release --bins --target "$MACOS_X86_64_TARGET"
+copy_unix_products "$MACOS_X86_64_TARGET" "$MACOS_X86_64_ME_S" "$MACOS_X86_64_GATEWAY"
 
 echo "building Linux $LINUX_ARM64_TARGET (glibc 2.17)"
-cargo zigbuild --locked --release --target "$LINUX_ARM64_TARGET.2.17"
-cp "target/$LINUX_ARM64_TARGET/release/me-s" "$DIST_DIR/$LINUX_ARM64_NAME"
-chmod 755 "$DIST_DIR/$LINUX_ARM64_NAME"
+cargo zigbuild --locked --release --bins --target "$LINUX_ARM64_TARGET.2.17"
+copy_unix_products "$LINUX_ARM64_TARGET" "$LINUX_ARM64_ME_S" "$LINUX_ARM64_GATEWAY"
 
 echo "building Linux $LINUX_X86_64_TARGET (glibc 2.17)"
-cargo zigbuild --locked --release --target "$LINUX_X86_64_TARGET.2.17"
-cp "target/$LINUX_X86_64_TARGET/release/me-s" "$DIST_DIR/$LINUX_X86_64_NAME"
-chmod 755 "$DIST_DIR/$LINUX_X86_64_NAME"
+cargo zigbuild --locked --release --bins --target "$LINUX_X86_64_TARGET.2.17"
+copy_unix_products "$LINUX_X86_64_TARGET" "$LINUX_X86_64_ME_S" "$LINUX_X86_64_GATEWAY"
 
 echo "building Windows $WINDOWS_TARGET"
-cargo build --locked --release --target "$WINDOWS_TARGET"
-cp "target/$WINDOWS_TARGET/release/me-s.exe" "$DIST_DIR/$WINDOWS_X86_64_NAME"
-chmod 755 "$DIST_DIR/$WINDOWS_X86_64_NAME"
+cargo build --locked --release --bins --target "$WINDOWS_TARGET"
+copy_windows_products "$WINDOWS_TARGET" "$WINDOWS_X86_64_ME_S" "$WINDOWS_X86_64_GATEWAY"
+
 cp "$ROOT_DIR/install.sh" "$DIST_DIR/install.sh"
 cp "$ROOT_DIR/install.ps1" "$DIST_DIR/install.ps1"
 chmod 755 "$DIST_DIR/install.sh"
 
-file "$DIST_DIR/$MACOS_ARM64_NAME" | grep -Eq "Mach-O 64-bit executable arm64"
-file "$DIST_DIR/$MACOS_X86_64_NAME" | grep -Eq "Mach-O 64-bit executable x86_64"
-file "$DIST_DIR/$LINUX_ARM64_NAME" | grep -Eq "ELF 64-bit.*ARM aarch64"
-file "$DIST_DIR/$LINUX_X86_64_NAME" | grep -Eq "ELF 64-bit.*x86-64"
-file "$DIST_DIR/$WINDOWS_X86_64_NAME" | grep -Eq "PE32\\+ executable.*x86-64"
-strings "$DIST_DIR/$MACOS_ARM64_NAME" \
+file "$DIST_DIR/$MACOS_ARM64_ME_S" | grep -Eq "Mach-O 64-bit executable arm64"
+file "$DIST_DIR/$MACOS_ARM64_GATEWAY" | grep -Eq "Mach-O 64-bit executable arm64"
+file "$DIST_DIR/$MACOS_X86_64_ME_S" | grep -Eq "Mach-O 64-bit executable x86_64"
+file "$DIST_DIR/$MACOS_X86_64_GATEWAY" | grep -Eq "Mach-O 64-bit executable x86_64"
+file "$DIST_DIR/$LINUX_ARM64_ME_S" | grep -Eq "ELF 64-bit.*ARM aarch64"
+file "$DIST_DIR/$LINUX_ARM64_GATEWAY" | grep -Eq "ELF 64-bit.*ARM aarch64"
+file "$DIST_DIR/$LINUX_X86_64_ME_S" | grep -Eq "ELF 64-bit.*x86-64"
+file "$DIST_DIR/$LINUX_X86_64_GATEWAY" | grep -Eq "ELF 64-bit.*x86-64"
+file "$DIST_DIR/$WINDOWS_X86_64_ME_S" | grep -Eq "PE32\\+ executable.*x86-64"
+file "$DIST_DIR/$WINDOWS_X86_64_GATEWAY" | grep -Eq "PE32\\+ executable.*x86-64"
+
+strings "$DIST_DIR/$MACOS_ARM64_ME_S" \
     | grep -F "cpython-3.12.13+20260718-$MACOS_ARM64_TARGET" >/dev/null
-strings "$DIST_DIR/$MACOS_X86_64_NAME" \
+strings "$DIST_DIR/$MACOS_X86_64_ME_S" \
     | grep -F "cpython-3.12.13+20260718-$MACOS_X86_64_TARGET" >/dev/null
-strings "$DIST_DIR/$LINUX_ARM64_NAME" \
+strings "$DIST_DIR/$LINUX_ARM64_ME_S" \
     | grep -F "cpython-3.12.13+20260718-$LINUX_ARM64_TARGET" >/dev/null
-strings "$DIST_DIR/$LINUX_X86_64_NAME" \
+strings "$DIST_DIR/$LINUX_X86_64_ME_S" \
     | grep -F "cpython-3.12.13+20260718-$LINUX_X86_64_TARGET" >/dev/null
-strings "$DIST_DIR/$WINDOWS_X86_64_NAME" \
+strings "$DIST_DIR/$WINDOWS_X86_64_ME_S" \
     | grep -F "cpython-3.12.13+20260718-$WINDOWS_TARGET" >/dev/null
-for artifact in \
-    "$DIST_DIR/$MACOS_ARM64_NAME" \
-    "$DIST_DIR/$MACOS_X86_64_NAME" \
-    "$DIST_DIR/$LINUX_ARM64_NAME" \
-    "$DIST_DIR/$LINUX_X86_64_NAME" \
-    "$DIST_DIR/$WINDOWS_X86_64_NAME"
-do
+
+ARTIFACTS=(
+    "$DIST_DIR/$MACOS_ARM64_ME_S"
+    "$DIST_DIR/$MACOS_ARM64_GATEWAY"
+    "$DIST_DIR/$MACOS_X86_64_ME_S"
+    "$DIST_DIR/$MACOS_X86_64_GATEWAY"
+    "$DIST_DIR/$LINUX_ARM64_ME_S"
+    "$DIST_DIR/$LINUX_ARM64_GATEWAY"
+    "$DIST_DIR/$LINUX_X86_64_ME_S"
+    "$DIST_DIR/$LINUX_X86_64_GATEWAY"
+    "$DIST_DIR/$WINDOWS_X86_64_ME_S"
+    "$DIST_DIR/$WINDOWS_X86_64_GATEWAY"
+)
+for artifact in "${ARTIFACTS[@]}"; do
     for private_prefix in "$ROOT_DIR" "$BUILD_CARGO_HOME" "$HOME"; do
         if strings "$artifact" | grep -F "$private_prefix" >/dev/null; then
             echo "error: release artifact contains a private build path" >&2
@@ -195,21 +230,28 @@ do
         exit 1
     fi
 done
-if x86_64-w64-mingw32-objdump -p "$DIST_DIR/$WINDOWS_X86_64_NAME" \
-    | grep -Eiq "DLL Name: (libgcc|libstdc\\+\\+|libwinpthread)"
-then
-    echo "error: Windows artifact depends on an external MinGW runtime DLL" >&2
-    exit 1
-fi
+for artifact in "$DIST_DIR/$WINDOWS_X86_64_ME_S" "$DIST_DIR/$WINDOWS_X86_64_GATEWAY"; do
+    if x86_64-w64-mingw32-objdump -p "$artifact" \
+        | grep -Eiq "DLL Name: (libgcc|libstdc\\+\\+|libwinpthread)"
+    then
+        echo "error: Windows artifact depends on an external MinGW runtime DLL" >&2
+        exit 1
+    fi
+done
 
 (
     cd "$DIST_DIR"
     shasum -a 256 \
-        "$MACOS_ARM64_NAME" \
-        "$MACOS_X86_64_NAME" \
-        "$LINUX_ARM64_NAME" \
-        "$LINUX_X86_64_NAME" \
-        "$WINDOWS_X86_64_NAME" \
+        "$MACOS_ARM64_ME_S" \
+        "$MACOS_ARM64_GATEWAY" \
+        "$MACOS_X86_64_ME_S" \
+        "$MACOS_X86_64_GATEWAY" \
+        "$LINUX_ARM64_ME_S" \
+        "$LINUX_ARM64_GATEWAY" \
+        "$LINUX_X86_64_ME_S" \
+        "$LINUX_X86_64_GATEWAY" \
+        "$WINDOWS_X86_64_ME_S" \
+        "$WINDOWS_X86_64_GATEWAY" \
         install.sh \
         install.ps1 \
         > SHA256SUMS
@@ -217,27 +259,27 @@ fi
 
 echo
 echo "release artifacts:"
-ls -lh \
-    "$DIST_DIR/$MACOS_ARM64_NAME" \
-    "$DIST_DIR/$MACOS_X86_64_NAME" \
-    "$DIST_DIR/$LINUX_ARM64_NAME" \
-    "$DIST_DIR/$LINUX_X86_64_NAME" \
-    "$DIST_DIR/$WINDOWS_X86_64_NAME" \
+ls -lh "${ARTIFACTS[@]}" \
     "$DIST_DIR/install.sh" \
     "$DIST_DIR/install.ps1" \
     "$DIST_DIR/SHA256SUMS"
 
 if [[ "$TAG_EXISTS" == 0 ]]; then
-    git tag -a "$TAG" -m "me-s $VERSION"
+    git tag -a "$TAG" -m "ME $VERSION"
 fi
 git push origin "refs/tags/$TAG"
 
 gh release create "$TAG" \
-    "$DIST_DIR/$MACOS_ARM64_NAME#$MACOS_ARM64_NAME" \
-    "$DIST_DIR/$MACOS_X86_64_NAME#$MACOS_X86_64_NAME" \
-    "$DIST_DIR/$LINUX_ARM64_NAME#$LINUX_ARM64_NAME" \
-    "$DIST_DIR/$LINUX_X86_64_NAME#$LINUX_X86_64_NAME" \
-    "$DIST_DIR/$WINDOWS_X86_64_NAME#$WINDOWS_X86_64_NAME" \
+    "$DIST_DIR/$MACOS_ARM64_ME_S#$MACOS_ARM64_ME_S" \
+    "$DIST_DIR/$MACOS_ARM64_GATEWAY#$MACOS_ARM64_GATEWAY" \
+    "$DIST_DIR/$MACOS_X86_64_ME_S#$MACOS_X86_64_ME_S" \
+    "$DIST_DIR/$MACOS_X86_64_GATEWAY#$MACOS_X86_64_GATEWAY" \
+    "$DIST_DIR/$LINUX_ARM64_ME_S#$LINUX_ARM64_ME_S" \
+    "$DIST_DIR/$LINUX_ARM64_GATEWAY#$LINUX_ARM64_GATEWAY" \
+    "$DIST_DIR/$LINUX_X86_64_ME_S#$LINUX_X86_64_ME_S" \
+    "$DIST_DIR/$LINUX_X86_64_GATEWAY#$LINUX_X86_64_GATEWAY" \
+    "$DIST_DIR/$WINDOWS_X86_64_ME_S#$WINDOWS_X86_64_ME_S" \
+    "$DIST_DIR/$WINDOWS_X86_64_GATEWAY#$WINDOWS_X86_64_GATEWAY" \
     "$DIST_DIR/install.sh#Unix installer" \
     "$DIST_DIR/install.ps1#Windows installer" \
     "$DIST_DIR/SHA256SUMS#SHA-256 checksums" \

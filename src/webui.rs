@@ -1,15 +1,14 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io::{self, Read},
     sync::{
-        Arc, Mutex,
+        Arc,
         atomic::{AtomicBool, Ordering},
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
 
-use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_hash::SaltString};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -17,16 +16,29 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::{
     Result,
     event::{Event, EventId},
+    managed_protocol::{
+        MANAGED_AUTH_HEADER, MANAGED_BIND_ADDRESS, MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH,
+        MANAGED_SHUTDOWN_PATH, ManagedReadyResponse, bearer_token_matches,
+    },
     turn_history,
     ui_backend::{
         CHAT_ACTIVITY_TOOL_NAMES, CHAT_HIDDEN_TOOL_NAMES, CHAT_HIDDEN_TOOL_PREFIXES, UiBackend,
         UiCommand, UiCommandGateway, UiCommandReceipt, UiModelOption, UiSnapshot,
     },
+    web_auth::WebSessionAuth,
     workspace::AgentId,
 };
 
 pub const DEFAULT_PORT: u16 = 38199;
 pub const DEFAULT_BIND_ADDRESS: &str = "0.0.0.0";
+
+#[derive(Clone)]
+pub struct ManagedWebAccess {
+    pub token: String,
+    pub instance_nonce: String,
+    pub workspace_path: String,
+    pub terminate: Arc<AtomicBool>,
+}
 const INDEX_HTML: &str = include_str!("webui/index.html");
 const APP_JS: &str = include_str!("webui/app.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
@@ -116,76 +128,16 @@ const KATEX_FONTS: &[(&str, &[u8])] = &[
         include_bytes!("webui/vendor/katex-fonts/KaTeX_Typewriter-Regular.woff2"),
     ),
 ];
+pub(crate) fn shared_katex_font(path: &str) -> Option<&'static [u8]> {
+    KATEX_FONTS
+        .iter()
+        .find_map(|(candidate, content)| (*candidate == path).then_some(*content))
+}
+
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BATCH_BYTES: usize = 512 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
 const SESSION_COOKIE: &str = "me_webui_session";
-
-struct WebAuth {
-    password_hash: Option<String>,
-    sessions: Mutex<HashSet<String>>,
-}
-
-impl WebAuth {
-    fn new(passkey: Option<&str>) -> Result<Self> {
-        let password_hash = passkey
-            .map(|passkey| -> Result<String> {
-                let mut salt = [0_u8; 16];
-                getrandom::fill(&mut salt)
-                    .map_err(|error| format!("failed to generate WebUI password salt: {error}"))?;
-                let salt = SaltString::encode_b64(&salt)
-                    .map_err(|error| format!("failed to encode WebUI password salt: {error}"))?;
-                let hash = Argon2::default()
-                    .hash_password(passkey.as_bytes(), &salt)
-                    .map_err(|error| format!("failed to hash WebUI password: {error}"))?;
-                Ok(hash.to_string())
-            })
-            .transpose()?;
-        Ok(Self {
-            password_hash,
-            sessions: Mutex::new(HashSet::new()),
-        })
-    }
-
-    fn required(&self) -> bool {
-        self.password_hash.is_some()
-    }
-
-    fn authorized(&self, request: &Request) -> bool {
-        if !self.required() {
-            return true;
-        }
-        let Some(token) = request_cookie(request, SESSION_COOKIE) else {
-            return false;
-        };
-        self.sessions
-            .lock()
-            .is_ok_and(|sessions| sessions.contains(token))
-    }
-
-    fn login(&self, passkey: &str) -> Result<Option<String>> {
-        let Some(encoded) = &self.password_hash else {
-            return Ok(Some(String::new()));
-        };
-        let parsed = PasswordHash::new(encoded)
-            .map_err(|error| format!("stored WebUI password hash is invalid: {error}"))?;
-        if Argon2::default()
-            .verify_password(passkey.as_bytes(), &parsed)
-            .is_err()
-        {
-            return Ok(None);
-        }
-        let mut bytes = [0_u8; 32];
-        getrandom::fill(&mut bytes)
-            .map_err(|error| format!("failed to generate WebUI session: {error}"))?;
-        let token: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
-        self.sessions
-            .lock()
-            .map_err(|_| "WebUI session store is unavailable")?
-            .insert(token.clone());
-        Ok(Some(token))
-    }
-}
 
 pub struct WebUiServer {
     address: String,
@@ -228,7 +180,18 @@ fn start_from(
     passkey: Option<&str>,
 ) -> Result<WebUiServer> {
     let (server, port) = bind_first_available(first_port)?;
-    start_with_server(backend, commands, server, port, passkey)
+    start_with_server(backend, commands, server, port, passkey, None)
+}
+
+pub fn start_managed(
+    backend: impl UiBackend + 'static,
+    commands: impl UiCommandGateway + 'static,
+    port: u16,
+    access: ManagedWebAccess,
+) -> Result<WebUiServer> {
+    let server = Server::http((MANAGED_BIND_ADDRESS, port))
+        .map_err(|error| format!("failed to bind managed WebUI: {error}"))?;
+    start_with_server(backend, commands, server, port, None, Some(access))
 }
 
 fn bind_first_available(first_port: u16) -> Result<(Server, u16)> {
@@ -261,6 +224,7 @@ fn start_with_server(
     server: Server,
     requested_port: u16,
     passkey: Option<&str>,
+    managed: Option<ManagedWebAccess>,
 ) -> Result<WebUiServer> {
     let port = server
         .server_addr()
@@ -273,7 +237,8 @@ fn start_with_server(
     };
     let backend: Arc<dyn UiBackend> = Arc::new(backend);
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
-    let auth = Arc::new(WebAuth::new(passkey)?);
+    let auth = Arc::new(WebSessionAuth::new(passkey)?);
+    let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let worker = thread::Builder::new()
@@ -285,10 +250,17 @@ fn start_with_server(
                         let backend = Arc::clone(&backend);
                         let commands = Arc::clone(&commands);
                         let auth = Arc::clone(&auth);
+                        let managed = Arc::clone(&managed);
                         let _ = thread::Builder::new()
                             .name("me-webui-request".into())
                             .spawn(move || {
-                                serve(request, backend.as_ref(), commands.as_ref(), auth.as_ref());
+                                serve(
+                                    request,
+                                    backend.as_ref(),
+                                    commands.as_ref(),
+                                    auth.as_ref(),
+                                    managed.as_ref().as_ref(),
+                                );
                             });
                     }
                     Ok(None) => {}
@@ -467,9 +439,13 @@ fn serve(
     mut request: Request,
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
-    auth: &WebAuth,
+    auth: &WebSessionAuth,
+    managed: Option<&ManagedWebAccess>,
 ) {
-    let result = route(&mut request, backend, commands, auth);
+    let result = match managed {
+        Some(managed) => route_managed(&mut request, backend, commands, managed),
+        None => route(&mut request, backend, commands, auth),
+    };
     let response = match result {
         Ok(response) => response,
         Err(error) => json_response(
@@ -482,13 +458,67 @@ fn serve(
 
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
+fn route_managed(
+    request: &mut Request,
+    backend: &dyn UiBackend,
+    commands: &dyn UiCommandGateway,
+    managed: &ManagedWebAccess,
+) -> Result<HttpResponse> {
+    let authorization = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv(MANAGED_AUTH_HEADER))
+        .map(|header| header.value.as_str());
+    if !bearer_token_matches(authorization, &managed.token) {
+        return Ok(json_response(
+            StatusCode(401),
+            &json!({"ok": false, "error": "managed authentication required"}),
+        ));
+    }
+    let url = request.url().to_owned();
+    let (path, query) = split_url(&url);
+    match (request.method(), path) {
+        (&Method::Get, MANAGED_READY_PATH) => Ok(json_response(
+            StatusCode(200),
+            &ManagedReadyResponse {
+                ok: true,
+                ready: true,
+                protocol_version: MANAGED_PROTOCOL_VERSION,
+                product_version: env!("CARGO_PKG_VERSION").to_owned(),
+                workspace_path: managed.workspace_path.clone(),
+                instance_nonce: managed.instance_nonce.clone(),
+            },
+        )),
+        (&Method::Post, MANAGED_SHUTDOWN_PATH) => {
+            managed.terminate.store(true, Ordering::Release);
+            Ok(json_response(
+                StatusCode(200),
+                &json!({"ok": true, "stopping": true}),
+            ))
+        }
+        (&Method::Post, "/api/sync")
+        | (&Method::Get, "/api/snapshot")
+        | (&Method::Post, "/api/command") => {
+            operational_route(request, backend, commands, path, query)
+        }
+        (&Method::Get, path) if path.starts_with("/api/deletion-blocker/") => {
+            operational_route(request, backend, commands, path, query)
+        }
+        _ => Ok(json_response(
+            StatusCode(404),
+            &json!({"ok": false, "error": "not found"}),
+        )),
+    }
+}
+
 fn route(
     request: &mut Request,
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
-    auth: &WebAuth,
+    auth: &WebSessionAuth,
 ) -> Result<HttpResponse> {
-    let (path, query) = split_url(request.url());
+    let url = request.url().to_owned();
+    let (path, query) = split_url(&url);
     if request.method() == &Method::Get
         && let Some((_, font)) = KATEX_FONTS.iter().find(|(font_path, _)| *font_path == path)
     {
@@ -523,9 +553,19 @@ fn route(
         (&Method::Post, "/api/auth/login") => return login_response(request, auth),
         _ => {}
     }
-    if !auth.authorized(request) {
+    if !auth.authorized(request_cookie(request, SESSION_COOKIE)) {
         return Ok(unauthorized_response());
     }
+    operational_route(request, backend, commands, path, query)
+}
+
+fn operational_route(
+    request: &mut Request,
+    backend: &dyn UiBackend,
+    commands: &dyn UiCommandGateway,
+    path: &str,
+    query: Option<&str>,
+) -> Result<HttpResponse> {
     match (request.method(), path) {
         (&Method::Get, "/api/health") => Ok(json_response(
             StatusCode(200),
@@ -1035,18 +1075,18 @@ struct LoginRequest {
     password: String,
 }
 
-fn auth_status_response(request: &Request, auth: &WebAuth) -> Result<HttpResponse> {
+fn auth_status_response(request: &Request, auth: &WebSessionAuth) -> Result<HttpResponse> {
     Ok(json_response(
         StatusCode(200),
         &json!({
             "ok": true,
             "required": auth.required(),
-            "authenticated": auth.authorized(request),
+            "authenticated": auth.authorized(request_cookie(request, SESSION_COOKIE)),
         }),
     ))
 }
 
-fn login_response(request: &mut Request, auth: &WebAuth) -> Result<HttpResponse> {
+fn login_response(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpResponse> {
     if !auth.required() {
         return Ok(json_response(
             StatusCode(200),

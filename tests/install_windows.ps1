@@ -12,19 +12,39 @@ if ($installerSource.Contains('"LytsingStudio/me-rust"')) {
     throw "install.ps1 still targets the legacy me-rust release repository"
 }
 if (-not $installerSource.Contains('"Programs\me-s"')) {
-    throw "install.ps1 does not use the independent me-s install directory"
+    throw "install.ps1 does not use the independent ME install directory"
+}
+foreach ($required in @(
+    "me-s.exe",
+    "me-gateway.exe",
+    '$installed = @($false, $false)',
+    '$hadOriginal = @($false, $false)',
+    '$reportedVersions = @($null, $null)',
+    '$expectedVersionOutputs = @($null, $null)'
+) ) {
+    if (-not $installerSource.Contains($required)) {
+        throw "install.ps1 is missing the dual-program transaction marker: $required"
+    }
 }
 
-if ((Get-MeSReleaseAsset "AMD64") -cne "me-s-windows-x86_64.exe") {
-    throw "AMD64 selected the wrong release asset"
+$assets = @(Get-MeSReleaseAssets "AMD64")
+if ($assets.Count -ne 2) {
+    throw "AMD64 did not select both release assets"
 }
-if ((Get-MeSReleaseAsset "x86_64") -cne "me-s-windows-x86_64.exe") {
-    throw "x86_64 selected the wrong release asset"
+if ($assets[0] -cne "me-s-windows-x86_64.exe") {
+    throw "AMD64 selected the wrong me-s release asset"
+}
+if ($assets[1] -cne "me-gateway-windows-x86_64.exe") {
+    throw "AMD64 selected the wrong me-gateway release asset"
+}
+$assets = @(Get-MeSReleaseAssets "x86_64")
+if ($assets.Count -ne 2) {
+    throw "x86_64 did not select both release assets"
 }
 
 $unsupportedFailed = $false
 try {
-    Get-MeSReleaseAsset "ARM64" | Out-Null
+    Get-MeSReleaseAssets "ARM64" | Out-Null
 } catch {
     $unsupportedFailed = $true
 }
@@ -32,21 +52,29 @@ if (-not $unsupportedFailed) {
     throw "unsupported Windows architecture was accepted"
 }
 
-$testDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "me-s-install-ps-test-$([Guid]::NewGuid().ToString('N'))"
+$testDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "me-install-ps-test-$([Guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $testDirectory | Out-Null
 try {
     $manifest = Join-Path $testDirectory "SHA256SUMS"
-    $asset = "me-s-windows-x86_64.exe"
-    $checksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
-    [System.IO.File]::WriteAllText($manifest, "$checksum  $asset`n")
-    if ((Get-MeSExpectedChecksum $manifest $asset) -cne $checksum) {
-        throw "valid checksum entry was not parsed"
+    $meSAsset = "me-s-windows-x86_64.exe"
+    $gatewayAsset = "me-gateway-windows-x86_64.exe"
+    $meSChecksum = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    $gatewayChecksum = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+    [System.IO.File]::WriteAllText(
+        $manifest,
+        "$meSChecksum  $meSAsset`n$gatewayChecksum  $gatewayAsset`n"
+    )
+    if ((Get-MeSExpectedChecksum $manifest $meSAsset) -cne $meSChecksum) {
+        throw "valid me-s checksum entry was not parsed"
+    }
+    if ((Get-MeSExpectedChecksum $manifest $gatewayAsset) -cne $gatewayChecksum) {
+        throw "valid me-gateway checksum entry was not parsed"
     }
 
-    [System.IO.File]::AppendAllText($manifest, "$checksum *$asset`n")
+    [System.IO.File]::AppendAllText($manifest, "$meSChecksum *$meSAsset`n")
     $duplicateFailed = $false
     try {
-        Get-MeSExpectedChecksum $manifest $asset | Out-Null
+        Get-MeSExpectedChecksum $manifest $meSAsset | Out-Null
     } catch {
         $duplicateFailed = $true
     }
@@ -54,10 +82,10 @@ try {
         throw "duplicate checksum entries were accepted"
     }
 
-    [System.IO.File]::WriteAllText($manifest, "invalid  $asset`n")
+    [System.IO.File]::WriteAllText($manifest, "invalid  $gatewayAsset`n")
     $invalidFailed = $false
     try {
-        Get-MeSExpectedChecksum $manifest $asset | Out-Null
+        Get-MeSExpectedChecksum $manifest $gatewayAsset | Out-Null
     } catch {
         $invalidFailed = $true
     }

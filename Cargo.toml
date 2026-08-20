@@ -1,6 +1,6 @@
 [package]
 name = "me-s"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2024"
 autobins = false
 description = "A lightweight local agent runtime optimized for long-running work"
@@ -15,6 +15,10 @@ path = "src/lib.rs"
 [[bin]]
 name = "me-s"
 path = "src/main.rs"
+
+[[bin]]
+name = "me-gateway"
+path = "src/gateway_main.rs"
 
 [dependencies]
 argon2 = "0.5.3"
