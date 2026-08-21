@@ -3205,15 +3205,28 @@ async function openDirectoryBrowser(mode) {
   } catch (error) { toast(error.message, true); }
 }
 
-async function loadDirectoryListing(path, mode) {
+function directoryParentRequest(listing) {
+  if (listing.parent) return { path: listing.parent, roots: false };
+  if (listing.parent_is_root_selector) return { path: null, roots: true };
+  return null;
+}
+
+function displayHostPath(path) {
+  const value = String(path || "");
+  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+  if (value.startsWith("\\\\?\\")) return value.slice(4);
+  return value;
+}
+
+async function loadDirectoryListing(path, mode, roots = false) {
   const browser = elements.modalContent.querySelector(".directory-browser");
-  const controls = [...elements.modalContent.querySelectorAll("[data-directory-path]")];
+  const controls = [...elements.modalContent.querySelectorAll("[data-directory-up], [data-directory-path]")];
   browser?.classList.add("loading");
   controls.forEach((button) => { button.disabled = true; });
   try {
     const listing = await api("/api/gateway/directories", {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path }),
+      body: JSON.stringify({ path, roots }),
     });
     if (state.modal) renderDirectoryListing(listing, mode);
   } catch (error) {
@@ -3227,22 +3240,42 @@ function renderDirectoryListing(listing, mode) {
   if (!state.modal) return;
   const workspaceName = elements.modalContent.querySelector("#new-workspace-name")?.value || "";
   const directories = listing.directories || [];
+  const rootSelector = listing.root_selector === true;
+  const parentRequest = directoryParentRequest(listing);
+  const currentLocation = rootSelector ? "此电脑" : displayHostPath(listing.path);
+  const itemCount = `${directories.length} 个${rootSelector ? "磁盘" : "文件夹"}`;
   const folderIcon = `<svg class="directory-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15v-13.5Z"/><path d="M3.5 10h17"/></svg>`;
+  const driveIcon = `<svg class="directory-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M3.5 14h17"/><circle cx="17" cy="16.5" r=".8"/></svg>`;
+  const locationIcon = rootSelector ? driveIcon : folderIcon;
+  const entryIcon = rootSelector ? driveIcon : folderIcon;
+  const emptyTitle = rootSelector ? "没有可用磁盘" : "此位置没有子目录";
+  const emptyDescription = rootSelector ? "当前宿主机没有可浏览的逻辑盘符。" : "可以选择当前目录，或返回上一级继续浏览。";
   state.modal.directory = listing;
-  elements.modalContent.innerHTML = `<div class="directory-browser">
+  elements.modalContent.innerHTML = `<div class="directory-browser${rootSelector ? " root-selector" : ""}">
     <div class="directory-toolbar">
-      <button type="button" class="directory-up" aria-label="返回上一级" title="返回上一级" ${listing.parent ? `data-directory-path="${escapeAttr(listing.parent)}"` : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
-      <div class="directory-current">${folderIcon}<span title="${escapeAttr(listing.path)}">${escapeHtml(listing.path)}</span></div>
-    </div>
-    <div class="directory-table">
-      <div class="directory-list-header" aria-hidden="true"><span></span><span>名称</span><span>路径</span><span></span></div>
-      <div class="directory-list" role="list">
-        ${directories.map((directory) => `<button type="button" class="directory-entry" role="listitem" data-directory-path="${escapeAttr(directory.path)}" aria-label="打开目录 ${escapeAttr(directory.name)}">${folderIcon}<span class="directory-entry-name">${escapeHtml(directory.name)}</span><span class="directory-entry-path" title="${escapeAttr(directory.path)}">${escapeHtml(directory.path)}</span><svg class="directory-entry-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>`).join("")}
-        ${directories.length ? "" : `<div class="directory-empty">${folderIcon}<strong>此位置没有子目录</strong><span>可以选择当前目录，或返回上一级继续浏览。</span></div>`}
+      <button type="button" class="directory-up" aria-label="返回上一级" title="返回上一级" ${parentRequest ? `data-directory-up="true"` : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+      <div class="directory-current">
+        <span class="directory-location-icon">${locationIcon}</span>
+        <span class="directory-current-path" title="${escapeAttr(currentLocation)}">${escapeHtml(currentLocation)}</span>
+        <span class="directory-count">${escapeHtml(itemCount)}</span>
       </div>
     </div>
-    ${mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(workspaceName)}" placeholder="例如：my-project"></label>` : `<p class="directory-help">当前目录将作为工作区打开。</p>`}
+    <div class="directory-table">
+      <div class="directory-list-header" aria-hidden="true"><span></span><span>名称</span><span>位置</span><span></span></div>
+      <div class="directory-list" role="list">
+        ${directories.map((directory) => {
+          const displayedPath = displayHostPath(directory.path);
+          return `<button type="button" class="directory-entry" role="listitem" data-directory-path="${escapeAttr(directory.path)}" aria-label="打开目录 ${escapeAttr(directory.name)}"><span class="directory-entry-icon">${entryIcon}</span><span class="directory-entry-name">${escapeHtml(directory.name)}</span><span class="directory-entry-path" title="${escapeAttr(displayedPath)}">${escapeHtml(displayedPath)}</span><svg class="directory-entry-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>`;
+        }).join("")}
+        ${directories.length ? "" : `<div class="directory-empty"><span class="directory-entry-icon">${locationIcon}</span><strong>${emptyTitle}</strong><span>${emptyDescription}</span></div>`}
+      </div>
+    </div>
+    ${rootSelector ? `<p class="directory-help">请选择一个磁盘继续浏览。</p>` : mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(workspaceName)}" placeholder="例如：my-project"></label>` : `<p class="directory-help">当前目录将作为工作区打开。</p>`}
   </div>`;
+  elements.modalConfirm.disabled = !listing.path;
+  elements.modalContent.querySelector("[data-directory-up]")?.addEventListener("click", () => {
+    void loadDirectoryListing(parentRequest.path, mode, parentRequest.roots);
+  });
   elements.modalContent.querySelectorAll("[data-directory-path]").forEach((button) => button.addEventListener("click", () => {
     void loadDirectoryListing(button.dataset.directoryPath, mode);
   }));
@@ -3401,6 +3434,7 @@ function openModal(modal) {
   elements.modalTitle.textContent = modal.title;
   elements.modalDescription.textContent = modal.description || "";
   elements.modalDescription.classList.toggle("hidden", !modal.description);
+  elements.modalConfirm.disabled = false;
   elements.modalConfirm.textContent = modal.confirmLabel || "确认";
   elements.modalConfirm.classList.toggle("danger", !!modal.danger);
   elements.modalConfirm.classList.toggle("hidden", modal.confirmLabel === null);

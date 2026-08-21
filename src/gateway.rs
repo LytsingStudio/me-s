@@ -9,6 +9,9 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use windows_sys::Win32::Storage::FileSystem::GetLogicalDrives;
+
 use serde::Serialize;
 
 use crate::{
@@ -56,8 +59,10 @@ pub struct ProxyResponse {
 #[derive(Serialize)]
 pub struct DirectoryListing {
     pub ok: bool,
-    pub path: String,
+    pub path: Option<String>,
     pub parent: Option<String>,
+    pub root_selector: bool,
+    pub parent_is_root_selector: bool,
     pub directories: Vec<DirectoryEntry>,
 }
 
@@ -404,6 +409,17 @@ impl Gateway {
         })
     }
 
+    pub fn list_directory_roots(&self) -> Result<DirectoryListing> {
+        Ok(DirectoryListing {
+            ok: true,
+            path: None,
+            parent: None,
+            root_selector: true,
+            parent_is_root_selector: false,
+            directories: host_directory_roots()?,
+        })
+    }
+
     pub fn list_directories(&self, path: Option<&Path>) -> Result<DirectoryListing> {
         let path = canonical_directory(path.unwrap_or(&self.root))?;
         let mut directories = fs::read_dir(&path)?
@@ -420,12 +436,15 @@ impl Gateway {
             })
             .collect::<Vec<_>>();
         directories.sort_by_key(|entry| entry.name.to_lowercase());
+        let parent = path
+            .parent()
+            .map(|parent| parent.to_string_lossy().into_owned());
         Ok(DirectoryListing {
             ok: true,
-            path: path.to_string_lossy().into_owned(),
-            parent: path
-                .parent()
-                .map(|parent| parent.to_string_lossy().into_owned()),
+            path: Some(path.to_string_lossy().into_owned()),
+            parent_is_root_selector: cfg!(windows) && parent.is_none(),
+            parent,
+            root_selector: false,
             directories,
         })
     }
@@ -501,6 +520,37 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+#[cfg(windows)]
+fn host_directory_roots() -> Result<Vec<DirectoryEntry>> {
+    let mask = unsafe { GetLogicalDrives() };
+    if mask == 0 {
+        return Err(std::io::Error::last_os_error().into());
+    }
+    Ok(windows_drive_entries(mask))
+}
+
+#[cfg(not(windows))]
+fn host_directory_roots() -> Result<Vec<DirectoryEntry>> {
+    Ok(vec![DirectoryEntry {
+        name: "/".to_owned(),
+        path: "/".to_owned(),
+    }])
+}
+
+#[cfg(any(windows, test))]
+fn windows_drive_entries(mask: u32) -> Vec<DirectoryEntry> {
+    (0..26)
+        .filter(|index| mask & (1 << index) != 0)
+        .map(|index| {
+            let letter = char::from(b'A' + index as u8);
+            DirectoryEntry {
+                name: format!("{letter}:"),
+                path: format!("{letter}:\\"),
+            }
+        })
+        .collect()
+}
+
 fn workspace_name(path: &Path) -> String {
     path.file_name()
         .filter(|name| !name.is_empty())
@@ -559,6 +609,25 @@ mod tests {
         ] {
             assert!(validate_proxy_path(path).is_err(), "{path}");
         }
+    }
+
+    #[test]
+    fn windows_drive_mask_maps_to_sorted_root_entries() {
+        let roots = windows_drive_entries((1 << 2) | (1 << 3) | (1 << 25));
+        assert_eq!(
+            roots
+                .iter()
+                .map(|entry| entry.name.as_str())
+                .collect::<Vec<_>>(),
+            ["C:", "D:", "Z:"]
+        );
+        assert_eq!(
+            roots
+                .iter()
+                .map(|entry| entry.path.as_str())
+                .collect::<Vec<_>>(),
+            [r"C:\", r"D:\", r"Z:\"]
+        );
     }
 
     #[test]

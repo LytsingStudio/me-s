@@ -198,7 +198,12 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         (&Method::Post, "/api/gateway/directories") => {
             let input: DirectoryRequest = read_json(request, MAX_BODY_BYTES)?;
             let path = input.path.map(PathBuf::from);
-            match gateway.list_directories(path.as_deref()) {
+            let listing = if input.roots {
+                gateway.list_directory_roots()
+            } else {
+                gateway.list_directories(path.as_deref())
+            };
+            match listing {
                 Ok(listing) => Ok(json_response(StatusCode(200), &listing)),
                 Err(error) => {
                     eprintln!("warning: host directory listing failed: {error}");
@@ -326,6 +331,8 @@ struct SelectionRequest {
 #[derive(Deserialize)]
 struct DirectoryRequest {
     path: Option<String>,
+    #[serde(default)]
+    roots: bool,
 }
 
 #[derive(Deserialize)]

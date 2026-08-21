@@ -238,6 +238,40 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
             .iter()
             .all(|entry| entry["name"] != "not-a-directory")
     );
+    let roots = post_json(
+        &address,
+        "/api/gateway/directories",
+        &cookie,
+        serde_json::json!({"roots": true}),
+    );
+    assert_eq!(roots["ok"], true);
+    assert_eq!(roots["root_selector"], true);
+    assert!(roots["path"].is_null());
+    let root_entries = roots["directories"].as_array().unwrap();
+    assert!(!root_entries.is_empty());
+    #[cfg(not(windows))]
+    assert_eq!(root_entries[0]["path"], "/");
+    #[cfg(windows)]
+    {
+        let readable_root = root_entries
+            .iter()
+            .find(|entry| {
+                entry["path"]
+                    .as_str()
+                    .is_some_and(|path| fs::read_dir(path).is_ok())
+            })
+            .expect("Windows must expose at least one readable logical drive");
+        let drive_listing = post_json(
+            &address,
+            "/api/gateway/directories",
+            &cookie,
+            serde_json::json!({"path": readable_root["path"]}),
+        );
+        assert_eq!(drive_listing["ok"], true);
+        assert_eq!(drive_listing["root_selector"], false);
+        assert_eq!(drive_listing["parent_is_root_selector"], true);
+    }
+
     let rejected_file = post_json(
         &address,
         "/api/gateway/directories",

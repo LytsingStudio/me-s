@@ -16,6 +16,8 @@ function loadRuntime(relative) {
       blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
       modelSettingsHtml: typeof modelSettingsHtml === "function" ? modelSettingsHtml : null,
       persistGatewaySelection: typeof persistGatewaySelection === "function" ? persistGatewaySelection : null,
+      directoryParentRequest: typeof directoryParentRequest === "function" ? directoryParentRequest : null,
+      displayHostPath: typeof displayHostPath === "function" ? displayHostPath : null,
       renderTranscript: typeof renderTranscript === "function" ? renderTranscript : null,
       elements: typeof elements === "object" ? elements : null };
   `);
@@ -122,16 +124,36 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(index).toContain('id="open-settings" class="sidebar-settings" type="button" title="设置" aria-label="设置"><svg');
   });
 
-  test("uses a fixed directory window with a structured folder list", () => {
+  test("uses a fixed, refined, compact directory window", () => {
     const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     const styles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
     expect(source).toContain('kind: "directory"');
     expect(source).toContain('class="directory-list-header"');
     expect(source).toContain('class="directory-folder-icon"');
+    expect(source).toContain('class="directory-count"');
+    expect(source).toContain('class="directory-entry-icon"');
     expect(styles).toContain(".directory-modal-backdrop .modal {");
     expect(styles).toContain("height: min(680px, calc(100dvh - 40px));");
     expect(styles).toContain(".directory-list { min-height: 0; flex: 1; overflow: auto;");
+    expect(styles).toContain(".directory-entry-icon {");
+    expect(styles).toContain("min-height: 38px;");
   });
+
+  test("routes Windows drive roots through the host root selector", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    expect(gateway.directoryParentRequest({ parent: "C:\\Users", parent_is_root_selector: false }))
+      .toEqual({ path: "C:\\Users", roots: false });
+    expect(gateway.directoryParentRequest({ parent: null, parent_is_root_selector: true }))
+      .toEqual({ path: null, roots: true });
+    expect(gateway.directoryParentRequest({ parent: null, parent_is_root_selector: false }))
+      .toBeNull();
+    expect(gateway.displayHostPath("\\\\?\\C:\\Users")).toBe("C:\\Users");
+    expect(gateway.displayHostPath("\\\\?\\UNC\\server\\share")).toBe("\\\\server\\share");
+    const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(source).toContain('JSON.stringify({ path, roots })');
+    expect(source).toContain('rootSelector ? "此电脑"');
+  });
+
 
   test("keeps the selected default model attached when that model is renamed", () => {
     const gateway = loadRuntime("../src/gateway_webui/app.js");
