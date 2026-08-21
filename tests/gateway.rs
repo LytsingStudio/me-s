@@ -186,6 +186,17 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     let (mut gateway, address) = spawn_gateway(&root, &config_home);
     let http = client();
 
+    let transcript_runtime = http
+        .get(format!("{address}/transcript.js"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(transcript_runtime.contains("MeTranscript"));
+    assert!(transcript_runtime.contains("reconcileHtmlChildren"));
+
     assert_eq!(
         http.get(format!("{address}/api/gateway/state"))
             .send()

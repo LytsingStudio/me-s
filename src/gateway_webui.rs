@@ -22,6 +22,7 @@ pub const GATEWAY_BIND_ADDRESS: &str = "0.0.0.0";
 const INDEX_HTML: &str = include_str!("gateway_webui/index.html");
 const APP_JS: &str = include_str!("gateway_webui/app.js");
 const STYLE_CSS: &str = include_str!("gateway_webui/style.css");
+const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
@@ -156,6 +157,12 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         (&Method::Get, "/") => return Ok(text_response("text/html; charset=utf-8", INDEX_HTML)),
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
+        }
+        (&Method::Get, "/transcript.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                TRANSCRIPT_JS,
+            ));
         }
         (&Method::Get, "/style.css") => {
             return Ok(text_response("text/css; charset=utf-8", STYLE_CSS));

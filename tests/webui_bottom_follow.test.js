@@ -3,22 +3,19 @@
 const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
+const { createTranscriptBottomFollower } = require("../src/webui/transcript.js");
 
-function loadBottomFollowRuntime() {
+function loadPromptConfirmationRuntime() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
-  if (eventBindings < 0) throw new Error("could not isolate WebUI bottom-follow runtime");
+  if (eventBindings < 0) throw new Error("could not isolate WebUI prompt-confirmation runtime");
   const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
-    return { createTranscriptBottomFollower, beginConfirmedPromptRender };`);
+    return { beginConfirmedPromptRender };`);
   return factory(
     { querySelector: () => null },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
   );
-}
-
-function loadBottomFollowerFactory() {
-  return loadBottomFollowRuntime().createTranscriptBottomFollower;
 }
 
 function harness() {
@@ -38,6 +35,7 @@ function harness() {
   const content = {};
   const runtime = {
     threshold: 24,
+    settleDelay: 180,
     requestFrame(callback) { const id = nextId++; frames.set(id, callback); return id; },
     cancelFrame(id) { frames.delete(id); },
     setDelay(callback) { const id = nextId++; timers.set(id, callback); return id; },
@@ -59,82 +57,173 @@ function harness() {
     timers.clear();
     pending.forEach((callback) => callback());
   };
-  const create = loadBottomFollowerFactory();
-  const follower = create(viewport, content, () => {}, runtime);
+  const follower = createTranscriptBottomFollower(viewport, content, () => {}, runtime);
   return {
     viewport,
     follower,
     resize: () => resizeCallback?.(),
     flushFrames,
     flushTimers,
+    pendingFrames: () => frames.size,
+    pendingTimers: () => timers.size,
   };
+}
+
+function scrollAway(test, value = 300) {
+  test.follower.beginUserInteraction();
+  test.viewport.scrollTop = value;
+  test.follower.noteScroll();
+  test.follower.endUserInteraction();
+  test.flushTimers();
 }
 
 describe("WebUI transcript bottom follower", () => {
   test("keeps the bottom after an external layout block shrinks the transcript viewport", () => {
-    const test = harness();
-    test.viewport.clientHeight = 260;
-    test.resize();
-    test.flushFrames();
-    expect(test.viewport.scrollTop).toBe(740);
-    expect(test.follower.isNearBottom()).toBe(true);
+    const subject = harness();
+    subject.viewport.clientHeight = 260;
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(740);
+    expect(subject.follower.isNearBottom()).toBe(true);
   });
 
   test("keeps following repeated late measurements after a full replay", () => {
-    const test = harness();
-    test.viewport.scrollHeight = 1_600;
-    test.resize();
-    test.flushFrames();
-    expect(test.viewport.scrollTop).toBe(1_200);
+    const subject = harness();
+    subject.viewport.scrollHeight = 1_600;
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(1_200);
 
-    test.viewport.scrollHeight = 2_200;
-    test.resize();
-    test.flushFrames();
-    expect(test.viewport.scrollTop).toBe(1_800);
+    subject.viewport.scrollHeight = 2_200;
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(1_800);
   });
 
   test("follows the newly selected session through its initial and deferred layouts", () => {
-    const test = harness();
-    test.viewport.scrollHeight = 3_000;
-    test.follower.follow();
-    test.resize();
-    test.flushFrames();
-    expect(test.viewport.scrollTop).toBe(2_600);
+    const subject = harness();
+    subject.viewport.scrollHeight = 3_000;
+    subject.follower.follow();
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(2_600);
 
-    test.viewport.scrollHeight = 3_300;
-    test.resize();
-    test.flushFrames();
-    expect(test.viewport.scrollTop).toBe(2_900);
+    subject.viewport.scrollHeight = 3_300;
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(2_900);
   });
 
   test("only a real user scroll away disables following", () => {
-    const test = harness();
-    test.follower.noteUserInteraction();
-    test.flushTimers();
-    expect(test.follower.isFollowing()).toBe(true);
+    const subject = harness();
+    subject.follower.noteUserInteraction();
+    subject.flushTimers();
+    expect(subject.follower.isFollowing()).toBe(true);
 
-    test.follower.noteUserInteraction();
-    test.viewport.scrollTop = 300;
-    test.follower.noteScroll();
-    test.flushTimers();
-    expect(test.follower.isFollowing()).toBe(false);
+    scrollAway(subject);
+    expect(subject.follower.isFollowing()).toBe(false);
 
-    test.viewport.scrollHeight = 1_500;
-    test.resize();
-    test.flushFrames();
-    expect(test.viewport.scrollTop).toBe(300);
+    subject.viewport.scrollHeight = 1_500;
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(300);
 
-    test.follower.noteUserInteraction();
-    test.viewport.scrollTop = test.viewport.scrollHeight;
-    test.follower.noteScroll();
-    test.flushTimers();
-    test.flushFrames();
-    expect(test.follower.isFollowing()).toBe(true);
-    expect(test.follower.isNearBottom()).toBe(true);
+    subject.follower.beginUserInteraction();
+    subject.viewport.scrollTop = subject.viewport.scrollHeight;
+    subject.follower.noteScroll();
+    subject.follower.endUserInteraction();
+    subject.flushTimers();
+    subject.flushFrames();
+    expect(subject.follower.isFollowing()).toBe(true);
+    expect(subject.follower.isNearBottom()).toBe(true);
+  });
+
+  test("keeps forcing the bottom while kinetic scroll events continue after the button click", () => {
+    const subject = harness();
+    scrollAway(subject);
+    expect(subject.follower.isFollowing()).toBe(false);
+
+    subject.follower.follow();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(600);
+
+    subject.viewport.scrollTop = 360;
+    subject.follower.noteScroll();
+    expect(subject.pendingFrames()).toBe(1);
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(600);
+
+    subject.viewport.scrollTop = 420;
+    subject.follower.noteScroll();
+    subject.flushFrames();
+    subject.flushTimers();
+    expect(subject.viewport.scrollTop).toBe(600);
+    expect(subject.follower.isFollowing()).toBe(true);
+    expect(subject.follower.isNearBottom()).toBe(true);
+  });
+
+  test("tracks inertia after pointer release until the scroll really settles", () => {
+    const subject = harness();
+    subject.follower.beginUserInteraction();
+    subject.viewport.scrollTop = 590;
+    subject.follower.noteScroll();
+    subject.follower.endUserInteraction();
+
+    subject.viewport.scrollTop = 300;
+    subject.follower.noteScroll();
+    subject.flushTimers();
+    subject.flushFrames();
+    expect(subject.follower.isFollowing()).toBe(false);
+    expect(subject.viewport.scrollTop).toBe(300);
+  });
+
+  test("restores following when inertia reaches the bottom after pointer release", () => {
+    const subject = harness();
+    scrollAway(subject);
+    subject.follower.beginUserInteraction();
+    subject.viewport.scrollTop = 500;
+    subject.follower.noteScroll();
+    subject.follower.endUserInteraction();
+
+    subject.viewport.scrollTop = subject.viewport.scrollHeight;
+    subject.follower.noteScroll();
+    subject.flushTimers();
+    subject.flushFrames();
+    expect(subject.follower.isFollowing()).toBe(true);
+    expect(subject.follower.isNearBottom()).toBe(true);
+  });
+
+  test("a new user gesture cancels an explicit forced follow", () => {
+    const subject = harness();
+    scrollAway(subject);
+    subject.follower.follow();
+    expect(subject.pendingFrames()).toBe(1);
+
+    subject.follower.beginUserInteraction();
+    subject.viewport.scrollTop = 250;
+    subject.follower.noteScroll();
+    subject.follower.endUserInteraction();
+    subject.flushFrames();
+    subject.flushTimers();
+    expect(subject.viewport.scrollTop).toBe(250);
+    expect(subject.follower.isFollowing()).toBe(false);
+  });
+
+  test("uses scrollend to finish the active user scroll without waiting for fallback delay", () => {
+    const subject = harness();
+    subject.follower.beginUserInteraction();
+    subject.viewport.scrollTop = 300;
+    subject.follower.noteScroll();
+    subject.follower.endUserInteraction();
+    expect(subject.pendingTimers()).toBe(1);
+
+    subject.follower.noteScrollEnd();
+    expect(subject.pendingTimers()).toBe(0);
+    expect(subject.follower.isFollowing()).toBe(false);
   });
 
   test("only this page's authoritative pending confirmation forces following", () => {
-    const { beginConfirmedPromptRender } = loadBottomFollowRuntime();
+    const { beginConfirmedPromptRender } = loadPromptConfirmationRuntime();
     let followCount = 0;
     const follower = { follow() { followCount += 1; } };
 

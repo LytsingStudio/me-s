@@ -1503,71 +1503,12 @@ function transcriptIsNearBottom() {
 }
 
 function createTranscriptBottomFollower(viewport, content, onPositionChange, runtime = {}) {
-  const requestFrame = runtime.requestFrame || ((callback) => requestAnimationFrame(callback));
-  const cancelFrame = runtime.cancelFrame || ((id) => cancelAnimationFrame(id));
-  const setDelay = runtime.setDelay || ((callback, delay) => setTimeout(callback, delay));
-  const clearDelay = runtime.clearDelay || ((id) => clearTimeout(id));
-  const createResizeObserver = runtime.createResizeObserver || ((callback) => {
-    if (typeof ResizeObserver === "function") return new ResizeObserver(callback);
-    return { observe() {}, disconnect() {} };
-  });
-  const threshold = runtime.threshold ?? TRANSCRIPT_BOTTOM_THRESHOLD_PX;
-  let following = true;
-  let interacting = false;
-  let frame = null;
-  let interactionTimer = null;
-
-  const isNearBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
-    <= threshold;
-  const notify = () => onPositionChange?.();
-  const cancelScheduledFollow = () => {
-    if (frame === null) return;
-    cancelFrame(frame);
-    frame = null;
-  };
-  const scheduleFollow = () => {
-    if (!following || interacting || frame !== null) return;
-    frame = requestFrame(() => {
-      frame = null;
-      if (!following || interacting) return;
-      viewport.scrollTop = viewport.scrollHeight;
-      notify();
-    });
-  };
-  const layoutChanged = () => {
-    if (following) scheduleFollow(); else notify();
-  };
-  const resizeObserver = createResizeObserver(layoutChanged);
-  resizeObserver.observe(viewport);
-  resizeObserver.observe(content);
-
-  return {
-    isFollowing: () => following,
-    isNearBottom,
-    follow() {
-      following = true;
-      interacting = false;
-      if (interactionTimer !== null) clearDelay(interactionTimer);
-      interactionTimer = null;
-      scheduleFollow();
-    },
-    noteUserInteraction() {
-      interacting = true;
-      cancelScheduledFollow();
-      if (interactionTimer !== null) clearDelay(interactionTimer);
-      interactionTimer = setDelay(() => {
-        interactionTimer = null;
-        interacting = false;
-        if (following) scheduleFollow();
-        notify();
-      }, 120);
-    },
-    noteScroll() {
-      if (interacting) following = isNearBottom();
-      notify();
-    },
-    layoutChanged,
-  };
+  return MeTranscript.createTranscriptBottomFollower(
+    viewport,
+    content,
+    onPositionChange,
+    { threshold: TRANSCRIPT_BOTTOM_THRESHOLD_PX, ...runtime },
+  );
 }
 
 function updateScrollToBottomButton() {
@@ -1584,6 +1525,18 @@ function scrollTranscriptToBottomAfterLayout() {
 
 function suspendTranscriptAutoFollow() {
   transcriptBottomFollower.noteUserInteraction();
+}
+
+function beginTranscriptUserInteraction() {
+  transcriptBottomFollower.beginUserInteraction();
+}
+
+function endTranscriptUserInteraction() {
+  transcriptBottomFollower.endUserInteraction();
+}
+
+function finishTranscriptScrolling() {
+  transcriptBottomFollower.noteScrollEnd();
 }
 
 function renderConnection() {
@@ -1733,20 +1686,18 @@ function renderTranscript(forceFull = false, changedFrom = 0) {
   }
   if (!messages.length) {
     const environment = state.snapshot.environment;
-    if (!elements.transcriptContent.querySelector(":scope > .empty-state")) {
-      elements.transcriptContent.innerHTML = `<div class="empty-state"><div><strong>ME-S</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
-    }
+    const rendered = `<div class="empty-state"><div><strong>ME-S</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
+    MeTranscript.reconcileHtmlChildren(elements.transcriptContent, rendered);
     return;
   }
-  if (forceFull) replaceElementChildren(elements.transcriptContent);
   reconcileTranscript(messages, forceFull ? 0 : changedFrom);
 }
 
 function reconcileTranscript(messages, changedFrom = 0) {
-  if (elements.transcriptContent.querySelector(":scope > .empty-state")) {
-    replaceElementChildren(elements.transcriptContent);
-  }
   const start = Math.max(0, Math.min(changedFrom, messages.length));
+  const existing = new Map([...elements.transcriptContent.children].slice(start)
+    .filter((node) => node.dataset.messageKey)
+    .map((node) => [node.dataset.messageKey, node]));
   let previousKind = previousVisibleRenderedKind(start);
   for (let index = start; index < messages.length; index += 1) {
     const message = messages[index];
@@ -1755,16 +1706,20 @@ function reconcileTranscript(messages, changedFrom = 0) {
     const followsTool = visible && previousKind === "tool" && message.kind === "tool";
     const key = messageDomKey(message, index);
     const revision = messageRenderRevision(message, afterTool, followsTool);
-    const current = elements.transcriptContent.children[index];
-    if (!current || current.dataset.messageKey !== key) {
-      while (elements.transcriptContent.children.length > index) elements.transcriptContent.lastElementChild.remove();
-      elements.transcriptContent.append(createMessageFragment(messages, index, previousKind));
-      return;
+    let node = elements.transcriptContent.children[index];
+    if (!node || node.dataset.messageKey !== key) {
+      node = existing.get(key) || createMessageNode(message, afterTool, followsTool, index);
+      elements.transcriptContent.insertBefore(
+        node,
+        elements.transcriptContent.children[index] || null,
+      );
     }
-    if (current.meRenderRevision !== revision) updateMessageNode(current, message, afterTool, followsTool, index);
+    if (node.meRenderRevision !== revision) updateMessageNode(node, message, afterTool, followsTool, index);
     if (visible) previousKind = message.kind;
   }
-  while (elements.transcriptContent.children.length > messages.length) elements.transcriptContent.lastElementChild.remove();
+  while (elements.transcriptContent.children.length > messages.length) {
+    elements.transcriptContent.lastElementChild.remove();
+  }
 }
 
 function previousVisibleRenderedKind(index) {
@@ -1779,26 +1734,6 @@ function messageIsVisible(message) {
   if (message.kind === "assistant") return Boolean(message.content.trim());
   if (message.kind === "worker-activity") return workerWaitIsVisible(message.tool);
   return true;
-}
-
-function createMessageFragment(messages, start, previousKind) {
-  const descriptors = [];
-  let previous = previousKind;
-  for (let index = start; index < messages.length; index += 1) {
-    const message = messages[index];
-    const visible = messageIsVisible(message);
-    const afterTool = visible && isToolLikeKind(previous) && message.kind === "assistant";
-    const followsTool = visible && previous === "tool" && message.kind === "tool";
-    descriptors.push({ message, afterTool, followsTool, index });
-    if (visible) previous = message.kind;
-  }
-  const template = document.createElement("template");
-  template.innerHTML = descriptors.map(({ message, afterTool, followsTool }) => renderMessageHtml(message, afterTool, followsTool)).join("");
-  [...template.content.children].forEach((node, offset) => {
-    const { message, afterTool, followsTool, index } = descriptors[offset];
-    initializeMessageNode(node, message, afterTool, followsTool, index);
-  });
-  return template.content;
 }
 
 function createMessageNode(message, afterTool, followsTool, index) {
@@ -1823,7 +1758,7 @@ function updateMessageNode(node, message, afterTool, followsTool, index) {
     node.classList.toggle("after-tool", afterTool);
     const markdown = node.querySelector(":scope > .markdown");
     const rendered = renderMarkdown(message.content.trim());
-    if (markdown.innerHTML !== rendered) markdown.innerHTML = rendered;
+    MeTranscript.reconcileHtmlChildren(markdown, rendered);
     node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
     return;
   }
@@ -2064,7 +1999,7 @@ function updateToolCardNode(node, tool, followsTool = node.classList.contains("f
   const template = document.createElement("template");
   template.innerHTML = renderToolDetails(view.rows);
   const replacement = template.content.firstElementChild;
-  if (details) details.replaceWith(replacement); else node.append(replacement);
+  if (details) MeTranscript.reconcileNode(details, replacement); else node.append(replacement);
 }
 
 function renderWorkerActivity(wait) {
@@ -2343,14 +2278,15 @@ function renderObjective() {
   const current = currentStore()?.workmap.current;
   if (!current || state.view.kind !== "chat") {
     elements.objective.classList.add("hidden");
-    elements.objective.innerHTML = "";
+    MeTranscript.reconcileHtmlChildren(elements.objective, "");
     return;
   }
   const active = current.plans.some(({ plan }) => plan.state === "active");
   elements.objective.classList.remove("hidden");
-  elements.objective.innerHTML = `<div class="objective-title">${active ? "■" : "□"} ${escapeHtml(current.objective.title)}</div>
+  const rendered = `<div class="objective-title">${active ? "■" : "□"} ${escapeHtml(current.objective.title)}</div>
     ${current.objective.description ? `<div class="objective-description">${escapeHtml(current.objective.description)}</div>` : ""}
     ${current.plans.map(({ plan, notes }) => `<div class="objective-plan ${plan.state === "active" ? "active" : ""}"><span>${planSymbol(plan.state)}</span><span>${escapeHtml(plan.title)}${notes.length ? ` (${notes.length} ${notes.length === 1 ? "note" : "notes"})` : ""}</span></div>`).join("")}`;
+  MeTranscript.reconcileHtmlChildren(elements.objective, rendered);
 }
 
 function renderWorkMap() {
@@ -3487,10 +3423,18 @@ elements.transcript.addEventListener("scroll", () => {
 }, { passive: true });
 elements.agents.addEventListener("scroll", closeAgentMenu, { passive: true });
 elements.transcript.addEventListener("wheel", suspendTranscriptAutoFollow, { passive: true });
-elements.transcript.addEventListener("touchstart", suspendTranscriptAutoFollow, { passive: true });
-elements.transcript.addEventListener("touchend", suspendTranscriptAutoFollow, { passive: true });
-elements.transcript.addEventListener("pointerdown", suspendTranscriptAutoFollow);
-elements.transcript.addEventListener("pointerup", suspendTranscriptAutoFollow);
+if (typeof window.PointerEvent === "function") {
+  elements.transcript.addEventListener("pointerdown", beginTranscriptUserInteraction, { passive: true });
+  elements.transcript.addEventListener("pointerup", endTranscriptUserInteraction, { passive: true });
+  elements.transcript.addEventListener("pointercancel", endTranscriptUserInteraction, { passive: true });
+} else {
+  elements.transcript.addEventListener("touchstart", beginTranscriptUserInteraction, { passive: true });
+  elements.transcript.addEventListener("touchend", endTranscriptUserInteraction, { passive: true });
+  elements.transcript.addEventListener("touchcancel", endTranscriptUserInteraction, { passive: true });
+}
+if ("onscrollend" in elements.transcript) {
+  elements.transcript.addEventListener("scrollend", finishTranscriptScrolling, { passive: true });
+}
 elements.terminalView.addEventListener("scroll", () => {
   if (state.view.kind === "terminal") {
     state.terminalFollowBottom = terminalIsNearBottom(elements.terminalView);

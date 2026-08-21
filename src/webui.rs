@@ -41,6 +41,7 @@ pub struct ManagedWebAccess {
 }
 const INDEX_HTML: &str = include_str!("webui/index.html");
 const APP_JS: &str = include_str!("webui/app.js");
+const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
@@ -530,6 +531,12 @@ fn route(
         }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
+        }
+        (&Method::Get, "/transcript.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                TRANSCRIPT_JS,
+            ));
         }
         (&Method::Get, "/markdown.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", MARKDOWN_JS));
@@ -1571,8 +1578,8 @@ mod tests {
         assert!(!MARKDOWN_JS.contains(".replaceAll("));
         assert!(APP_JS.contains("typeof PORTRAIT_LAYOUT.addEventListener === \"function\""));
         assert!(APP_JS.contains("typeof PORTRAIT_LAYOUT.addListener === \"function\""));
-        assert!(APP_JS.contains("if (typeof ResizeObserver === \"function\")"));
-        assert!(APP_JS.contains("return { observe() {}, disconnect() {} };"));
+        assert!(TRANSCRIPT_JS.contains("if (typeof ResizeObserver === \"function\")"));
+        assert!(TRANSCRIPT_JS.contains("return { observe() {}, disconnect() {} };"));
     }
 
     #[test]
@@ -1653,9 +1660,12 @@ mod tests {
         let latex = INDEX_HTML.find("/katex.js").unwrap();
         let adapter = INDEX_HTML.find("/markdown.js").unwrap();
         let application = INDEX_HTML.find("/app.js").unwrap();
+        let transcript = INDEX_HTML.find("/transcript.js").unwrap();
         let latex_style = INDEX_HTML.find("/katex.css").unwrap();
         let application_style = INDEX_HTML.find("/style.css").unwrap();
-        assert!(engine < latex && latex < adapter && adapter < application);
+        assert!(
+            engine < latex && latex < adapter && adapter < transcript && transcript < application
+        );
         assert!(latex_style < application_style);
         assert!(MARKDOWN_IT_JS.contains("markdownit=t()"));
         assert!(KATEX_JS.contains("KaTeX"));
@@ -1674,6 +1684,8 @@ mod tests {
         assert!(MARKDOWN_JS.contains("function normalizeCjkEmphasis(source)"));
         assert!(MARKDOWN_JS.contains("insideLinkTarget(source, cursor)"));
         assert!(MARKDOWN_JS.contains("split(CJK_EMPHASIS_SENTINEL).join(\"\")"));
+        assert!(TRANSCRIPT_JS.contains("createTranscriptBottomFollower"));
+        assert!(TRANSCRIPT_JS.contains("reconcileHtmlChildren"));
         assert!(APP_JS.contains("return globalThis.MeMarkdown.render(source)"));
         assert!(!APP_JS.contains("function inlineMarkdown"));
         assert!(STYLE_CSS.contains(".markdown li::marker"));
@@ -1990,13 +2002,12 @@ mod tests {
             )
         );
         assert!(APP_JS.contains("if (message.kind === \"assistant\")"));
-        assert!(
-            APP_JS.contains("if (markdown.innerHTML !== rendered) markdown.innerHTML = rendered")
-        );
+        assert!(APP_JS.contains("MeTranscript.reconcileHtmlChildren(markdown, rendered);"));
+        assert!(!APP_JS.contains("markdown.innerHTML = rendered"));
         assert!(APP_JS.contains(
-            "if (current.meRenderRevision !== revision) updateMessageNode(current, message, afterTool, followsTool, index)"
+            "if (node.meRenderRevision !== revision) updateMessageNode(node, message, afterTool, followsTool, index)"
         ));
-        assert!(APP_JS.contains("viewport.scrollTop = viewport.scrollHeight"));
+        assert!(TRANSCRIPT_JS.contains("viewport.scrollTop = viewport.scrollHeight"));
         assert!(
             !APP_JS.contains("current.replaceWith(createMessageNode(message, afterTool, index))")
         );
@@ -2108,14 +2119,20 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_does_not_fight_manual_scrolling() {
+    fn embedded_webui_preserves_manual_scrolling_and_stable_transcript_dom() {
         assert!(INDEX_HTML.contains("id=\"transcript-content\""));
+        assert!(INDEX_HTML.contains("/transcript.js"));
         assert!(APP_JS.contains("function createTranscriptBottomFollower("));
-        assert!(APP_JS.contains("new ResizeObserver(callback)"));
-        assert!(APP_JS.contains("resizeObserver.observe(viewport)"));
-        assert!(APP_JS.contains("resizeObserver.observe(content)"));
+        assert!(APP_JS.contains("return MeTranscript.createTranscriptBottomFollower("));
+        assert!(TRANSCRIPT_JS.contains("new ResizeObserver(callback)"));
+        assert!(TRANSCRIPT_JS.contains("resizeObserver.observe(viewport)"));
+        assert!(TRANSCRIPT_JS.contains("resizeObserver.observe(content)"));
+        assert!(TRANSCRIPT_JS.contains("let userScrolling = false"));
+        assert!(TRANSCRIPT_JS.contains("let forcing = false"));
+        assert!(TRANSCRIPT_JS.contains("if (forcing) scheduleSettling()"));
         assert!(APP_JS.contains("function suspendTranscriptAutoFollow()"));
-        assert!(APP_JS.contains("if (interacting) following = isNearBottom()"));
+        assert!(APP_JS.contains("typeof window.PointerEvent === \"function\""));
+        assert!(APP_JS.contains("addEventListener(\"scrollend\", finishTranscriptScrolling"));
         assert!(APP_JS.contains(
             "elements.transcript.addEventListener(\"wheel\", suspendTranscriptAutoFollow"
         ));
@@ -2125,12 +2142,17 @@ mod tests {
         assert!(APP_JS.contains("if (transcriptChanged || promptConfirmed)"));
         assert!(APP_JS.contains("transcriptBottomFollower.layoutChanged();"));
         assert_eq!(
-            APP_JS
+            TRANSCRIPT_JS
                 .matches("viewport.scrollTop = viewport.scrollHeight")
                 .count(),
             1
         );
-        assert!(!APP_JS.contains("elements.transcript.scrollTop = previousScrollTop"));
+        assert!(APP_JS.contains("MeTranscript.reconcileHtmlChildren(markdown, rendered)"));
+        assert!(APP_JS.contains("new Map([...elements.transcriptContent.children].slice(start)"));
+        assert!(!APP_JS.contains("markdown.innerHTML = rendered"));
+        assert!(
+            !APP_JS.contains("if (forceFull) replaceElementChildren(elements.transcriptContent)")
+        );
         assert!(STYLE_CSS.contains("overflow-anchor: auto"));
         assert!(
             STYLE_CSS.contains(".transcript-content { display: flow-root; min-height: 100%; }")
@@ -2755,6 +2777,14 @@ mod tests {
         assert!(html.contains("ME-S"));
         assert!(html.contains("/app.js"));
 
+        let transcript_runtime = reqwest::blocking::get(format!("{address}/transcript.js"))
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .unwrap();
+        assert!(transcript_runtime.contains("MeTranscript"));
+        assert!(transcript_runtime.contains("reconcileHtmlChildren"));
         let markdown_adapter = reqwest::blocking::get(format!("{address}/markdown.js"))
             .unwrap()
             .error_for_status()

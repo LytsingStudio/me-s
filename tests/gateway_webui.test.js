@@ -8,7 +8,7 @@ function loadRuntime(relative) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
-  const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
+  const factory = new Function("document", "performance", "matchMedia", "MeTranscript", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
@@ -25,6 +25,7 @@ function loadRuntime(relative) {
     { querySelector: () => null, cookie: "" },
     { now: () => 0 },
     () => ({ matches: false, addEventListener() {} }),
+    { reconcileHtmlChildren(container, html) { container.innerHTML = html; } },
   );
   runtime.state.snapshot.tool_visibility = {
     hidden_names: ["SetTitle"], hidden_prefixes: ["WorkMap.", "Worker."], activity_names: ["Worker.Wait"],
