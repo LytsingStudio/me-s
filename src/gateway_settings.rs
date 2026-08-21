@@ -30,8 +30,7 @@ pub struct GatewayModelSettings {
     pub capabilities: ModelCapabilities,
     pub parameters: toml::Table,
     pub effort_parameters: std::collections::BTreeMap<String, toml::Table>,
-    pub has_inline_api_key: bool,
-    #[serde(default, skip_serializing)]
+    #[serde(default)]
     pub api_key: Option<String>,
     #[serde(default, skip_serializing)]
     pub clear_inline_api_key: bool,
@@ -71,8 +70,7 @@ impl GatewaySettings {
                     capabilities: model.capabilities.clone(),
                     parameters: model.parameters.clone(),
                     effort_parameters: model.effort_parameters.clone(),
-                    has_inline_api_key: model.api_key.as_ref().is_some_and(|key| !key.is_empty()),
-                    api_key: None,
+                    api_key: model.api_key.clone(),
                     clear_inline_api_key: false,
                 })
                 .collect(),
@@ -160,14 +158,14 @@ mod tests {
     }
 
     #[test]
-    fn serialized_settings_never_include_an_existing_inline_secret() {
+    fn serialized_settings_include_an_existing_inline_api_key() {
         let mut global = config();
         global.models[0].api_key = Some("super-secret".into());
         let settings = GatewaySettings::from_global(&global);
         let json = serde_json::to_string(&settings).unwrap();
-        assert!(!json.contains("super-secret"));
-        assert!(!json.contains("\"api_key\""));
-        assert!(json.contains("has_inline_api_key"));
+        assert!(json.contains("\"api_key\":\"super-secret\""));
+        assert!(!json.contains("has_inline_api_key"));
+        assert!(!json.contains("clear_inline_api_key"));
     }
 
     #[test]

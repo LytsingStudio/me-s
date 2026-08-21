@@ -13,6 +13,8 @@ function loadRuntime(relative) {
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
+      blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
+      modelSettingsHtml: typeof modelSettingsHtml === "function" ? modelSettingsHtml : null,
       persistGatewaySelection: typeof persistGatewaySelection === "function" ? persistGatewaySelection : null,
       renderTranscript: typeof renderTranscript === "function" ? renderTranscript : null,
       elements: typeof elements === "object" ? elements : null };
@@ -104,6 +106,31 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     gateway.renderTranscript(true);
     expect(transcriptContent.innerHTML).toContain("/work");
     expect(transcriptContent.innerHTML).not.toContain("/chat");
+  });
+
+  test("renders icon settings and collapsed model cards with visible API Keys", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const model = {
+      ...gateway.blankGatewayModel(), name: "model-a", provider: "openai-compatible", api_key: "visible-key",
+    };
+    const html = gateway.modelSettingsHtml(model, 0);
+    expect(html.startsWith('<details class="settings-model" data-settings-model="0">')).toBe(true);
+    expect(html).toContain('class="settings-model-icon"');
+    expect(html).toContain('data-setting="api_key" type="text"');
+    expect(html).toContain('value="visible-key"');
+    const index = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    expect(index).toContain('id="open-settings" class="sidebar-settings" type="button" title="设置" aria-label="设置"><svg');
+  });
+
+  test("uses a fixed directory window with a structured folder list", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    expect(source).toContain('kind: "directory"');
+    expect(source).toContain('class="directory-list-header"');
+    expect(source).toContain('class="directory-folder-icon"');
+    expect(styles).toContain(".directory-modal-backdrop .modal {");
+    expect(styles).toContain("height: min(680px, calc(100dvh - 40px));");
+    expect(styles).toContain(".directory-list { min-height: 0; flex: 1; overflow: auto;");
   });
 
   test("keeps the selected default model attached when that model is renamed", () => {

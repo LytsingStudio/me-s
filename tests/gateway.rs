@@ -44,7 +44,7 @@ fn prepare(with_config: bool) -> (TempDirectory, PathBuf, PathBuf) {
     if with_config {
         fs::create_dir_all(config_home.join("conf.d")).unwrap();
         let mut config = default_global_config(&config_home).unwrap();
-        config.models[0].api_key = Some("must-never-reach-the-browser".into());
+        config.models[0].api_key = Some("gateway-visible-inline-key".into());
         config
             .save(&config_home.join("conf.d/models.toml"))
             .unwrap();
@@ -188,15 +188,19 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert!(root.join(".me-gateway/state.json").exists());
     assert!(workspace_config_path(&root).exists());
 
-    let settings = http
+    let settings: serde_json::Value = http
         .get(format!("{address}/api/gateway/settings"))
         .header(reqwest::header::COOKIE, &cookie)
         .send()
         .unwrap()
-        .text()
+        .json()
         .unwrap();
-    assert!(!settings.contains("must-never-reach-the-browser"));
-    assert!(!settings.contains("\"api_key\""));
+    assert_eq!(
+        settings["models"][0]["api_key"],
+        "gateway-visible-inline-key"
+    );
+    assert!(settings["models"][0].get("has_inline_api_key").is_none());
+    assert!(settings["models"][0].get("clear_inline_api_key").is_none());
 
     fs::write(root.join("not-a-directory"), b"file").unwrap();
     let listing = post_json(

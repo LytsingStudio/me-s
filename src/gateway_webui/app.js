@@ -3175,6 +3175,7 @@ async function openDirectoryBrowser(mode) {
       body: JSON.stringify({ path: state.gateway.gateway_root || null }),
     });
     openModal({
+      kind: "directory",
       title: mode === "create" ? "新建工作区" : "打开工作区",
       description: "请选择 ME Gateway 宿主机上的目录。",
       choices: [], selected: null, confirmLabel: mode === "create" ? "创建并打开" : "打开",
@@ -3205,26 +3206,42 @@ async function openDirectoryBrowser(mode) {
 }
 
 async function loadDirectoryListing(path, mode) {
+  const browser = elements.modalContent.querySelector(".directory-browser");
+  const controls = [...elements.modalContent.querySelectorAll("[data-directory-path]")];
+  browser?.classList.add("loading");
+  controls.forEach((button) => { button.disabled = true; });
   try {
     const listing = await api("/api/gateway/directories", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path }),
     });
     if (state.modal) renderDirectoryListing(listing, mode);
-  } catch (error) { toast(error.message, true); }
+  } catch (error) {
+    browser?.classList.remove("loading");
+    controls.forEach((button) => { button.disabled = false; });
+    toast(error.message, true);
+  }
 }
 
 function renderDirectoryListing(listing, mode) {
   if (!state.modal) return;
+  const workspaceName = elements.modalContent.querySelector("#new-workspace-name")?.value || "";
+  const directories = listing.directories || [];
+  const folderIcon = `<svg class="directory-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15v-13.5Z"/><path d="M3.5 10h17"/></svg>`;
   state.modal.directory = listing;
   elements.modalContent.innerHTML = `<div class="directory-browser">
-    <div class="directory-current" title="${escapeAttr(listing.path)}">${escapeHtml(listing.path)}</div>
-    <div class="directory-list">
-      ${listing.parent ? `<button type="button" class="directory-entry parent" data-directory-path="${escapeAttr(listing.parent)}"><strong>返回上一级</strong><span>${escapeHtml(listing.parent)}</span></button>` : ""}
-      ${(listing.directories || []).map((directory) => `<button type="button" class="directory-entry" data-directory-path="${escapeAttr(directory.path)}"><strong>${escapeHtml(directory.name)}</strong><span>${escapeHtml(directory.path)}</span></button>`).join("")}
-      ${!(listing.directories || []).length ? `<div class="empty-state">此位置没有子目录</div>` : ""}
+    <div class="directory-toolbar">
+      <button type="button" class="directory-up" aria-label="返回上一级" title="返回上一级" ${listing.parent ? `data-directory-path="${escapeAttr(listing.parent)}"` : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+      <div class="directory-current">${folderIcon}<span title="${escapeAttr(listing.path)}">${escapeHtml(listing.path)}</span></div>
     </div>
-    ${mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" placeholder="例如：my-project"></label>` : `<p class="directory-help">将打开当前显示的目录。</p>`}
+    <div class="directory-table">
+      <div class="directory-list-header" aria-hidden="true"><span></span><span>名称</span><span>路径</span><span></span></div>
+      <div class="directory-list" role="list">
+        ${directories.map((directory) => `<button type="button" class="directory-entry" role="listitem" data-directory-path="${escapeAttr(directory.path)}" aria-label="打开目录 ${escapeAttr(directory.name)}">${folderIcon}<span class="directory-entry-name">${escapeHtml(directory.name)}</span><span class="directory-entry-path" title="${escapeAttr(directory.path)}">${escapeHtml(directory.path)}</span><svg class="directory-entry-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>`).join("")}
+        ${directories.length ? "" : `<div class="directory-empty">${folderIcon}<strong>此位置没有子目录</strong><span>可以选择当前目录，或返回上一级继续浏览。</span></div>`}
+      </div>
+    </div>
+    ${mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(workspaceName)}" placeholder="例如：my-project"></label>` : `<p class="directory-help">当前目录将作为工作区打开。</p>`}
   </div>`;
   elements.modalContent.querySelectorAll("[data-directory-path]").forEach((button) => button.addEventListener("click", () => {
     void loadDirectoryListing(button.dataset.directoryPath, mode);
@@ -3238,14 +3255,20 @@ function blankGatewayModel() {
     base_url: "", endpoint: "/chat/completions", api_key_env: null, credential_file: null,
     model: "", source_url: null, timeout_seconds: 120,
     capabilities: { context_window: 128000, max_output_tokens: null, input_modalities: ["text"], output_modalities: ["text"], reasoning_modes: [], reasoning_efforts: ["unset"], tools: true, streaming: true },
-    parameters: {}, effort_parameters: {}, has_inline_api_key: false,
+    parameters: {}, effort_parameters: {}, api_key: null, clear_inline_api_key: false,
   };
 }
 
 function modelSettingsHtml(model, index) {
   const value = (name) => escapeAttr(model[name] ?? "");
-  return `<details class="settings-model" data-settings-model="${index}" ${index === 0 ? "open" : ""}>
-    <summary><strong>${escapeHtml(model.name || "新模型")}</strong><span>${escapeHtml(model.provider)}</span></summary>
+  return `<details class="settings-model" data-settings-model="${index}">
+    <summary>
+      <span class="settings-model-title">
+        <svg class="settings-model-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg>
+        <strong>${escapeHtml(model.name || "新模型")}</strong>
+      </span>
+      <span class="settings-model-provider">${escapeHtml(model.provider)}</span>
+    </summary>
     <div class="settings-grid">
       <label>显示名称<input data-setting="name" value="${value("name")}"></label>
       <label>Provider<select data-setting="provider"><option value="openai-compatible" ${model.provider === "openai-compatible" ? "selected" : ""}>OpenAI Compatible</option><option value="anthropic" ${model.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="codex-oauth" ${model.provider === "codex-oauth" ? "selected" : ""}>Codex OAuth</option></select></label>
@@ -3256,7 +3279,7 @@ function modelSettingsHtml(model, index) {
       <label>API Key 环境变量<input data-setting="api_key_env" value="${value("api_key_env")}"></label>
       <label>凭据文件<input data-setting="credential_file" value="${value("credential_file")}"></label>
       <label>来源地址<input data-setting="source_url" value="${value("source_url")}"></label>
-      <label>新 API Key<input data-setting="api_key" type="password" autocomplete="new-password" value="${value("api_key")}" placeholder="${model.has_inline_api_key ? "已保存；留空保持不变" : "留空表示不设置"}"></label>
+      <label>API Key<input data-setting="api_key" type="text" autocomplete="off" value="${value("api_key")}" placeholder="留空表示不设置"></label>
       <label class="settings-check"><input data-setting="reserve_output_context" type="checkbox" ${model.reserve_output_context ? "checked" : ""}>为输出预留上下文</label>
       <label class="settings-check"><input data-setting="clear_inline_api_key" type="checkbox" ${model.clear_inline_api_key ? "checked" : ""}>清除已保存的 API Key</label>
     </div>
@@ -3341,7 +3364,7 @@ async function openGatewaySettings() {
   try {
     const settings = await api("/api/gateway/settings");
     openModal({
-      title: "设置", description: "编辑 ME 的全局模型设置。已有秘密不会显示。",
+      title: "设置", description: "编辑 ME 的全局模型设置。",
       choices: [], selected: null, confirmLabel: "保存设置", html: `<div class="settings-editor"></div>`,
       settings, onOpen: renderSettingsModal,
       onConfirm: async () => {
@@ -3388,6 +3411,7 @@ function openModal(modal) {
     state.modal.selected = input.value;
     elements.modalContent.querySelectorAll(".choice").forEach((choice) => choice.classList.toggle("selected", choice.contains(input)));
   }));
+  elements.modalBackdrop.classList.toggle("directory-modal-backdrop", modal.kind === "directory");
   elements.modalBackdrop.classList.remove("hidden");
   modal.onOpen?.(elements.modalContent);
 }
@@ -3395,6 +3419,7 @@ function openModal(modal) {
 function closeModal() {
   state.modal = null;
   elements.modalBackdrop.classList.add("hidden");
+  elements.modalBackdrop.classList.remove("directory-modal-backdrop");
 }
 
 async function confirmModal() {
