@@ -125,6 +125,17 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(index).toContain('id="open-settings" class="sidebar-settings" type="button" title="设置" aria-label="设置"><svg');
   });
 
+  test("keeps login branding free of marketing taglines", () => {
+    const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    expect(singleIndex).toContain("<strong>ME-S</strong>");
+    expect(gatewayIndex).toContain("<strong>ME</strong>");
+    for (const index of [singleIndex, gatewayIndex]) expect(index).not.toContain("智能工作台");
+    for (const styles of [singleStyles, gatewayStyles]) expect(styles).not.toContain(".login-brand span");
+  });
+
   test("uses a fixed, refined, compact directory window", () => {
     const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     const styles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");

@@ -37,9 +37,7 @@ button { color: inherit; }
 .login-screen { display: grid; width: 100%; height: 100%; min-height: 0; place-items: center; overflow: auto; overscroll-behavior: contain; padding: 24px; background: radial-gradient(circle at 50% 20%, #18172a 0, var(--bg) 46%); }
 .login-card { width: min(390px, 100%); padding: 28px; border: 1px solid var(--border-bright); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 30px; }
-.login-brand strong, .login-brand span { display: block; }
-.login-brand strong { letter-spacing: .04em; }
-.login-brand span { margin-top: 2px; color: var(--dim); font-size: 12px; }
+.login-brand strong { display: block; letter-spacing: .04em; }
 .login-card h1 { margin: 0; font-size: 23px; }
 .login-card p { margin: 8px 0 23px; color: var(--muted); font-size: 13px; }
 .login-card label { display: block; margin: 0 0 7px; color: var(--muted); font-size: 12px; font-weight: 700; }
