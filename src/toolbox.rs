@@ -1312,6 +1312,7 @@ impl Python312 {
                     "import sys; raise SystemExit(0 if sys.version_info[:2] == (3, 12) else 1)",
                 ),
             ])
+            .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .status()

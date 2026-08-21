@@ -9,6 +9,11 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
+#[cfg(windows)]
+use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+
 use me::{
     config::{default_global_config, workspace_config_path, workspace_edb_path},
     managed_protocol::{
@@ -69,15 +74,17 @@ fn spawn_managed(
         token: "ab".repeat(32),
         instance_nonce: "cd".repeat(16),
     };
-    let mut child = Command::new(env!("CARGO_BIN_EXE_me-s"))
+    let mut command = Command::new(env!("CARGO_BIN_EXE_me-s"));
+    command
         .arg("__gateway-child")
         .current_dir(workspace)
         .env("ME_CONFIG_HOME", config_home)
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command.spawn().unwrap();
     let mut input = child.stdin.take().unwrap();
     serde_json::to_writer(&mut input, &launch).unwrap();
     input.write_all(b"\n").unwrap();
@@ -87,6 +94,7 @@ fn spawn_managed(
 
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_millis(500))
         .build()
         .unwrap()
