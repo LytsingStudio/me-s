@@ -72,18 +72,32 @@ fn spawn_gateway(root: &Path, config_home: &Path) -> (Child, String) {
         }
     });
     let deadline = Instant::now() + Duration::from_secs(20);
+    let mut address = None;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
             let lines = receiver.try_iter().collect::<Vec<_>>().join("\n");
             panic!("me-gateway exited before WebUI startup: {status}: {lines}");
         }
-        if let Ok(line) = receiver.recv_timeout(Duration::from_millis(100))
-            && let Some(address) = line.strip_prefix("ME Gateway: ")
-        {
-            return (
-                child,
-                address.replace("http://0.0.0.0:", "http://127.0.0.1:"),
-            );
+        match receiver.recv_timeout(Duration::from_millis(100)) {
+            Ok(line) => {
+                assert!(
+                    line.starts_with("ME Gateway: ")
+                        || line.starts_with("warning:")
+                        || line.starts_with("error:"),
+                    "me-gateway emitted non-debug CLI output: {line}"
+                );
+                if let Some(value) = line.strip_prefix("ME Gateway: ") {
+                    address = Some(value.replace("http://0.0.0.0:", "http://127.0.0.1:"));
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if let Some(address) = address {
+                    return (child, address);
+                }
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("me-gateway closed stderr before WebUI startup");
+            }
         }
         assert!(Instant::now() < deadline, "me-gateway startup timed out");
     }

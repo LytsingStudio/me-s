@@ -141,7 +141,7 @@ cd "$HOME/me-workbench"
 me-gateway --webui-passkey "PASSWORD"
 ```
 
-终端会显示访问地址。Gateway HTTP 服务监听 `0.0.0.0`，默认从端口 `38200` 开始选择可用端口。
+CLI 正常启动时只输出实际访问地址及 `warning:`/`error:` 调试诊断，不显示额外的运行说明。Gateway HTTP 服务监听 `0.0.0.0`，默认从端口 `38200` 开始选择可用端口。
 
 Gateway WebUI 提供：
 

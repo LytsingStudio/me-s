@@ -24,7 +24,6 @@ fn run() -> Result<()> {
     let gateway = Gateway::start(&root)?;
     let server = gateway_webui::start(Arc::clone(&gateway), passkey.as_deref())?;
     eprintln!("ME Gateway: {}", server.address());
-    eprintln!("关闭此终端中的进程将停止所有已打开的工作区");
     let termination = TerminationSignals::install()?;
     let mut failure = None;
     while !termination.requested() {
