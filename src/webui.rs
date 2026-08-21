@@ -1530,6 +1530,18 @@ mod tests {
         assert!(STYLE_CSS.contains("transform: translateX(-105%)"));
         assert!(STYLE_CSS.contains("body.mobile-sidebar-open .sidebar"));
         assert!(STYLE_CSS.contains("env(safe-area-inset-bottom)"));
+        assert!(STYLE_CSS.contains("overflow: hidden; overscroll-behavior: none;"));
+        assert!(STYLE_CSS.contains("body { position: fixed; inset: 0; }"));
+        assert!(STYLE_CSS.contains("height: 100%; height: 100dvh; min-height: 0;"));
+        assert!(
+            STYLE_CSS.contains(
+                ".login-screen { display: grid; width: 100%; height: 100%; min-height: 0;"
+            )
+        );
+        assert!(STYLE_CSS.contains("overflow: auto; overscroll-behavior: contain; padding: 24px;"));
+        assert!(STYLE_CSS.contains(
+            ".transcript { contain: layout paint style; flex: 1; min-height: 0; overflow: auto;"
+        ));
         assert!(APP_JS.contains("const PORTRAIT_LAYOUT = matchMedia(\"(orientation: portrait)\")"));
         assert!(APP_JS.contains("agent.title || agent.id"));
         assert!(APP_JS.contains("function toolIsChatVisible(name)"));

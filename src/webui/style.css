@@ -28,12 +28,13 @@
 }
 
 * { box-sizing: border-box; }
-html, body { width: 100%; height: 100%; margin: 0; background: var(--bg); color: var(--text); }
+html, body { width: 100%; height: 100%; margin: 0; overflow: hidden; overscroll-behavior: none; background: var(--bg); color: var(--text); }
+body { position: fixed; inset: 0; }
 button, textarea { font: inherit; }
 button { color: inherit; }
 .hidden { display: none !important; }
 
-.login-screen { display: grid; width: 100%; height: 100%; place-items: center; padding: 24px; background: radial-gradient(circle at 50% 20%, #18172a 0, var(--bg) 46%); }
+.login-screen { display: grid; width: 100%; height: 100%; min-height: 0; place-items: center; overflow: auto; overscroll-behavior: contain; padding: 24px; background: radial-gradient(circle at 50% 20%, #18172a 0, var(--bg) 46%); }
 .login-card { width: min(390px, 100%); padding: 28px; border: 1px solid var(--border-bright); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 30px; }
 .login-brand strong, .login-brand span { display: block; }
@@ -47,7 +48,7 @@ button { color: inherit; }
 .login-error { min-height: 20px; margin: 7px 0 5px; color: var(--red); font-size: 12px; }
 .login-card > button { width: 100%; min-height: 41px; }
 
-.app-shell { display: grid; grid-template-columns: 250px minmax(0, 1fr); height: 100vh; overflow: hidden; }
+.app-shell { display: grid; width: 100%; height: 100%; height: 100dvh; min-height: 0; grid-template-columns: 250px minmax(0, 1fr); overflow: hidden; }
 .connection-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 24px; background: rgb(7 8 12 / 76%); backdrop-filter: blur(7px); }
 .connection-card { display: grid; justify-items: center; width: min(360px, 100%); padding: 28px 25px 24px; border: 1px solid var(--border-bright); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); text-align: center; }
 .connection-card h2 { margin: 16px 0 7px; font-size: 18px; }

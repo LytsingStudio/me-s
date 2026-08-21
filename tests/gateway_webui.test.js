@@ -139,6 +139,20 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain("min-height: 38px;");
   });
 
+  test("locks the document while keeping content areas internally scrollable", () => {
+    const single = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const gateway = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    for (const styles of [single, gateway]) {
+      expect(styles).toContain("overflow: hidden; overscroll-behavior: none;");
+      expect(styles).toContain("body { position: fixed; inset: 0; }");
+      expect(styles).toContain("height: 100%; height: 100dvh; min-height: 0;");
+      expect(styles).toContain(".login-screen { display: grid; width: 100%; height: 100%; min-height: 0;");
+      expect(styles).toContain("overflow: auto; overscroll-behavior: contain; padding: 24px;");
+      expect(styles).toContain(".transcript { contain: layout paint style; flex: 1; min-height: 0; overflow: auto;");
+      expect(styles).toContain("overscroll-behavior-y: contain;");
+    }
+  });
+
   test("routes Windows drive roots through the host root selector", () => {
     const gateway = loadRuntime("../src/gateway_webui/app.js");
     expect(gateway.directoryParentRequest({ parent: "C:\\Users", parent_is_root_selector: false }))
