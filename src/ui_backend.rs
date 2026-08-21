@@ -241,7 +241,7 @@ pub fn workspace_ui_ports(workspace: Workspace) -> (WorkspaceUiBackend, Workspac
         workspace
             .model_configs()
             .iter()
-            .filter(|model| !crate::codex_oauth::is_legacy_model_name(&model.name))
+            .filter(|model| !crate::codex_oauth::is_hidden_legacy_model(model))
             .map(|model| {
                 let mut output_token_reservations = BTreeMap::from([(
                     UNSET_EFFORT.to_owned(),
@@ -685,6 +685,36 @@ mod tests {
         drop(before_a);
         drop(reader_b);
         drop(reader_a);
+        drop(commands);
+        drop(backend);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn ui_models_keep_custom_legacy_names_and_hide_only_codex_aliases() {
+        let directory = workspace();
+        let mut custom_same_name = model();
+        custom_same_name.name = "gpt-5.6-sol".into();
+        custom_same_name.model = "custom-gpt-5.6-sol".into();
+        let mut codex_legacy = model();
+        codex_legacy.name = "gpt-5.6-terra".into();
+        codex_legacy.model = "gpt-5.6-terra".into();
+        codex_legacy.provider = ProviderType::CodexOauth;
+        let mut local = config();
+        local.model = custom_same_name.name.clone();
+        let workspace =
+            Workspace::open(&directory, local, vec![custom_same_name, codex_legacy]).unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
+
+        let names = backend
+            .snapshot()
+            .unwrap()
+            .models
+            .iter()
+            .map(|model| model.name.clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["gpt-5.6-sol"]);
+
         drop(commands);
         drop(backend);
         fs::remove_dir_all(directory).unwrap();

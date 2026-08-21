@@ -180,7 +180,13 @@ fn run() -> Result<()> {
         let Some(local) = local else {
             return Ok(());
         };
-        return run_user_interfaces(&workspace, local, global.models.clone(), options);
+        return run_user_interfaces(
+            &workspace,
+            local,
+            &global.default_model,
+            global.models.clone(),
+            options,
+        );
     }
 
     match arguments.as_slice() {
@@ -307,11 +313,13 @@ fn version_string() -> String {
 fn run_user_interfaces(
     workspace_root: &Path,
     local: WorkspaceConfig,
+    default_model: &str,
     models: Vec<me::config::ModelConfig>,
     options: UiLaunchOptions,
 ) -> Result<()> {
     let termination = TerminationSignals::install()?;
-    let workspace = Workspace::open(workspace_root, local, models)?;
+    let workspace =
+        Workspace::open_with_default_model(workspace_root, local, models, default_model)?;
     let (ui_backend, ui_commands) = workspace_ui_ports(workspace);
     match options.mode {
         UiLaunchMode::TuiAndWeb => {
@@ -458,10 +466,14 @@ fn select_orchestrator(
 }
 
 fn list_models(global: &GlobalConfig, selected: Option<&str>) {
-    let rows = global
+    println!("{}", format_model_table(&model_list_rows(global, selected)));
+}
+
+fn model_list_rows(global: &GlobalConfig, selected: Option<&str>) -> Vec<ModelListRow> {
+    global
         .models
         .iter()
-        .filter(|model| !codex_oauth::is_legacy_model_name(&model.name))
+        .filter(|model| !codex_oauth::is_hidden_legacy_model(model))
         .map(|model| {
             let marker = if Some(model.name.as_str()) == selected {
                 '●'
@@ -485,8 +497,7 @@ fn list_models(global: &GlobalConfig, selected: Option<&str>) {
                 ],
             }
         })
-        .collect::<Vec<_>>();
-    println!("{}", format_model_table(&rows));
+        .collect()
 }
 
 struct ModelListRow {
@@ -1092,6 +1103,26 @@ mod tests {
         );
         assert!(select_orchestrator(&mut local, &config_path, "worker-agent").is_err());
         fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn model_list_keeps_custom_legacy_names_and_hides_only_codex_aliases() {
+        let custom_same_name = model_config("gpt-5.6-sol", &["unset"]);
+        let mut codex_legacy = model_config("gpt-5.6-terra", &["unset"]);
+        codex_legacy.provider = me::config::ProviderType::CodexOauth;
+        let mut codex_current = model_config("gpt-5.6-luna-512k", &["unset"]);
+        codex_current.provider = me::config::ProviderType::CodexOauth;
+        let global = GlobalConfig {
+            version: 1,
+            default_model: custom_same_name.name.clone(),
+            models: vec![custom_same_name, codex_legacy, codex_current],
+        };
+
+        let names = model_list_rows(&global, Some("gpt-5.6-sol"))
+            .into_iter()
+            .map(|row| row.columns[0].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(names, ["gpt-5.6-sol", "gpt-5.6-luna-512k"]);
     }
 
     #[test]

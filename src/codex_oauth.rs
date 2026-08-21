@@ -1,4 +1,5 @@
 use std::{
+    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::{Path, PathBuf},
@@ -41,6 +42,10 @@ pub const MODEL_NAMES: [&str; 9] = [
 
 pub fn is_legacy_model_name(name: &str) -> bool {
     LEGACY_MODEL_NAMES.contains(&name)
+}
+
+pub fn is_hidden_legacy_model(model: &ModelConfig) -> bool {
+    model.provider == ProviderType::CodexOauth && is_legacy_model_name(&model.name)
 }
 
 pub struct CodexRequestCredential {
@@ -162,10 +167,20 @@ fn add_models_if_logged_in_at(global: &mut GlobalConfig, path: &Path) -> Result<
         return Ok(());
     }
     global.models.retain(|model| {
-        !MODEL_NAMES.contains(&model.name.as_str())
-            && !LEGACY_MODEL_NAMES.contains(&model.name.as_str())
+        model.provider != ProviderType::CodexOauth
+            || (!MODEL_NAMES.contains(&model.name.as_str())
+                && !LEGACY_MODEL_NAMES.contains(&model.name.as_str()))
     });
-    global.models.extend(model_configs(path.to_path_buf()));
+    let existing_names = global
+        .models
+        .iter()
+        .map(|model| model.name.clone())
+        .collect::<HashSet<_>>();
+    global.models.extend(
+        model_configs(path.to_path_buf())
+            .into_iter()
+            .filter(|model| !existing_names.contains(&model.name)),
+    );
     global.validate()
 }
 
@@ -788,13 +803,37 @@ mod tests {
     }
 
     #[test]
+    fn hidden_legacy_models_are_scoped_to_codex_oauth() {
+        let codex_legacy = model_config(
+            "gpt-5.6-sol".into(),
+            "gpt-5.6-sol",
+            512_000,
+            false,
+            Path::new("/config/me/codex/auth.json"),
+        );
+        let mut custom_same_name = codex_legacy.clone();
+        custom_same_name.provider = ProviderType::OpenaiCompatible;
+        let codex_current = model_config(
+            "gpt-5.6-sol-512k".into(),
+            "gpt-5.6-sol",
+            512_000,
+            false,
+            Path::new("/config/me/codex/auth.json"),
+        );
+
+        assert!(is_hidden_legacy_model(&codex_legacy));
+        assert!(!is_hidden_legacy_model(&custom_same_name));
+        assert!(!is_hidden_legacy_model(&codex_current));
+    }
+
+    #[test]
     fn automatic_models_have_official_capabilities_and_credential_path() {
         let path = PathBuf::from("/config/me/codex/auth.json");
         let models = model_configs(path.clone());
         assert_eq!(
             models
                 .iter()
-                .filter(|model| !is_legacy_model_name(&model.name))
+                .filter(|model| !is_hidden_legacy_model(model))
                 .map(|model| model.name.as_str())
                 .collect::<Vec<_>>(),
             MODEL_NAMES
@@ -818,7 +857,7 @@ mod tests {
             assert!(models.iter().all(|model| model.model == models[0].model));
         }
         assert!(models[9..].iter().all(|model| {
-            is_legacy_model_name(&model.name)
+            is_hidden_legacy_model(model)
                 && model.capabilities.context_window == 512_000
                 && !model.reserve_output_context
         }));
@@ -852,7 +891,8 @@ mod tests {
     }
 
     #[test]
-    fn logged_in_state_adds_runtime_models_without_persisting_secrets() {
+    fn logged_in_state_adds_runtime_models_without_persisting_secrets_or_overwriting_custom_names()
+    {
         let directory =
             std::env::temp_dir().join(format!("me-codex-models-{}", std::process::id()));
         let path = directory.join("auth.json");
@@ -874,15 +914,34 @@ mod tests {
             parameters: toml::Table::new(),
             effort_parameters: Default::default(),
         };
+        let mut custom_same_name = existing.clone();
+        custom_same_name.name = "gpt-5.6-sol".into();
+        custom_same_name.model = "custom-gpt-5.6-sol".into();
         let mut global = GlobalConfig {
             version: 1,
             default_model: "default".into(),
-            models: vec![existing],
+            models: vec![existing, custom_same_name],
         };
 
         add_models_if_logged_in_at(&mut global, &path).unwrap();
         assert_eq!(global.models.len(), 13);
         assert!(MODEL_NAMES.iter().all(|name| global.model(name).is_some()));
+        assert_eq!(
+            global
+                .models
+                .iter()
+                .filter(|model| model.name == "gpt-5.6-sol")
+                .count(),
+            1
+        );
+        assert_eq!(
+            global.model("gpt-5.6-sol").unwrap().provider,
+            ProviderType::OpenaiCompatible
+        );
+        assert_eq!(
+            global.model("gpt-5.6-sol").unwrap().model,
+            "custom-gpt-5.6-sol"
+        );
         assert!(
             LEGACY_MODEL_NAMES
                 .iter()

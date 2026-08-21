@@ -39,7 +39,12 @@ pub fn run(workspace_root: &Path) -> Result<()> {
     codex_oauth::add_models_if_logged_in(&mut global)?;
     let local = workspace_bootstrap::load_or_create(workspace_root, &global.default_model)?;
     let canonical_workspace = fs::canonicalize(workspace_root)?;
-    let workspace = Workspace::open(workspace_root, local, global.models)?;
+    let workspace = Workspace::open_with_default_model(
+        workspace_root,
+        local,
+        global.models,
+        &global.default_model,
+    )?;
     let (backend, commands) = workspace_ui_ports(workspace);
     let server = webui::start_managed(
         backend,

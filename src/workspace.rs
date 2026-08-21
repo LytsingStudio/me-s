@@ -10,13 +10,17 @@ use std::{
 
 use crate::{
     Result, agent_title,
-    config::{ModelConfig, WorkspaceConfig, create_private_directory},
+    config::{
+        ModelConfig, UNSET_EFFORT, WorkspaceConfig, create_private_directory, workspace_config_path,
+    },
     event::{
         AgentKind, EdbMutation, Event, EventDataBase, EventId, agent_kind_definition,
         latest_agent_turn,
     },
     model::ModelRuntime,
-    orchestrator::{self, AgentRuntime, ApiActivitySnapshot, InputDraft, latest_model},
+    orchestrator::{
+        self, AgentRuntime, ApiActivitySnapshot, InputDraft, apply_model_selection, latest_model,
+    },
     terminal::{TerminalFrame, TerminalSessionPreview},
     toolbox::WORKSPACE_TEMP_DIRECTORY,
 };
@@ -140,6 +144,16 @@ impl Workspace {
         config: WorkspaceConfig,
         models: Vec<ModelConfig>,
     ) -> Result<Self> {
+        let default_model = config.model.clone();
+        Self::open_with_default_model(root, config, models, &default_model)
+    }
+
+    pub fn open_with_default_model(
+        root: impl Into<PathBuf>,
+        mut config: WorkspaceConfig,
+        models: Vec<ModelConfig>,
+        default_model: &str,
+    ) -> Result<Self> {
         if !orchestrator::AVAILABLE_ORCHESTRATORS.contains(&config.orchestrator.as_str()) {
             return Err(format!(
                 "workspace default orchestrator {} is not available",
@@ -147,8 +161,36 @@ impl Workspace {
             )
             .into());
         }
+        let model_names = models
+            .iter()
+            .map(|model| model.name.as_str())
+            .collect::<BTreeSet<_>>();
+        if !model_names.contains(default_model) {
+            return Err(format!("default model {default_model} does not exist").into());
+        }
         let root = root.into();
         crate::toolbox::ensure_default_toolboxes(&root)?;
+        let mut paths = edb_paths(&root)?;
+        paths.sort_by_key(|path| {
+            let name = path.file_stem().unwrap_or_default().to_string_lossy();
+            (name != "main", name.into_owned())
+        });
+        let mut requires_model_fallback = !model_names.contains(config.model.as_str());
+        for path in &paths {
+            let edb = EventDataBase::open(path)?;
+            if !edb.is_empty()
+                && latest_model(&edb).is_some_and(|model| !model_names.contains(model))
+            {
+                requires_model_fallback = true;
+            }
+        }
+        if requires_model_fallback
+            && (config.model != default_model || config.effort != UNSET_EFFORT)
+        {
+            config.model = default_model.to_owned();
+            config.effort = UNSET_EFFORT.to_owned();
+            config.save(&workspace_config_path(&root))?;
+        }
         let handle = WorkspaceHandle {
             shared: Arc::new(WorkspaceShared {
                 root: root.clone(),
@@ -159,11 +201,6 @@ impl Workspace {
                 revision: AtomicU64::new(0),
             }),
         };
-        let mut paths = edb_paths(&root)?;
-        paths.sort_by_key(|path| {
-            let name = path.file_stem().unwrap_or_default().to_string_lossy();
-            (name != "main", name.into_owned())
-        });
         for path in paths {
             let id = agent_id_from_path(&path)?;
             let definition = if EventDataBase::open(&path)?.is_empty() {
@@ -1288,7 +1325,7 @@ fn build_agent_runtime_inner(
     requested_model: Option<String>,
     requested_effort: Option<String>,
 ) -> Result<AgentRuntime> {
-    let edb = EventDataBase::open(path)?;
+    let mut edb = EventDataBase::open(path)?;
     let definition = if edb.is_empty() {
         requested_definition.ok_or("new Agent requires an Agent definition")?
     } else {
@@ -1300,9 +1337,22 @@ fn build_agent_runtime_inner(
             system_prompt: definition.system_prompt.clone(),
         }
     };
+    let persisted_model = latest_model(&edb).map(str::to_owned);
+    let persisted_model_missing = requested_model.is_none()
+        && persisted_model.as_deref().is_some_and(|model| {
+            !workspace
+                .shared
+                .models
+                .iter()
+                .any(|candidate| candidate.name == model)
+        });
     let bootstrap_model = requested_model
         .as_deref()
-        .or_else(|| latest_model(&edb))
+        .or_else(|| {
+            persisted_model
+                .as_deref()
+                .filter(|_| !persisted_model_missing)
+        })
         .unwrap_or(&workspace.shared.config.model);
     let mut models = ModelRuntime::new(workspace.shared.models.clone(), bootstrap_model)?;
     let effort = requested_effort.unwrap_or_else(|| workspace.shared.config.effort.clone());
@@ -1315,8 +1365,10 @@ fn build_agent_runtime_inner(
     orchestrator
         .supports_edb(&edb)
         .map_err(|reason| format!("orchestrator {}: {reason}", orchestrator_name))?;
+    if persisted_model_missing {
+        apply_model_selection(&mut edb, &mut models, &workspace.shared.config.model, None)?;
+    }
     orchestrator.restore(&edb, &mut models)?;
-    let mut edb = edb;
     let restored_len = edb.len();
     orchestrator.reconcile_startup(&mut edb, &mut models)?;
     if edb.len() != restored_len {
@@ -1397,6 +1449,86 @@ mod tests {
             orchestrator: "manager-agent".into(),
             ..config()
         }
+    }
+
+    #[test]
+    fn missing_workspace_and_edb_models_fall_back_to_the_global_default_once() {
+        let mut suffix = [0_u8; 8];
+        getrandom::fill(&mut suffix).unwrap();
+        let directory = std::env::temp_dir().join(format!(
+            "me-workspace-model-fallback-{}-{}",
+            std::process::id(),
+            u64::from_le_bytes(suffix)
+        ));
+        fs::create_dir_all(directory.join(".me/edb")).unwrap();
+        let stale = WorkspaceConfig {
+            model: "removed".into(),
+            effort: "high".into(),
+            ..config()
+        };
+        stale.save(&workspace_config_path(&directory)).unwrap();
+        let edb_path = directory.join(".me/edb/main.edb");
+        let mut edb = EventDataBase::open(&edb_path).unwrap();
+        edb.append_agent_kind_def(AgentKind::Primary, "chatbot", None, None)
+            .unwrap();
+        edb.append_initial_model("removed").unwrap();
+        edb.append_initial_reasoning_effort("high").unwrap();
+        drop(edb);
+        let valid_edb_path = directory.join(".me/edb/agent-valid.edb");
+        let mut valid_edb = EventDataBase::open(&valid_edb_path).unwrap();
+        valid_edb
+            .append_agent_kind_def(AgentKind::Interactive, "chatbot", None, None)
+            .unwrap();
+        valid_edb.append_initial_model("other").unwrap();
+        valid_edb
+            .append_initial_reasoning_effort(UNSET_EFFORT)
+            .unwrap();
+        drop(valid_edb);
+        let mut other = model();
+        other.name = "other".into();
+        other.model = "other".into();
+
+        let workspace = Workspace::open_with_default_model(
+            &directory,
+            stale,
+            vec![model(), other.clone()],
+            "test",
+        )
+        .unwrap();
+        let main = AgentId::new("main").unwrap();
+        assert_eq!(
+            latest_model(&EventDataBase::open(&edb_path).unwrap()),
+            Some("test")
+        );
+        assert_eq!(
+            crate::orchestrator::latest_effort(&EventDataBase::open(&edb_path).unwrap()),
+            Some(UNSET_EFFORT)
+        );
+        assert_eq!(
+            WorkspaceConfig::load(&workspace_config_path(&directory))
+                .unwrap()
+                .model,
+            "test"
+        );
+        assert_eq!(
+            latest_model(&EventDataBase::open(&valid_edb_path).unwrap()),
+            Some("other")
+        );
+        assert_eq!(EventDataBase::open(&valid_edb_path).unwrap().len(), 3);
+        assert_eq!(workspace.edb_events(&main).unwrap().len(), 5);
+        drop(workspace);
+
+        let reopened = Workspace::open_with_default_model(
+            &directory,
+            WorkspaceConfig::load(&workspace_config_path(&directory)).unwrap(),
+            vec![model(), other],
+            "test",
+        )
+        .unwrap();
+        assert_eq!(reopened.edb_events(&main).unwrap().len(), 5);
+        assert_eq!(EventDataBase::open(&valid_edb_path).unwrap().len(), 3);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
