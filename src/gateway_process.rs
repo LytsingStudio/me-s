@@ -108,6 +108,7 @@ impl ManagedProcess {
 
     fn wait_ready(&mut self) -> Result<()> {
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .connect_timeout(Duration::from_millis(300))
             .timeout(Duration::from_millis(750))
             .build()?;
@@ -174,6 +175,7 @@ impl ManagedProcess {
 
     pub fn shutdown(&mut self) {
         let client = reqwest::blocking::Client::builder()
+            .no_proxy()
             .connect_timeout(Duration::from_millis(300))
             .timeout(Duration::from_secs(2))
             .build();

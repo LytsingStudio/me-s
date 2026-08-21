@@ -59,6 +59,12 @@ fn spawn_gateway(root: &Path, config_home: &Path) -> (Child, String) {
         .current_dir(root)
         .env("ME_CONFIG_HOME", config_home)
         .env("ME_GATEWAY_ME_S", env!("CARGO_BIN_EXE_me-s"))
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
+        .env("http_proxy", "http://127.0.0.1:9")
+        .env("ALL_PROXY", "http://127.0.0.1:9")
+        .env("all_proxy", "http://127.0.0.1:9")
+        .env_remove("NO_PROXY")
+        .env_remove("no_proxy")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::piped())
@@ -105,6 +111,7 @@ fn spawn_gateway(root: &Path, config_home: &Path) -> (Child, String) {
 
 fn client() -> reqwest::blocking::Client {
     reqwest::blocking::Client::builder()
+        .no_proxy()
         .timeout(Duration::from_secs(5))
         .build()
         .unwrap()

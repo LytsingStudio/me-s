@@ -103,6 +103,7 @@ impl Gateway {
             lifecycle: Mutex::new(()),
             shutting_down: AtomicBool::new(false),
             proxy_client: reqwest::blocking::Client::builder()
+                .no_proxy()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(60))
                 .build()?,
