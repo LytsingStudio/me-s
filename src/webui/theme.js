@@ -15,6 +15,10 @@
     Object.freeze({ id: "ocean", name: "深海" }),
     Object.freeze({ id: "forest", name: "松林" }),
     Object.freeze({ id: "sand", name: "暖砂" }),
+    Object.freeze({ id: "aurora", name: "极光" }),
+    Object.freeze({ id: "sakura", name: "樱雾" }),
+    Object.freeze({ id: "neon", name: "霓虹" }),
+    Object.freeze({ id: "obsidian", name: "曜石黑" }),
   ]);
   const DEFAULT_THEME = THEMES[0].id;
   const STORAGE_THEME = "me-theme";

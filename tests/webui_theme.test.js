@@ -66,13 +66,17 @@ function contrastRatio(first, second) {
 }
 
 describe("shared WebUI themes", () => {
-  test("defines five stable, named themes", () => {
+  test("defines nine stable, named themes", () => {
     expect(theme.THEMES).toEqual([
       { id: "violet", name: "紫曜" },
       { id: "graphite", name: "石墨" },
       { id: "ocean", name: "深海" },
       { id: "forest", name: "松林" },
       { id: "sand", name: "暖砂" },
+      { id: "aurora", name: "极光" },
+      { id: "sakura", name: "樱雾" },
+      { id: "neon", name: "霓虹" },
+      { id: "obsidian", name: "曜石黑" },
     ]);
   });
 
@@ -92,11 +96,8 @@ describe("shared WebUI themes", () => {
   test("cycles themes in order while preserving and persisting the color mode", () => {
     const page = fakeRuntime({ stored: { [theme.STORAGE_THEME]: "violet", [theme.STORAGE_MODE]: "light" } });
     theme.initialize(page.runtime);
-    expect(theme.cycle(page.runtime)).toMatchObject({ theme: { id: "graphite" }, mode: "light" });
-    expect(theme.cycle(page.runtime).theme.id).toBe("ocean");
-    expect(theme.cycle(page.runtime).theme.id).toBe("forest");
-    expect(theme.cycle(page.runtime).theme.id).toBe("sand");
-    expect(theme.cycle(page.runtime).theme.id).toBe("violet");
+    const expectedOrder = ["graphite", "ocean", "forest", "sand", "aurora", "sakura", "neon", "obsidian", "violet"];
+    for (const id of expectedOrder) expect(theme.cycle(page.runtime).theme.id).toBe(id);
     expect(page.values.get(theme.STORAGE_THEME)).toBe("violet");
     expect(page.values.get(theme.STORAGE_MODE)).toBe("light");
   });
@@ -123,7 +124,7 @@ describe("shared WebUI themes", () => {
     expect(announcements.at(-1)).toBe("已切换至浅色模式");
   });
 
-  test("loads the shared no-flash runtime and all ten palettes in both WebUIs", () => {
+  test("loads the shared no-flash runtime and all eighteen palettes in both WebUIs", () => {
     const themeStyles = readFileSync(join(import.meta.dir, "../src/webui/theme.css"), "utf8");
     const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
     const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
@@ -153,7 +154,7 @@ describe("shared WebUI themes", () => {
       expect(themeStyles).toContain(`:root[data-theme="${palette.id}"][data-mode="dark"]`);
       expect(themeStyles).toContain(`:root[data-theme="${palette.id}"][data-mode="light"]`);
     }
-    expect(themeStyles.match(/:root\[data-theme=/g)).toHaveLength(10);
+    expect(themeStyles.match(/:root\[data-theme=/g)).toHaveLength(18);
   });
 
   test("themes common and gateway-only surfaces through semantic tokens", () => {
@@ -163,7 +164,7 @@ describe("shared WebUI themes", () => {
       expect(styles).toContain("background: var(--sidebar);");
       expect(styles).toContain("background: var(--terminal-bg);");
       expect(styles).toContain("background: var(--modal-backdrop-bg);");
-      expect(styles).toContain("background: linear-gradient(145deg, var(--brand-start), var(--brand-end));");
+      expect(styles).toContain("background: linear-gradient(135deg, var(--brand-start), var(--brand-mid), var(--brand-end));");
       expect(styles).toContain(".theme-cycle:focus-visible, .theme-mode:focus-visible");
     }
     expect(gatewayStyles).toContain("background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%);");
@@ -185,6 +186,11 @@ describe("shared WebUI themes", () => {
         }
         expect(contrastRatio(tokens["--primary-bg"], "#ffffff")).toBeGreaterThanOrEqual(4.5);
         expect(contrastRatio(tokens["--primary-hover"], "#ffffff")).toBeGreaterThanOrEqual(4.5);
+        if (["aurora", "sakura", "neon", "obsidian"].includes(palette.id)) {
+          for (const stop of ["--brand-start", "--brand-mid", "--brand-end"]) {
+            expect(contrastRatio(tokens[stop], "#ffffff")).toBeGreaterThanOrEqual(4.5);
+          }
+        }
       }
     }
   });
