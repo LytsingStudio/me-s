@@ -22,6 +22,8 @@ pub const GATEWAY_BIND_ADDRESS: &str = "0.0.0.0";
 const INDEX_HTML: &str = include_str!("gateway_webui/index.html");
 const APP_JS: &str = include_str!("gateway_webui/app.js");
 const STYLE_CSS: &str = include_str!("gateway_webui/style.css");
+const THEME_JS: &str = include_str!("webui/theme.js");
+const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
@@ -155,6 +157,9 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
     }
     match (request.method(), path.as_str()) {
         (&Method::Get, "/") => return Ok(text_response("text/html; charset=utf-8", INDEX_HTML)),
+        (&Method::Get, "/theme.js") => {
+            return Ok(text_response("text/javascript; charset=utf-8", THEME_JS));
+        }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
         }
@@ -166,6 +171,9 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         }
         (&Method::Get, "/style.css") => {
             return Ok(text_response("text/css; charset=utf-8", STYLE_CSS));
+        }
+        (&Method::Get, "/theme.css") => {
+            return Ok(text_response("text/css; charset=utf-8", THEME_CSS));
         }
         (&Method::Get, "/markdown.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", MARKDOWN_JS));

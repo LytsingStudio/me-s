@@ -91,6 +91,8 @@ const elements = {
   connectionOverlayMessage: $("#connection-overlay-message"),
   connectionRetry: $("#connection-retry"),
   connection: $("#connection-label"),
+  themeCycle: $("#theme-cycle"),
+  themeMode: $("#theme-mode"),
   environment: $("#environment-footer"),
   workspaceList: $("#workspace-list"),
   createWorkspace: $("#create-workspace"),
@@ -3836,6 +3838,7 @@ function renderMarkdown(source) {
 elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.addEventListener("click", () => {
   showView({ kind: button.dataset.view, sessionId: null });
 }));
+globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", () => {
   clearTimeout(state.reconnectTimer);

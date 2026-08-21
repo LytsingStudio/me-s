@@ -41,6 +41,8 @@ pub struct ManagedWebAccess {
 }
 const INDEX_HTML: &str = include_str!("webui/index.html");
 const APP_JS: &str = include_str!("webui/app.js");
+const THEME_JS: &str = include_str!("webui/theme.js");
+const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
@@ -529,6 +531,9 @@ fn route(
         (&Method::Get, "/") => {
             return Ok(text_response("text/html; charset=utf-8", INDEX_HTML));
         }
+        (&Method::Get, "/theme.js") => {
+            return Ok(text_response("text/javascript; charset=utf-8", THEME_JS));
+        }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
         }
@@ -555,6 +560,9 @@ fn route(
         }
         (&Method::Get, "/style.css") => {
             return Ok(text_response("text/css; charset=utf-8", STYLE_CSS));
+        }
+        (&Method::Get, "/theme.css") => {
+            return Ok(text_response("text/css; charset=utf-8", THEME_CSS));
         }
         (&Method::Get, "/api/auth/status") => return auth_status_response(request, auth),
         (&Method::Post, "/api/auth/login") => return login_response(request, auth),
