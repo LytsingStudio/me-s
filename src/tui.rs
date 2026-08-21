@@ -851,8 +851,8 @@ impl SlashCommand {
 
     fn name(self) -> &'static str {
         match self {
-            Self::AgentAdd => "/agent-add",
-            Self::AgentDelete => "/agent-delete",
+            Self::AgentAdd => "/new_session",
+            Self::AgentDelete => "/delete_session",
             Self::Model => "/model",
             Self::Effort => "/effort",
             Self::Context => "/context",
@@ -865,8 +865,8 @@ impl SlashCommand {
 
     fn description(self) -> &'static str {
         match self {
-            Self::AgentAdd => "新建 Agent runtime",
-            Self::AgentDelete => "永久删除当前空闲 Agent",
+            Self::AgentAdd => "新建会话",
+            Self::AgentDelete => "永久删除当前空闲会话",
             Self::Model => "切换当前模型",
             Self::Effort => "选择推理强度",
             Self::Context => "查看上下文用量",
@@ -1551,7 +1551,7 @@ fn refresh_terminal_preview(
 }
 
 fn require_agent(agent_id: Option<&AgentId>) -> Result<&AgentId> {
-    agent_id.ok_or_else(|| "Workspace has no Agent; use /agent-add first".into())
+    agent_id.ok_or_else(|| "Workspace has no Agent; use /new_session first".into())
 }
 
 fn sync_input_draft(
@@ -8369,10 +8369,17 @@ mod tests {
             matching_commands("/context", CommandScope::Interactive),
             vec![SlashCommand::Context]
         );
+        assert_eq!(SlashCommand::AgentAdd.name(), "/new_session");
+        assert_eq!(SlashCommand::AgentDelete.name(), "/delete_session");
         assert_eq!(
-            matching_commands("/agent-", CommandScope::Interactive),
-            vec![SlashCommand::AgentAdd, SlashCommand::AgentDelete]
+            matching_commands("/new", CommandScope::Interactive),
+            vec![SlashCommand::AgentAdd]
         );
+        assert_eq!(
+            matching_commands("/delete", CommandScope::Interactive),
+            vec![SlashCommand::AgentDelete]
+        );
+        assert!(matching_commands("/agent-", CommandScope::Interactive).is_empty());
         assert_eq!(
             matching_commands("/rew", CommandScope::Interactive),
             vec![SlashCommand::Rewind]
@@ -8431,7 +8438,8 @@ mod tests {
             matching_commands("/context", CommandScope::Worker),
             vec![SlashCommand::Context]
         );
-        assert!(matching_commands("/agent", CommandScope::Worker).is_empty());
+        assert!(matching_commands("/new_session", CommandScope::Worker).is_empty());
+        assert!(matching_commands("/delete_session", CommandScope::Worker).is_empty());
         assert!(matching_commands("/rewind", CommandScope::Worker).is_empty());
         assert!(matching_commands("/exit", CommandScope::Worker).is_empty());
 
