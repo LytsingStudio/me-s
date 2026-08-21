@@ -16,6 +16,31 @@
       if (typeof ResizeObserver === "function") return new ResizeObserver(callback);
       return { observe() {}, disconnect() {} };
     });
+    const interruptKineticScroll = runtime.interruptKineticScroll || (() => {
+      const style = viewport.style;
+      if (
+        !style
+        || typeof style.getPropertyValue !== "function"
+        || typeof style.getPropertyPriority !== "function"
+        || typeof style.setProperty !== "function"
+        || typeof style.removeProperty !== "function"
+      ) return;
+      const properties = ["overflow", "-webkit-overflow-scrolling"];
+      const previous = properties.map((name) => ({
+        name,
+        value: style.getPropertyValue(name),
+        priority: style.getPropertyPriority(name),
+      }));
+      // Recreate the scroll layer before the next paint so compositor momentum cannot overwrite follow().
+      style.setProperty("overflow", "hidden", "important");
+      style.setProperty("-webkit-overflow-scrolling", "auto", "important");
+      void viewport.offsetHeight;
+      previous.forEach(({ name, value, priority }) => {
+        if (value) style.setProperty(name, value, priority);
+        else style.removeProperty(name);
+      });
+      void viewport.offsetHeight;
+    });
     const threshold = runtime.threshold ?? 24;
     const settleDelay = runtime.settleDelay ?? 180;
     let following = true;
@@ -41,14 +66,17 @@
       clearSettling();
       settleTimer = setDelay(finishSettling, settleDelay);
     };
+    const applyFollowNow = () => {
+      if (!following || (userScrolling && !forcing)) return;
+      viewport.scrollTop = viewport.scrollHeight;
+      if (forcing) scheduleSettling();
+      notify();
+    };
     const scheduleFollow = () => {
       if (!following || (userScrolling && !forcing) || frame !== null) return;
       frame = requestFrame(() => {
         frame = null;
-        if (!following || (userScrolling && !forcing)) return;
-        viewport.scrollTop = viewport.scrollHeight;
-        if (forcing) scheduleSettling();
-        notify();
+        applyFollowNow();
       });
     };
     function finishSettling() {
@@ -87,8 +115,9 @@
         userScrolling = false;
         clearSettling();
         cancelScheduledFollow();
+        interruptKineticScroll();
+        applyFollowNow();
         scheduleFollow();
-        scheduleSettling();
       },
       restore(value) {
         following = Boolean(value);
@@ -113,9 +142,11 @@
       },
       noteScroll() {
         if (forcing) {
+          applyFollowNow();
           scheduleFollow();
-          scheduleSettling();
-        } else if (userScrolling) {
+          return;
+        }
+        if (userScrolling) {
           following = isNearBottom();
           scheduleSettling();
         }

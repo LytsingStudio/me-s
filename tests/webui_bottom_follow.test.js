@@ -18,7 +18,7 @@ function loadPromptConfirmationRuntime() {
   );
 }
 
-function harness() {
+function harness(options = {}) {
   const frames = new Map();
   const timers = new Map();
   let nextId = 1;
@@ -30,6 +30,7 @@ function harness() {
     get scrollTop() { return this._scrollTop; },
     set scrollTop(value) {
       this._scrollTop = Math.max(0, Math.min(Number(value), this.scrollHeight - this.clientHeight));
+      options.onScrollTopChange?.(this._scrollTop);
     },
   };
   const content = {};
@@ -44,6 +45,7 @@ function harness() {
       resizeCallback = callback;
       return { observe() {}, disconnect() {} };
     },
+    interruptKineticScroll: options.interruptKineticScroll,
   };
   const flushFrames = () => {
     while (frames.size) {
@@ -150,6 +152,7 @@ describe("WebUI transcript bottom follower", () => {
     subject.viewport.scrollTop = 360;
     subject.follower.noteScroll();
     expect(subject.pendingFrames()).toBe(1);
+    expect(subject.viewport.scrollTop).toBe(600);
     subject.flushFrames();
     expect(subject.viewport.scrollTop).toBe(600);
 
@@ -160,6 +163,64 @@ describe("WebUI transcript bottom follower", () => {
     expect(subject.viewport.scrollTop).toBe(600);
     expect(subject.follower.isFollowing()).toBe(true);
     expect(subject.follower.isNearBottom()).toBe(true);
+  });
+
+  test("interrupts kinetic scrolling before synchronously committing explicit follow", () => {
+    const operations = [];
+    const subject = harness({
+      interruptKineticScroll() { operations.push("interrupt"); },
+      onScrollTopChange(value) { operations.push(`scroll:${value}`); },
+    });
+    scrollAway(subject);
+    operations.length = 0;
+
+    subject.follower.follow();
+
+    expect(operations).toEqual(["interrupt", "scroll:600"]);
+    expect(subject.viewport.scrollTop).toBe(600);
+  });
+
+  test("recreates the scroll layer without leaking temporary inline styles", () => {
+    const operations = [];
+    const values = new Map();
+    const priorities = new Map();
+    const style = {
+      getPropertyValue(name) { return values.get(name) || ""; },
+      getPropertyPriority(name) { return priorities.get(name) || ""; },
+      setProperty(name, value, priority = "") {
+        values.set(name, value);
+        priorities.set(name, priority);
+        operations.push(`set:${name}:${value}:${priority}`);
+      },
+      removeProperty(name) {
+        values.delete(name);
+        priorities.delete(name);
+        operations.push(`remove:${name}`);
+      },
+    };
+    const subject = harness({
+      onScrollTopChange(value) { operations.push(`scroll:${value}`); },
+    });
+    subject.viewport.style = style;
+    Object.defineProperty(subject.viewport, "offsetHeight", {
+      get() { operations.push("layout"); return 400; },
+    });
+    scrollAway(subject);
+    operations.length = 0;
+
+    subject.follower.follow();
+
+    expect(operations).toEqual([
+      "set:overflow:hidden:important",
+      "set:-webkit-overflow-scrolling:auto:important",
+      "layout",
+      "remove:overflow",
+      "remove:-webkit-overflow-scrolling",
+      "layout",
+      "scroll:600",
+    ]);
+    expect(style.getPropertyValue("overflow")).toBe("");
+    expect(style.getPropertyValue("-webkit-overflow-scrolling")).toBe("");
   });
 
   test("tracks inertia after pointer release until the scroll really settles", () => {
