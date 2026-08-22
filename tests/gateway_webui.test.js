@@ -314,6 +314,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    const themeStyles = readFileSync(join(import.meta.dir, "../src/webui/theme.css"), "utf8");
 
     for (const [index, source, styles] of [
       [singleIndex, singleSource, singleStyles],
@@ -329,12 +330,21 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('class="agent-delete"');
       expect(source).toContain('void openDeleteAgent(agent.id)');
       expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400;");
+      expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
+      expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
+      expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");
+      expect(styles).not.toContain(".agent-row.active { background: var(--agent-selected-bg); box-shadow:");
+      expect(styles).toContain("animation: agent-dot-breathe 2.5s ease-in-out infinite;");
+      expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background: linear-gradient(100deg");
+      expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 40%, 100% { background-position: 0 0; } }");
       expect(styles).toContain(".statusbar { contain: layout paint style;");
       expect(styles).toContain("font-weight: 700; white-space: nowrap;");
       expect(styles).toContain(".status-model-icon {");
       expect(styles).toContain(".sidebar-scroll.scrollbar-active");
     }
 
+    expect(themeStyles).toContain("--activity-sweep: color-mix(in srgb, var(--text) 68%, var(--bg));");
+    expect(themeStyles).toContain("--agent-selected-bg: color-mix(in srgb, var(--accent) 22%, var(--panel));");
     expect(gatewayIndex).toContain('class="sidebar-divider" aria-hidden="true"');
     expect(gatewaySource).toContain("expandedWorkspaces: new Set()");
     expect(gatewaySource).toContain('class="workspace-disclosure-icon"');
@@ -342,6 +352,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gatewaySource).toContain('class="workspace-name"></span>');
     expect(gatewaySource).toContain('aria-expanded="false"');
     expect(gatewaySource).toContain("agents.hidden = !expanded");
+    expect(gatewaySource).not.toContain("if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);");
+    expect(gatewaySource).not.toContain('group.classList.toggle("active", active);');
+    expect(gatewayStyles).not.toContain(".workspace-group.active > .workspace-row");
+    expect(gatewayStyles).toContain(".workspace-select { display: grid; min-width: 0; min-height: 34px;");
+    expect(gatewayStyles).toContain(".workspace-agent-list .agent-row { min-height: 34px; }");
     expect(gatewaySource).not.toContain("select.title = workspace.path");
     expect(gatewayStyles).toContain(".workspace-name { display: block; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 750;");
     expect(gatewayStyles).toContain(".sidebar-settings { display: grid; width: 32px; min-width: 32px; height: 32px; flex: 0 0 32px;");

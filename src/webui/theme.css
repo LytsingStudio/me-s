@@ -17,10 +17,12 @@
   --accent-soft: color-mix(in srgb, var(--accent) 12%, transparent);
   --accent-faint: color-mix(in srgb, var(--accent) 5%, transparent);
   --selected-bg: color-mix(in srgb, var(--accent) 11%, var(--panel));
+  --agent-selected-bg: color-mix(in srgb, var(--accent) 22%, var(--panel));
   --selected-border: color-mix(in srgb, var(--accent) 28%, var(--border));
   --hover-fill: color-mix(in srgb, var(--text) 8%, transparent);
   --hover-fill-soft: color-mix(in srgb, var(--text) 4%, transparent);
   --activity-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 45%, transparent);
+  --activity-sweep: color-mix(in srgb, var(--text) 68%, var(--bg));
   --brand-shadow: 0 8px 28px color-mix(in srgb, var(--accent) 28%, transparent);
   --directory-modal-top: var(--panel-2);
   --directory-modal-bottom: var(--panel);

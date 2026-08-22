@@ -2285,7 +2285,7 @@ mod tests {
     }
 
     #[test]
-    fn active_sidebar_agent_dot_breathes_without_javascript_animation() {
+    fn active_sidebar_agent_breathes_and_sweeps_without_javascript_animation() {
         assert!(
             APP_JS
                 .contains("row.querySelector(\".agent-dot\").classList.toggle(\"active\", active)")
@@ -2301,10 +2301,17 @@ mod tests {
                 ".agent-dot.active { border-color: var(--cyan); background: var(--cyan);"
             )
         );
-        assert!(STYLE_CSS.contains("animation: agent-dot-breathe 1.4s ease-in-out infinite"));
+        assert!(STYLE_CSS.contains("animation: agent-dot-breathe 2.5s ease-in-out infinite"));
         assert!(STYLE_CSS.contains("@keyframes agent-dot-breathe"));
         assert!(STYLE_CSS.contains(
-            "@media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } }"
+            ".agent-dot.active + .agent-label { color: transparent; background: linear-gradient(100deg"
+        ));
+        assert!(STYLE_CSS.contains("animation: agent-label-sweep 2.5s ease-in-out infinite"));
+        assert!(STYLE_CSS.contains(
+            "@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 40%, 100% { background-position: 0 0; } }"
+        ));
+        assert!(STYLE_CSS.contains(
+            "@media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } .agent-dot.active + .agent-label { color: inherit; background: none;"
         ));
         assert!(!APP_JS.contains("agentDotAnimation"));
     }

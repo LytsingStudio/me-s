@@ -1845,7 +1845,6 @@ function createWorkspaceGroup(workspace) {
     if (state.expandedWorkspaces.has(workspace.id)) state.expandedWorkspaces.delete(workspace.id);
     else state.expandedWorkspaces.add(workspace.id);
     updateWorkspaceGroup(group, workspace);
-    if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);
   });
   group.querySelector("[data-workspace-add]").addEventListener("click", () => {
     activateWorkspace(workspace.id);
@@ -1859,9 +1858,7 @@ function createWorkspaceGroup(workspace) {
 }
 
 function updateWorkspaceGroup(group, workspace) {
-  const active = workspace.id === state.workspaceId;
   const expanded = state.expandedWorkspaces.has(workspace.id);
-  group.classList.toggle("active", active);
   group.classList.toggle("expanded", expanded);
   const select = group.querySelector("[data-workspace-select]");
   const add = group.querySelector("[data-workspace-add]");

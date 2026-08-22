@@ -76,15 +76,17 @@ button { color: inherit; }
 .sidebar-heading button { width: 30px; height: 30px; flex: 0 0 auto; border: 0; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; font-size: 20px; line-height: 1; }
 .sidebar-heading button:hover, .sidebar-heading button:focus-visible { outline: 0; background: var(--panel-3); color: var(--text); }
 .agent-list { display: grid; grid-auto-rows: max-content; gap: 2px; padding: 0 9px 10px; }
-.agent-row { display: grid; min-width: 0; min-height: 38px; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; border-radius: 9px; }
+.agent-row { display: grid; min-width: 0; min-height: 34px; grid-template-columns: minmax(0, 1fr) 34px; align-items: center; border-radius: 9px; }
 .agent-row:hover { background: var(--panel-2); }
-.agent-row.active { background: var(--selected-bg); box-shadow: inset 2px 0 var(--accent), inset 0 0 0 1px var(--selected-border); }
-.agent-item { display: flex; min-width: 0; width: 100%; min-height: 38px; gap: 9px; align-items: center; padding: 7px 8px 7px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
+.agent-row.active { background: var(--agent-selected-bg); }
+.agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px; gap: 9px; align-items: center; padding: 5px 8px 5px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .agent-dot { width: 8px; height: 8px; flex: 0 0 auto; border: 2px solid var(--muted); border-radius: 50%; }
-.agent-dot.active { border-color: var(--cyan); background: var(--cyan); box-shadow: var(--activity-shadow); animation: agent-dot-breathe 1.4s ease-in-out infinite; will-change: opacity; }
-@keyframes agent-dot-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
-@media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } }
 .agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.agent-dot.active { border-color: var(--cyan); background: var(--cyan); box-shadow: var(--activity-shadow); animation: agent-dot-breathe 2.5s ease-in-out infinite; will-change: opacity; }
+.agent-dot.active + .agent-label { color: transparent; background: linear-gradient(100deg, var(--text) 0 42%, var(--activity-sweep) 50%, var(--text) 58% 100%); background-position: 100% 0; background-size: 300% 100%; background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: agent-label-sweep 2.5s ease-in-out infinite; will-change: background-position; }
+@keyframes agent-dot-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
+@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 40%, 100% { background-position: 0 0; } }
+@media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } .agent-dot.active + .agent-label { color: inherit; background: none; -webkit-text-fill-color: currentColor; animation: none; will-change: auto; } }
 .agent-delete { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--dim); cursor: pointer; }
 .agent-delete svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .agent-delete:hover, .agent-delete:focus-visible { outline: 0; background: var(--danger-bg); color: var(--red); }
