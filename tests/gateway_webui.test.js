@@ -19,6 +19,9 @@ function loadRuntime(relative) {
       directoryParentRequest: typeof directoryParentRequest === "function" ? directoryParentRequest : null,
       displayHostPath: typeof displayHostPath === "function" ? displayHostPath : null,
       renderTranscript: typeof renderTranscript === "function" ? renderTranscript : null,
+      emptyObjectiveDisclosure: typeof emptyObjectiveDisclosure === "function" ? emptyObjectiveDisclosure : null,
+      syncObjectiveDisclosure: typeof syncObjectiveDisclosure === "function" ? syncObjectiveDisclosure : null,
+      objectiveSummaryHtml: typeof objectiveSummaryHtml === "function" ? objectiveSummaryHtml : null,
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
@@ -76,6 +79,60 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const singleWorkMap = single.projectWorkMap(fixture);
     expect({ ...gatewayWorkMap, _records: undefined })
       .toEqual({ ...singleWorkMap, _records: undefined });
+  });
+
+  test("keeps Objective details collapsed until the user expands the current identity", () => {
+    const current = {
+      objective: { id: "objective-1", title: "Ship safely", description: "Release details" },
+      plans: [{ plan: { id: "plan-1", title: "Build", state: "active" }, notes: [{}] }],
+    };
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      const disclosure = runtime.emptyObjectiveDisclosure();
+      expect(disclosure).toEqual({ scopeId: null, objectiveId: null, expanded: false });
+      runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-a", "objective-1");
+      const collapsed = runtime.objectiveSummaryHtml(current, disclosure.expanded);
+      expect(collapsed).toContain("Ship safely");
+      expect(collapsed).not.toContain("Release details");
+      expect(collapsed).not.toContain(">Build<");
+      expect(collapsed).toContain('type="button"');
+      expect(collapsed).toContain('title="展开 Objective 详情"');
+      expect(collapsed).toContain('aria-label="展开 Objective 详情"');
+      expect(collapsed).toContain('aria-expanded="false"');
+      expect(collapsed).toContain('id="objective-details" class="objective-details hidden"');
+
+      disclosure.expanded = true;
+      runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-a", "objective-1");
+      expect(disclosure.expanded).toBe(true);
+      const expanded = runtime.objectiveSummaryHtml(current, disclosure.expanded);
+      expect(expanded).toContain("Release details");
+      expect(expanded).toContain(">Build");
+      expect(expanded).toContain("(1 note)");
+      expect(expanded).toContain('title="折叠 Objective 详情"');
+      expect(expanded).toContain('aria-label="折叠 Objective 详情"');
+      expect(expanded).toContain('aria-expanded="true"');
+
+      current.plans[0].plan.state = "completed";
+      runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-a", "objective-1");
+      expect(disclosure.expanded).toBe(true);
+      runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-b", "objective-1");
+      expect(disclosure.expanded).toBe(false);
+      disclosure.expanded = true;
+      runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-b", "objective-2");
+      expect(disclosure.expanded).toBe(false);
+      disclosure.expanded = true;
+      runtime.syncObjectiveDisclosure(disclosure, null, null);
+      expect(disclosure.expanded).toBe(false);
+      runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-b", "objective-3");
+      expect(disclosure.expanded).toBe(false);
+
+      const source = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(source).not.toMatch(/(?:localStorage|sessionStorage|document\.cookie)[^\n]*objectiveDisclosure/);
+    }
+    const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(singleSource).toContain("syncObjectiveDisclosure(state.objectiveDisclosure, state.selectedAgent, current.objective.id)");
+    expect(gatewaySource).toContain("JSON.stringify([state.workspaceId, state.selectedAgent])");
   });
 
   test("namespaces child APIs and allocates independent Workspace stores", () => {

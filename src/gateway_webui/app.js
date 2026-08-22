@@ -45,6 +45,7 @@ const state = {
   terminalFollowBottom: true,
   expandedTools: new Set(),
   expandedHistoryObjectives: new Set(),
+  objectiveDisclosure: emptyObjectiveDisclosure(),
   workerActivityIndexes: new Map(),
   pendingRender: emptyRenderRequest(),
   inputResizeFrame: null,
@@ -90,7 +91,6 @@ const elements = {
   connectionOverlayTitle: $("#connection-overlay-title"),
   connectionOverlayMessage: $("#connection-overlay-message"),
   connectionRetry: $("#connection-retry"),
-  connection: $("#connection-label"),
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
   environment: $("#environment-footer"),
@@ -1720,8 +1720,6 @@ function finishTranscriptScrolling() {
 }
 
 function renderConnection() {
-  elements.connection.textContent = state.connected ? "已连接" : state.connecting ? "正在连接" : "连接已断开";
-  elements.connection.style.color = state.connected ? "var(--green)" : state.connecting ? "var(--muted)" : "var(--red)";
   const environment = state.snapshot.environment;
   elements.environment.textContent = environment
     ? `${environment.system} · ${window.location.host}`
@@ -2556,19 +2554,48 @@ function terminalInputActionLabel(action) {
   return `${prefix}${key}${repeat}`;
 }
 
+function emptyObjectiveDisclosure() {
+  return { scopeId: null, objectiveId: null, expanded: false };
+}
+
+function syncObjectiveDisclosure(disclosure, scopeId, objectiveId) {
+  const nextScopeId = scopeId ?? null;
+  const nextObjectiveId = objectiveId ?? null;
+  if (disclosure.scopeId !== nextScopeId || disclosure.objectiveId !== nextObjectiveId) {
+    disclosure.scopeId = nextScopeId;
+    disclosure.objectiveId = nextObjectiveId;
+    disclosure.expanded = false;
+  }
+  return disclosure;
+}
+
+function objectiveSummaryHtml(current, expanded) {
+  const active = current.plans.some(({ plan }) => plan.state === "active");
+  const toggleLabel = expanded ? "折叠 Objective 详情" : "展开 Objective 详情";
+  const details = expanded ? `${current.objective.description ? `<div class="objective-description">${escapeHtml(current.objective.description)}</div>` : ""}
+    ${current.plans.map(({ plan, notes }) => `<div class="objective-plan ${plan.state === "active" ? "active" : ""}"><span>${planSymbol(plan.state)}</span><span>${escapeHtml(plan.title)}${notes.length ? ` (${notes.length} ${notes.length === 1 ? "note" : "notes"})` : ""}</span></div>`).join("")}` : "";
+  return `<div class="objective-header"><div class="objective-title">${active ? "■" : "□"} ${escapeHtml(current.objective.title)}</div>
+    <button class="objective-toggle" data-objective-toggle type="button" title="${toggleLabel}" aria-label="${toggleLabel}" aria-expanded="${expanded}" aria-controls="objective-details"><span class="objective-toggle-icon" aria-hidden="true">${expanded ? "▾" : "▸"}</span></button></div>
+    <div id="objective-details" class="objective-details${expanded ? "" : " hidden"}">${details}</div>`;
+}
+
 function renderObjective() {
   const current = currentStore()?.workmap.current;
-  if (!current || state.view.kind !== "chat") {
+  if (!current) {
+    syncObjectiveDisclosure(state.objectiveDisclosure, null, null);
     elements.objective.classList.add("hidden");
     MeTranscript.reconcileHtmlChildren(elements.objective, "");
     return;
   }
-  const active = current.plans.some(({ plan }) => plan.state === "active");
+  const scopeId = JSON.stringify([state.workspaceId, state.selectedAgent]);
+  const disclosure = syncObjectiveDisclosure(state.objectiveDisclosure, scopeId, current.objective.id);
+  if (state.view.kind !== "chat") {
+    elements.objective.classList.add("hidden");
+    MeTranscript.reconcileHtmlChildren(elements.objective, "");
+    return;
+  }
   elements.objective.classList.remove("hidden");
-  const rendered = `<div class="objective-title">${active ? "■" : "□"} ${escapeHtml(current.objective.title)}</div>
-    ${current.objective.description ? `<div class="objective-description">${escapeHtml(current.objective.description)}</div>` : ""}
-    ${current.plans.map(({ plan, notes }) => `<div class="objective-plan ${plan.state === "active" ? "active" : ""}"><span>${planSymbol(plan.state)}</span><span>${escapeHtml(plan.title)}${notes.length ? ` (${notes.length} ${notes.length === 1 ? "note" : "notes"})` : ""}</span></div>`).join("")}`;
-  MeTranscript.reconcileHtmlChildren(elements.objective, rendered);
+  MeTranscript.reconcileHtmlChildren(elements.objective, objectiveSummaryHtml(current, disclosure.expanded));
 }
 
 function renderWorkMap() {
@@ -3838,6 +3865,13 @@ function renderMarkdown(source) {
 elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.addEventListener("click", () => {
   showView({ kind: button.dataset.view, sessionId: null });
 }));
+elements.objective.addEventListener("click", (event) => {
+  const button = event.target.closest?.("[data-objective-toggle]");
+  if (!button || !elements.objective.contains(button)) return;
+  state.objectiveDisclosure.expanded = !state.objectiveDisclosure.expanded;
+  renderObjective();
+  transcriptBottomFollower.layoutChanged();
+});
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", () => {

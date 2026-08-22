@@ -128,6 +128,8 @@ describe("shared WebUI themes", () => {
     const themeStyles = readFileSync(join(import.meta.dir, "../src/webui/theme.css"), "utf8");
     const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
     const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
     const singleApp = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const gatewayApp = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     const singleServer = readFileSync(join(import.meta.dir, "../src/webui.rs"), "utf8");
@@ -136,13 +138,10 @@ describe("shared WebUI themes", () => {
     for (const index of [singleIndex, gatewayIndex]) {
       expect(index.indexOf('<script src="/theme.js"></script>')).toBeLessThan(index.indexOf('href="/style.css"'));
       expect(index.indexOf('href="/style.css"')).toBeLessThan(index.indexOf('href="/theme.css"'));
-      const sidebarHeaderStart = index.indexOf('<header class="brand">');
-      const sidebarHeader = index.slice(sidebarHeaderStart, index.indexOf("</header>", sidebarHeaderStart));
+      expect(index).not.toContain('<header class="brand">');
+      expect(index).not.toContain('id="connection-label"');
       const sidebarFooterStart = index.indexOf('<footer class="sidebar-footer">');
       const sidebarFooter = index.slice(sidebarFooterStart, index.indexOf("</footer>", sidebarFooterStart));
-      expect(sidebarHeader).not.toContain("brand-mark");
-      expect(sidebarHeader).not.toContain('id="theme-cycle"');
-      expect(sidebarHeader).not.toContain('id="theme-mode"');
       expect(sidebarFooter).toContain('class="sidebar-appearance" role="group" aria-label="外观设置"');
       expect(sidebarFooter).toContain('id="theme-cycle" class="theme-control theme-cycle"');
       expect(sidebarFooter).toContain('class="theme-icon theme-icon-shirt"');
@@ -150,6 +149,15 @@ describe("shared WebUI themes", () => {
       expect(sidebarFooter.indexOf('id="theme-cycle"')).toBeLessThan(sidebarFooter.indexOf('id="theme-mode"'));
       expect(sidebarFooter).toContain('class="theme-icon theme-icon-sun"');
       expect(sidebarFooter).toContain('class="theme-icon theme-icon-moon"');
+    }
+    expect(singleIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-heading">');
+    expect(gatewayIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-heading workspace-heading">');
+    for (const styles of [singleStyles, gatewayStyles]) {
+      expect(styles).not.toContain(".brand {");
+      expect(styles).not.toContain(".brand-copy");
+      expect(styles).not.toContain(".brand strong");
+      expect(styles).not.toContain(".brand span");
+      expect(styles).toContain(".brand-mark {");
     }
     for (const app of [singleApp, gatewayApp]) {
       expect(app).toContain("globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode");
