@@ -113,6 +113,20 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
+  test("closes the portrait sidebar before selecting any Gateway session", () => {
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
+  closeMobileSidebar();
+  if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
+  else selectAgent(agentId);
+}`);
+    expect(gatewaySource).toContain(`function closeMobileSidebar() {
+  document.body.classList.remove("mobile-sidebar-open");
+  elements.mobileSidebarToggle.setAttribute("aria-expanded", "false");
+  closeAgentMenu();
+}`);
+  });
+
   test("keeps Objective details scoped while the whole card is the single accessible control", () => {
     const current = {
       objective: { id: "objective-1", title: "Ship safely", description: "Release details" },

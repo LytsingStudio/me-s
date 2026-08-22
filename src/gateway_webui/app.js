@@ -1936,6 +1936,7 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
 }
 
 function selectWorkspaceAgent(workspaceId, agentId) {
+  closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
 }
