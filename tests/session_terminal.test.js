@@ -113,6 +113,48 @@ describe("SessionTerminal browser transport", () => {
       .toEqual({ key: "direct:main", workspaceId: null, agentId: "main" });
   });
 
+  test("starts fresh attachments with a nullable cursor and continues from the returned tail", async () => {
+    const requests = [];
+    const encode = (value) => SessionTerminal.bytesToBase64(new TextEncoder().encode(value));
+    const runtime = fakeRuntime(requests, [
+      {
+        reset: true,
+        cursor: 7,
+        tail: 7,
+        events: [
+          { type: "resize", cols: 80, rows: 24 },
+          { type: "output", data: encode("current") },
+        ],
+      },
+      {
+        reset: false,
+        cursor: 8,
+        tail: 8,
+        events: [{ type: "output", data: encode(" next") }],
+      },
+    ]);
+    const container = {
+      clientWidth: 800,
+      clientHeight: 500,
+      appendChild(child) { child.isConnected = true; },
+    };
+    const controller = SessionTerminal.create({
+      runtime,
+      container,
+      request: runtime.request,
+    });
+
+    controller.attach({ key: "workspace-a:main", workspaceId: "workspace-a", agentId: "main" });
+    await new Promise((resolve) => setTimeout(resolve, 200));
+
+    const reads = requests.filter((request) => request.path.endsWith("/read"));
+    expect(JSON.parse(reads[0].options.body)).toEqual({ cursor: null });
+    expect(JSON.parse(reads[1].options.body)).toEqual({ cursor: 7 });
+    expect(new TextDecoder().decode(new Uint8Array(runtime.terminals[0].output)))
+      .toBe("current next");
+    controller.dispose();
+  });
+
   test("sends every shortcut byte through the shared keyboard and resize operation chain", async () => {
     const encoded = ["1b", "01", "1a", "18", "03", "16", "13", "04", "0f", "10", "11", "0d"];
     const expected = encoded.map((value) => Number.parseInt(value, 16));

@@ -618,30 +618,36 @@ impl SessionTerminalOutputState {
         }
     }
 
+    fn screen_snapshot(&self) -> SessionTerminalBatch {
+        let state = self.parser.screen().state_formatted();
+        let mut events = vec![SessionTerminalEventPayload::Resize {
+            cols: self.cols,
+            rows: self.rows,
+        }];
+        if !state.is_empty() {
+            events.push(SessionTerminalEventPayload::Output {
+                data: BASE64.encode(state),
+            });
+        }
+        SessionTerminalBatch {
+            reset: true,
+            cursor: self.tail,
+            tail: self.tail,
+            cols: self.cols,
+            rows: self.rows,
+            reader_error: self.reader_error.clone(),
+            drained: self.saw_eof || self.reader_error.is_some(),
+            events,
+        }
+    }
+
     fn read(&self, cursor: Option<u64>) -> SessionTerminalBatch {
+        let Some(requested) = cursor else {
+            return self.screen_snapshot();
+        };
         let base = self.events.front().map_or(self.tail, |event| event.cursor);
-        let requested = cursor.unwrap_or(0);
         if requested < base || requested > self.tail {
-            let state = self.parser.screen().state_formatted();
-            let mut events = vec![SessionTerminalEventPayload::Resize {
-                cols: self.cols,
-                rows: self.rows,
-            }];
-            if !state.is_empty() {
-                events.push(SessionTerminalEventPayload::Output {
-                    data: BASE64.encode(state),
-                });
-            }
-            return SessionTerminalBatch {
-                reset: true,
-                cursor: self.tail,
-                tail: self.tail,
-                cols: self.cols,
-                rows: self.rows,
-                reader_error: self.reader_error.clone(),
-                drained: self.saw_eof || self.reader_error.is_some(),
-                events,
-            };
+            return self.screen_snapshot();
         }
 
         let mut events = Vec::new();
@@ -997,27 +1003,40 @@ mod tests {
     }
 
     #[test]
-    fn output_history_replays_incrementally_and_resets_invalid_cursors() {
+    fn fresh_attachment_snapshots_current_screen_and_valid_cursors_remain_incremental() {
         let output = SessionTerminalOutput::new(24, 80);
-        output.process(b"hello\r\n");
+        output.process(b"old line\r\n");
+        output.process(b"\x1b[2J\x1b[Hcurrent");
+
         let first = output.read(None).unwrap();
-        assert!(!first.reset);
+        assert!(first.reset);
         assert_eq!(first.cursor, first.tail);
         assert_eq!(first.events.len(), 2);
+        assert!(matches!(
+            first.events.first(),
+            Some(SessionTerminalEventPayload::Resize { cols: 80, rows: 24 })
+        ));
+        let SessionTerminalEventPayload::Output { data } = &first.events[1] else {
+            panic!("fresh attachment must include the current screen");
+        };
+        let screen = BASE64.decode(data).unwrap();
+        let screen = String::from_utf8_lossy(&screen);
+        assert!(screen.contains("current"));
+        assert!(!screen.contains("old line"));
 
-        output.process(b"world");
+        output.process(b" world");
         let second = output.read(Some(first.cursor)).unwrap();
         assert!(!second.reset);
         assert_eq!(second.events.len(), 1);
         assert_eq!(second.cursor, second.tail);
+        let SessionTerminalEventPayload::Output { data } = &second.events[0] else {
+            panic!("valid cursor must receive incremental output");
+        };
+        assert_eq!(BASE64.decode(data).unwrap(), b" world");
 
         let reset = output.read(Some(second.tail + 1)).unwrap();
         assert!(reset.reset);
         assert_eq!(reset.cursor, reset.tail);
-        assert!(matches!(
-            reset.events.first(),
-            Some(SessionTerminalEventPayload::Resize { cols: 80, rows: 24 })
-        ));
     }
 
     #[test]
