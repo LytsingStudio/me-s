@@ -2285,7 +2285,14 @@ mod tests {
     }
 
     #[test]
-    fn active_sidebar_agent_breathes_and_sweeps_without_javascript_animation() {
+    fn sidebar_agent_uses_turn_lifecycle_and_stronger_four_second_sweep() {
+        assert!(APP_JS.contains("if (kind === \"AgentTurn\") summary.turnState = value.state;"));
+        assert!(APP_JS.contains("const active = sidebarAgentActive(summary);"));
+        assert!(!APP_JS.contains("const active = API_ACTIVE.has(summary?.apiState);"));
+        assert!(
+            !APP_JS
+                .contains("else if (kind === \"ApiStateUpdate\") summary.apiState = value.state;")
+        );
         assert!(
             APP_JS
                 .contains("row.querySelector(\".agent-dot\").classList.toggle(\"active\", active)")
@@ -2301,18 +2308,23 @@ mod tests {
                 ".agent-dot.active { border-color: var(--cyan); background: var(--cyan);"
             )
         );
-        assert!(STYLE_CSS.contains("animation: agent-dot-breathe 2.5s ease-in-out infinite"));
-        assert!(STYLE_CSS.contains("@keyframes agent-dot-breathe"));
+        assert!(STYLE_CSS.contains("animation: agent-dot-breathe 4s ease-in-out infinite"));
         assert!(STYLE_CSS.contains(
-            ".agent-dot.active + .agent-label { color: transparent; background: linear-gradient(100deg"
+            "linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%)"
         ));
-        assert!(STYLE_CSS.contains("animation: agent-label-sweep 2.5s ease-in-out infinite"));
+        assert!(STYLE_CSS.contains("animation: agent-label-sweep 4s ease-in-out infinite"));
         assert!(STYLE_CSS.contains(
-            "@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 40%, 100% { background-position: 0 0; } }"
+            "@keyframes agent-dot-breathe { 0%, 50%, 100% { opacity: 1; } 25% { opacity: .35; } }"
+        ));
+        assert!(STYLE_CSS.contains(
+            "@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 50%, 100% { background-position: 0 0; } }"
         ));
         assert!(STYLE_CSS.contains(
             "@media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } .agent-dot.active + .agent-label { color: inherit; background: none;"
         ));
+        assert!(
+            THEME_CSS.contains("--activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));")
+        );
         assert!(!APP_JS.contains("agentDotAnimation"));
     }
 

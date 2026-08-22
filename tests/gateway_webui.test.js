@@ -10,6 +10,7 @@ function loadRuntime(relative) {
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
   const factory = new Function("document", "performance", "matchMedia", "MeTranscript", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
+      projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
@@ -82,6 +83,34 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const singleWorkMap = single.projectWorkMap(fixture);
     expect({ ...gatewayWorkMap, _records: undefined })
       .toEqual({ ...singleWorkMap, _records: undefined });
+  });
+
+  test("keeps sidebar activity open across API loops until the Agent turn closes", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      const summary = runtime.projectAgentSummary([
+        event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" }),
+        event("ApiStateUpdate", 2, { api_call_id: "api-1", prompt_id: 1, state: "Requesting" }),
+      ]);
+      expect(summary).toEqual({ turnState: "Started" });
+      expect(runtime.sidebarAgentActive(summary)).toBe(true);
+
+      runtime.updateAgentSummary(summary, [
+        event("ApiStateUpdate", 3, { api_call_id: "api-1", prompt_id: 1, state: "Completed" }),
+        event("ApiStateUpdate", 4, { api_call_id: "api-2", prompt_id: 1, state: "Requesting" }),
+        event("ApiStateUpdate", 5, { api_call_id: "api-2", prompt_id: 1, state: "Error" }),
+      ]);
+      expect(summary).toEqual({ turnState: "Started" });
+      expect(runtime.sidebarAgentActive(summary)).toBe(true);
+
+      for (const stateName of ["Completed", "Interrupted", "Failed"]) {
+        const terminal = { ...summary };
+        runtime.updateAgentSummary(terminal, [
+          event("AgentTurn", 6, { turn_id: 1, prompt_id: 1, state: stateName }),
+        ]);
+        expect(runtime.sidebarAgentActive(terminal)).toBe(false);
+      }
+    }
   });
 
   test("keeps Objective details scoped while the whole card is the single accessible control", () => {
@@ -329,21 +358,26 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('class="agent-label"></span>');
       expect(source).toContain('class="agent-delete"');
       expect(source).toContain('void openDeleteAgent(agent.id)');
+      expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
+      expect(source).toContain("const active = sidebarAgentActive(summary);");
+      expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
       expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400;");
       expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
       expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
       expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");
       expect(styles).not.toContain(".agent-row.active { background: var(--agent-selected-bg); box-shadow:");
-      expect(styles).toContain("animation: agent-dot-breathe 2.5s ease-in-out infinite;");
-      expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background: linear-gradient(100deg");
-      expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 40%, 100% { background-position: 0 0; } }");
+      expect(styles).toContain("animation: agent-dot-breathe 4s ease-in-out infinite;");
+      expect(styles).toContain("linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%)");
+      expect(styles).toContain("animation: agent-label-sweep 4s ease-in-out infinite;");
+      expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 50%, 100% { opacity: 1; } 25% { opacity: .35; } }");
+      expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 50%, 100% { background-position: 0 0; } }");
       expect(styles).toContain(".statusbar { contain: layout paint style;");
       expect(styles).toContain("font-weight: 700; white-space: nowrap;");
       expect(styles).toContain(".status-model-icon {");
       expect(styles).toContain(".sidebar-scroll.scrollbar-active");
     }
 
-    expect(themeStyles).toContain("--activity-sweep: color-mix(in srgb, var(--text) 68%, var(--bg));");
+    expect(themeStyles).toContain("--activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));");
     expect(themeStyles).toContain("--agent-selected-bg: color-mix(in srgb, var(--accent) 22%, var(--panel));");
     expect(gatewayIndex).toContain('class="sidebar-divider" aria-hidden="true"');
     expect(gatewaySource).toContain("expandedWorkspaces: new Set()");

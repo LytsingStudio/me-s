@@ -849,7 +849,7 @@ function syncAgentEvents(meta, payload) {
       projection: emptyProjection(),
       workmap: emptyWorkMap(),
       turnHistory: null,
-      summary: { model: null, apiState: null },
+      summary: { turnState: null },
       projectedOrder: 0,
       needsReplay: true,
     };
@@ -950,7 +950,7 @@ function adoptInputDraft(agentId, store, revision, content) {
 }
 
 function projectAgentSummary(events) {
-  const summary = { model: null, apiState: null };
+  const summary = { turnState: null };
   updateAgentSummary(summary, events);
   return summary;
 }
@@ -958,9 +958,12 @@ function projectAgentSummary(events) {
 function updateAgentSummary(summary, events) {
   for (const event of events) {
     const [kind, value] = eventParts(event);
-    if (kind === "ModelChanged") summary.model = value.model;
-    else if (kind === "ApiStateUpdate") summary.apiState = value.state;
+    if (kind === "AgentTurn") summary.turnState = value.state;
   }
+}
+
+function sidebarAgentActive(summary) {
+  return normalize(summary?.turnState) === "started";
 }
 
 function observePromptSubmission(meta, store) {
@@ -1900,7 +1903,7 @@ function renderWorkspaceAgentRows(container, workspaceId) {
 
 function updateAgentRow(row, agent, workspaceId, bucket) {
   const summary = bucket.stores.get(agent.id)?.summary;
-  const active = API_ACTIVE.has(summary?.apiState);
+  const active = sidebarAgentActive(summary);
   const label = agent.title || agent.id;
   row.classList.toggle("active", workspaceId === state.workspaceId && agent.id === state.selectedAgent);
   row.querySelector(".agent-dot").classList.toggle("active", active);

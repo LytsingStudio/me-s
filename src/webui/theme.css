@@ -22,7 +22,7 @@
   --hover-fill: color-mix(in srgb, var(--text) 8%, transparent);
   --hover-fill-soft: color-mix(in srgb, var(--text) 4%, transparent);
   --activity-shadow: 0 0 10px color-mix(in srgb, var(--cyan) 45%, transparent);
-  --activity-sweep: color-mix(in srgb, var(--text) 68%, var(--bg));
+  --activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));
   --brand-shadow: 0 8px 28px color-mix(in srgb, var(--accent) 28%, transparent);
   --directory-modal-top: var(--panel-2);
   --directory-modal-bottom: var(--panel);
