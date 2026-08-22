@@ -171,12 +171,12 @@ button { color: inherit; }
 .worker-activity-tool.failed .worker-tool-marker { color: var(--red); }
 @media (prefers-reduced-motion: reduce) { .worker-activity.running > .worker-activity-header .worker-activity-marker, .worker-activity-tool.running .worker-tool-marker { animation: none; } }
 
-.objective-summary { margin: 0 max(24px, calc((100% - 1200px) / 2)) 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.objective-summary { margin: 0 max(24px, calc((100% - 1200px) / 2)) 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; outline: none; background: var(--panel); cursor: pointer; transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
+.objective-summary:hover { border-color: var(--border-bright); background: var(--panel-2); }
+.objective-summary:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .objective-header { display: flex; align-items: center; gap: 12px; }
 .objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 750; }
-.objective-toggle { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; padding: 0; border: 1px solid transparent; border-radius: 8px; background: transparent; color: var(--muted); cursor: pointer; }
-.objective-toggle:hover { border-color: var(--border); background: var(--panel-3); color: var(--text); }
-.objective-toggle:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.objective-toggle { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; color: var(--muted); pointer-events: none; }
 .objective-toggle-icon { font-size: 16px; line-height: 1; }
 .objective-description { margin: 5px 0 10px 22px; color: var(--muted); font-size: 13px; }
 .objective-plan { display: flex; gap: 8px; margin: 5px 0 0 22px; color: var(--muted); font-size: 13px; }
@@ -244,6 +244,15 @@ button { color: inherit; }
 .session-terminal-instance > .xterm { width: 100%; height: 100%; }
 .session-terminal-instance .xterm-viewport { overscroll-behavior: contain; scrollbar-color: var(--directory-scrollbar) transparent; }
 .session-terminal-instance .xterm-helper-textarea { font-size: 16px; }
+.session-terminal-controls { min-width: 0; flex: 0 0 auto; overflow-x: auto; overflow-y: hidden; border-top: 1px solid var(--border); background: var(--panel); overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x; -webkit-overflow-scrolling: touch; }
+.session-terminal-controls::-webkit-scrollbar { display: none; }
+.session-terminal-control-strip { display: flex; width: max-content; min-width: 100%; flex-wrap: nowrap; gap: 6px; padding: 7px max(10px, env(safe-area-inset-right)) calc(7px + env(safe-area-inset-bottom)) max(10px, env(safe-area-inset-left)); }
+.session-terminal-control-strip button { min-width: 46px; min-height: 36px; flex: 0 0 auto; padding: 5px 10px; border: 1px solid var(--border-bright); border-radius: 8px; background: var(--panel-2); color: var(--text); font: 600 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; cursor: pointer; }
+.session-terminal-control-strip button:last-child { min-width: 62px; }
+.session-terminal-control-strip button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-3); }
+.session-terminal-control-strip button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.session-terminal-control-strip button:disabled { opacity: .4; cursor: default; }
+
 
 .statusbar { contain: layout paint style; display: flex; align-items: center; justify-content: space-between; gap: 16px; min-height: 40px; padding: 3px 20px; border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; }
 .status-primary { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; }

@@ -22,6 +22,8 @@ function loadRuntime(relative) {
       emptyObjectiveDisclosure: typeof emptyObjectiveDisclosure === "function" ? emptyObjectiveDisclosure : null,
       syncObjectiveDisclosure: typeof syncObjectiveDisclosure === "function" ? syncObjectiveDisclosure : null,
       objectiveSummaryHtml: typeof objectiveSummaryHtml === "function" ? objectiveSummaryHtml : null,
+      objectiveDisclosureAttributes: typeof objectiveDisclosureAttributes === "function" ? objectiveDisclosureAttributes : null,
+      objectiveEventActivates: typeof objectiveEventActivates === "function" ? objectiveEventActivates : null,
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
@@ -81,7 +83,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       .toEqual({ ...singleWorkMap, _records: undefined });
   });
 
-  test("keeps Objective details collapsed until the user expands the current identity", () => {
+  test("keeps Objective details scoped while the whole card is the single accessible control", () => {
     const current = {
       objective: { id: "objective-1", title: "Ship safely", description: "Release details" },
       plans: [{ plan: { id: "plan-1", title: "Build", state: "active" }, notes: [{}] }],
@@ -95,11 +97,27 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(collapsed).toContain("Ship safely");
       expect(collapsed).not.toContain("Release details");
       expect(collapsed).not.toContain(">Build<");
-      expect(collapsed).toContain('type="button"');
-      expect(collapsed).toContain('title="展开 Objective 详情"');
-      expect(collapsed).toContain('aria-label="展开 Objective 详情"');
-      expect(collapsed).toContain('aria-expanded="false"');
+      expect(collapsed).not.toContain("<button");
+      expect(collapsed).toContain('class="objective-toggle" aria-hidden="true"');
       expect(collapsed).toContain('id="objective-details" class="objective-details hidden"');
+      expect(runtime.objectiveDisclosureAttributes(false)).toEqual({
+        role: "button", tabindex: "0", "aria-expanded": "false", "aria-controls": "objective-details",
+        "aria-label": "展开 Objective 详情", title: "展开 Objective 详情",
+      });
+
+      const objective = {};
+      for (const area of ["title", "status", "blank", "description", "plan", "icon"]) {
+        const target = { area, closest: () => objective };
+        expect(runtime.objectiveEventActivates({ type: "click", target }, objective)).toBe(true);
+      }
+      const keyboardTarget = { closest: () => objective };
+      expect(runtime.objectiveEventActivates({ type: "keydown", key: "Enter", target: keyboardTarget }, objective)).toBe(true);
+      expect(runtime.objectiveEventActivates({ type: "keydown", key: " ", target: keyboardTarget }, objective)).toBe(true);
+      expect(runtime.objectiveEventActivates({ type: "keydown", key: "ArrowDown", target: keyboardTarget }, objective)).toBe(false);
+      const independentControl = {};
+      expect(runtime.objectiveEventActivates({
+        type: "click", target: { closest: () => independentControl },
+      }, objective)).toBe(false);
 
       disclosure.expanded = true;
       runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-a", "objective-1");
@@ -108,9 +126,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(expanded).toContain("Release details");
       expect(expanded).toContain(">Build");
       expect(expanded).toContain("(1 note)");
-      expect(expanded).toContain('title="折叠 Objective 详情"');
-      expect(expanded).toContain('aria-label="折叠 Objective 详情"');
-      expect(expanded).toContain('aria-expanded="true"');
+      expect(runtime.objectiveDisclosureAttributes(true)).toEqual({
+        role: "button", tabindex: "0", "aria-expanded": "true", "aria-controls": "objective-details",
+        "aria-label": "折叠 Objective 详情", title: "折叠 Objective 详情",
+      });
 
       current.plans[0].plan.state = "completed";
       runtime.syncObjectiveDisclosure(disclosure, "workspace-a:agent-a", "objective-1");
@@ -128,11 +147,22 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(source).not.toMatch(/(?:localStorage|sessionStorage|document\.cookie)[^\n]*objectiveDisclosure/);
+      expect(source).not.toContain("data-objective-toggle");
+      expect(source).toContain('elements.objective.addEventListener("click", toggleObjectiveDisclosure)');
+      expect(source).toContain('elements.objective.addEventListener("keydown", toggleObjectiveDisclosure)');
+      expect(source).toContain('if (event.type === "keydown") event.preventDefault();');
+      expect(source.match(/state\.objectiveDisclosure\.expanded = !state\.objectiveDisclosure\.expanded;/g)).toHaveLength(1);
     }
     const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     expect(singleSource).toContain("syncObjectiveDisclosure(state.objectiveDisclosure, state.selectedAgent, current.objective.id)");
     expect(gatewaySource).toContain("JSON.stringify([state.workspaceId, state.selectedAgent])");
+    for (const stylePath of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
+      const styles = readFileSync(join(import.meta.dir, stylePath), "utf8");
+      expect(styles).toContain(".objective-summary:focus-visible");
+      expect(styles).toContain(".objective-summary:hover");
+      expect(styles).toContain("pointer-events: none;");
+    }
   });
 
   test("namespaces child APIs and allocates independent Workspace stores", () => {

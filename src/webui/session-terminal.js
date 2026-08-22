@@ -101,6 +101,7 @@
   function create(options) {
     const runtime = options?.runtime || root;
     const container = options?.container;
+    const controls = options?.controls || null;
     const statusElement = options?.statusElement || null;
     const shellElement = options?.shellElement || null;
     const request = options?.request;
@@ -123,6 +124,17 @@
     let themeObserver = null;
     let windowResize = null;
 
+    let controlsClick = null;
+
+    function controlButtons() {
+      return controls?.querySelectorAll?.("[data-session-terminal-byte]") || [];
+    }
+
+    function updateControls() {
+      const disabled = !active || active.state !== "running";
+      for (const button of controlButtons()) button.disabled = disabled;
+    }
+
     function setStatus(session, state, error = null, exitCode = null) {
       if (active !== session) return;
       if (shellElement) {
@@ -135,6 +147,7 @@
         statusElement.textContent = error ? `${text} · ${error}` : text;
         statusElement.dataset.state = state || "connecting";
       }
+      updateControls();
     }
 
     function refreshTheme() {
@@ -344,9 +357,13 @@
 
     function deactivate() {
       generation += 1;
-      if (!active) return;
+      if (!active) {
+        updateControls();
+        return;
+      }
       const session = active;
       active = null;
+      updateControls();
       session.generation = generation;
       runtime.clearTimeout(session.pollTimer);
       session.pollTimer = null;
@@ -387,6 +404,7 @@
       resizeObserver?.disconnect();
       themeObserver?.disconnect();
       if (windowResize) runtime.removeEventListener("resize", windowResize);
+      if (controlsClick) controls?.removeEventListener?.("click", controlsClick);
       sessions.forEach((session) => {
         runtime.clearTimeout(session.inputTimer);
         runtime.clearTimeout(session.resizeTimer);
@@ -396,6 +414,24 @@
         session.host.remove();
       });
       sessions.clear();
+    }
+
+    if (controls) {
+      controlsClick = (event) => {
+        const button = event.target.closest?.("[data-session-terminal-byte]");
+        if (!button || !controls.contains(button) || button.disabled) return;
+        const encoded = button.dataset.sessionTerminalByte;
+        if (!/^[0-9a-f]{2}$/i.test(encoded || "")) return;
+        const session = active;
+        if (!session || session.state !== "running") {
+          updateControls();
+          return;
+        }
+        queueInput(session, new Uint8Array([Number.parseInt(encoded, 16)]));
+        session.terminal.focus();
+      };
+      controls.addEventListener("click", controlsClick);
+      updateControls();
     }
 
     if (runtime.ResizeObserver) {

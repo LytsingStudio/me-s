@@ -97,6 +97,22 @@
           <span id="session-terminal-state" class="session-terminal-state" role="status">正在连接</span>
         </div>
         <div id="session-terminal-screen" class="session-terminal-screen"></div>
+        <div id="session-terminal-controls" class="session-terminal-controls" aria-label="终端快捷键">
+          <div class="session-terminal-control-strip">
+            <button type="button" data-session-terminal-byte="1b" aria-label="发送 Escape" disabled>ESC</button>
+            <button type="button" data-session-terminal-byte="01" aria-label="发送 Ctrl+A" disabled>^A</button>
+            <button type="button" data-session-terminal-byte="1a" aria-label="发送 Ctrl+Z" disabled>^Z</button>
+            <button type="button" data-session-terminal-byte="18" aria-label="发送 Ctrl+X" disabled>^X</button>
+            <button type="button" data-session-terminal-byte="03" aria-label="发送 Ctrl+C" disabled>^C</button>
+            <button type="button" data-session-terminal-byte="16" aria-label="发送 Ctrl+V" disabled>^V</button>
+            <button type="button" data-session-terminal-byte="13" aria-label="发送 Ctrl+S" disabled>^S</button>
+            <button type="button" data-session-terminal-byte="04" aria-label="发送 Ctrl+D" disabled>^D</button>
+            <button type="button" data-session-terminal-byte="0f" aria-label="发送 Ctrl+O" disabled>^O</button>
+            <button type="button" data-session-terminal-byte="10" aria-label="发送 Ctrl+P" disabled>^P</button>
+            <button type="button" data-session-terminal-byte="11" aria-label="发送 Ctrl+Q" disabled>^Q</button>
+            <button type="button" data-session-terminal-byte="0d" aria-label="发送 Enter" disabled>Enter</button>
+          </div>
+        </div>
       </section>
 
       <section id="terminal-view" class="view terminal-view">

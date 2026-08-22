@@ -109,6 +109,7 @@ const elements = {
   workmapView: $("#workmap-view"),
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
+  sessionTerminalControls: $("#session-terminal-controls"),
   sessionTerminalShell: $("#session-terminal-shell"),
   sessionTerminalState: $("#session-terminal-state"),
   terminalView: $("#terminal-view"),
@@ -177,6 +178,7 @@ function getSessionTerminalController() {
   if (!sessionTerminalController) {
     sessionTerminalController = globalThis.MeSessionTerminal.create({
       container: elements.sessionTerminalScreen,
+      controls: elements.sessionTerminalControls,
       statusElement: elements.sessionTerminalState,
       shellElement: elements.sessionTerminalShell,
       request: (path, options, identity) => api(path, options, identity.workspaceId),
@@ -2617,18 +2619,41 @@ function syncObjectiveDisclosure(disclosure, scopeId, objectiveId) {
 
 function objectiveSummaryHtml(current, expanded) {
   const active = current.plans.some(({ plan }) => plan.state === "active");
-  const toggleLabel = expanded ? "折叠 Objective 详情" : "展开 Objective 详情";
   const details = expanded ? `${current.objective.description ? `<div class="objective-description">${escapeHtml(current.objective.description)}</div>` : ""}
     ${current.plans.map(({ plan, notes }) => `<div class="objective-plan ${plan.state === "active" ? "active" : ""}"><span>${planSymbol(plan.state)}</span><span>${escapeHtml(plan.title)}${notes.length ? ` (${notes.length} ${notes.length === 1 ? "note" : "notes"})` : ""}</span></div>`).join("")}` : "";
   return `<div class="objective-header"><div class="objective-title">${active ? "■" : "□"} ${escapeHtml(current.objective.title)}</div>
-    <button class="objective-toggle" data-objective-toggle type="button" title="${toggleLabel}" aria-label="${toggleLabel}" aria-expanded="${expanded}" aria-controls="objective-details"><span class="objective-toggle-icon" aria-hidden="true">${expanded ? "▾" : "▸"}</span></button></div>
+    <span class="objective-toggle" aria-hidden="true"><span class="objective-toggle-icon">${expanded ? "▾" : "▸"}</span></span></div>
     <div id="objective-details" class="objective-details${expanded ? "" : " hidden"}">${details}</div>`;
+}
+
+function objectiveDisclosureAttributes(expanded) {
+  const label = expanded ? "折叠 Objective 详情" : "展开 Objective 详情";
+  return { role: "button", tabindex: "0", "aria-expanded": String(expanded), "aria-controls": "objective-details", "aria-label": label, title: label };
+}
+
+const OBJECTIVE_INTERACTIVE_SELECTOR = "a[href], button, input, select, textarea, [contenteditable], [role=\"button\"], [role=\"link\"], [data-objective-interactive]";
+
+function objectiveEventActivates(event, objective) {
+  if (event.type === "keydown" && event.key !== "Enter" && event.key !== " ") return false;
+  const interactive = event.target.closest?.(OBJECTIVE_INTERACTIVE_SELECTOR);
+  return !interactive || interactive === objective;
+}
+
+function setObjectiveDisclosureControl(expanded = null) {
+  const names = ["role", "tabindex", "aria-expanded", "aria-controls", "aria-label", "title"];
+  if (expanded == null) {
+    for (const name of names) elements.objective.removeAttribute(name);
+    return;
+  }
+  const attributes = objectiveDisclosureAttributes(expanded);
+  for (const [name, value] of Object.entries(attributes)) elements.objective.setAttribute(name, value);
 }
 
 function renderObjective() {
   const current = currentStore()?.workmap.current;
   if (!current) {
     syncObjectiveDisclosure(state.objectiveDisclosure, null, null);
+    setObjectiveDisclosureControl();
     elements.objective.classList.add("hidden");
     MeTranscript.reconcileHtmlChildren(elements.objective, "");
     return;
@@ -2636,12 +2661,22 @@ function renderObjective() {
   const scopeId = JSON.stringify([state.workspaceId, state.selectedAgent]);
   const disclosure = syncObjectiveDisclosure(state.objectiveDisclosure, scopeId, current.objective.id);
   if (state.view.kind !== "chat") {
+    setObjectiveDisclosureControl();
     elements.objective.classList.add("hidden");
     MeTranscript.reconcileHtmlChildren(elements.objective, "");
     return;
   }
+  setObjectiveDisclosureControl(disclosure.expanded);
   elements.objective.classList.remove("hidden");
   MeTranscript.reconcileHtmlChildren(elements.objective, objectiveSummaryHtml(current, disclosure.expanded));
+}
+
+function toggleObjectiveDisclosure(event) {
+  if (elements.objective.classList.contains("hidden") || !objectiveEventActivates(event, elements.objective)) return;
+  if (event.type === "keydown") event.preventDefault();
+  state.objectiveDisclosure.expanded = !state.objectiveDisclosure.expanded;
+  renderObjective();
+  transcriptBottomFollower.layoutChanged();
 }
 
 function renderWorkMap() {
@@ -3911,13 +3946,8 @@ function renderMarkdown(source) {
 elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.addEventListener("click", () => {
   showView({ kind: button.dataset.view, sessionId: null });
 }));
-elements.objective.addEventListener("click", (event) => {
-  const button = event.target.closest?.("[data-objective-toggle]");
-  if (!button || !elements.objective.contains(button)) return;
-  state.objectiveDisclosure.expanded = !state.objectiveDisclosure.expanded;
-  renderObjective();
-  transcriptBottomFollower.layoutChanged();
-});
+elements.objective.addEventListener("click", toggleObjectiveDisclosure);
+elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", () => {

@@ -86,6 +86,23 @@ function fakeRuntime(requests, readResponses = []) {
   };
 }
 
+function fakeControls(encodedBytes) {
+  const buttons = encodedBytes.map((encoded) => ({
+    dataset: { sessionTerminalByte: encoded },
+    disabled: true,
+    closest(selector) { return selector === "[data-session-terminal-byte]" ? this : null; },
+  }));
+  const listeners = new Map();
+  return {
+    buttons,
+    querySelectorAll(selector) { return selector === "[data-session-terminal-byte]" ? buttons : []; },
+    contains(button) { return buttons.includes(button); },
+    addEventListener(type, handler) { listeners.set(type, handler); },
+    removeEventListener(type, handler) { if (listeners.get(type) === handler) listeners.delete(type); },
+    click(button) { listeners.get("click")?.({ target: button }); },
+  };
+}
+
 describe("SessionTerminal browser transport", () => {
   test("round-trips arbitrary terminal bytes and keeps workspace identity explicit", () => {
     const bytes = new Uint8Array([0, 27, 255, 65, 10]);
@@ -94,6 +111,53 @@ describe("SessionTerminal browser transport", () => {
       .toEqual({ key: "workspace-a:main", workspaceId: "workspace-a", agentId: "main" });
     expect(SessionTerminal.normalizeIdentity({ agentId: "main" }))
       .toEqual({ key: "direct:main", workspaceId: null, agentId: "main" });
+  });
+
+  test("sends every shortcut byte through the shared keyboard and resize operation chain", async () => {
+    const encoded = ["1b", "01", "1a", "18", "03", "16", "13", "04", "0f", "10", "11", "0d"];
+    const expected = encoded.map((value) => Number.parseInt(value, 16));
+    const requests = [];
+    const runtime = fakeRuntime(requests);
+    const controls = fakeControls(encoded);
+    const container = {
+      clientWidth: 800,
+      clientHeight: 500,
+      appendChild(child) { child.isConnected = true; },
+    };
+    const controller = SessionTerminal.create({
+      runtime,
+      container,
+      controls,
+      request: runtime.request,
+    });
+    controller.attach({ key: "workspace-a:main", workspaceId: "workspace-a", agentId: "main" });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(controls.buttons.every((button) => !button.disabled)).toBe(true);
+
+    runtime.terminals[0].dataHandler("K");
+    for (const button of controls.buttons) controls.click(button);
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    const paths = requests.map((request) => request.path);
+    const sent = requests
+      .filter((request) => request.path.endsWith("/input"))
+      .flatMap((request) => [...SessionTerminal.base64ToBytes(JSON.parse(request.options.body).data)]);
+    expect(sent).toEqual([0x4b, ...expected]);
+    expect(paths.findIndex((path) => path.endsWith("/resize")))
+      .toBeLessThan(paths.findIndex((path) => path.endsWith("/input")));
+    expect(runtime.terminals[0].focused).toBe(true);
+    expect(paths.every((path) => !/(?:close|kill|shutdown|exit)/.test(path))).toBe(true);
+
+    controller.deactivate();
+    expect(controls.buttons.every((button) => button.disabled)).toBe(true);
+    const sentBefore = sent.length;
+    controls.click(controls.buttons[0]);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const sentAfter = requests
+      .filter((request) => request.path.endsWith("/input"))
+      .flatMap((request) => [...SessionTerminal.base64ToBytes(JSON.parse(request.options.body).data)]).length;
+    expect(sentAfter).toBe(sentBefore);
+    controller.dispose();
   });
 
   test("uses read/input/resize only and deactivation never terminates the host PTY", async () => {
@@ -190,6 +254,36 @@ describe("SessionTerminal browser transport", () => {
       expect(app).toContain('kind === "terminal"');
       expect(app).toContain('Terminal · ${escapeHtml(session.session_id)}');
     }
+  });
+
+  test("renders identical one-line horizontally scrollable shortcut strips", () => {
+    const expected = [
+      ["ESC", "1b"], ["^A", "01"], ["^Z", "1a"], ["^X", "18"],
+      ["^C", "03"], ["^V", "16"], ["^S", "13"], ["^D", "04"],
+      ["^O", "0f"], ["^P", "10"], ["^Q", "11"], ["Enter", "0d"],
+    ];
+    for (const htmlPath of ["src/webui/index.html", "src/gateway_webui/index.html"]) {
+      const html = read(htmlPath);
+      const controls = [...html.matchAll(/<button type="button" data-session-terminal-byte="([0-9a-f]{2})"[^>]*>([^<]+)<\/button>/g)]
+        .map((match) => [match[2], match[1]]);
+      expect(controls).toEqual(expected);
+      expect(html.indexOf('id="session-terminal-screen"'))
+        .toBeLessThan(html.indexOf('id="session-terminal-controls"'));
+    }
+    for (const stylePath of ["src/webui/style.css", "src/gateway_webui/style.css"]) {
+      const styles = read(stylePath);
+      expect(styles).toContain(".session-terminal-controls { min-width: 0; flex: 0 0 auto; overflow-x: auto; overflow-y: hidden;");
+      expect(styles).toContain("overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x;");
+      expect(styles).toContain(".session-terminal-controls::-webkit-scrollbar { display: none; }");
+      expect(styles).toContain(".session-terminal-control-strip { display: flex; width: max-content; min-width: 100%; flex-wrap: nowrap;");
+      expect(styles).toContain(".session-terminal-control-strip button { min-width: 46px; min-height: 36px; flex: 0 0 auto;");
+    }
+    for (const appPath of ["src/webui/app.js", "src/gateway_webui/app.js"]) {
+      const app = read(appPath);
+      expect(app).toContain('sessionTerminalControls: $("#session-terminal-controls")');
+      expect(app).toContain("controls: elements.sessionTerminalControls");
+    }
+    expect(read("src/terminal.rs")).not.toContain("session-terminal-byte");
   });
 
   test("uses ordinary HTTP polling without browser persistence or lifecycle close calls", () => {
