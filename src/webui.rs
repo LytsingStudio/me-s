@@ -1,6 +1,6 @@
 use std::{
     collections::HashMap,
-    io::{self, Read},
+    io::{self, Read, Write},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -10,6 +10,7 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
+use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -157,7 +158,7 @@ pub(crate) fn shared_session_terminal_asset(path: &str) -> Option<(&'static str,
     }
 }
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
-const MAX_EVENT_BATCH_BYTES: usize = 512 * 1024;
+const MAX_EVENT_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
 const MAX_SESSION_TERMINAL_BODY_BYTES: usize = 128 * 1024;
 const SESSION_COOKIE: &str = "me_webui_session";
@@ -870,6 +871,14 @@ fn session_terminal_operation_response(operation: SessionTerminalOperation) -> H
 }
 
 fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpResponse> {
+    let accepts_gzip = request
+        .headers()
+        .iter()
+        .filter(|header| header.field.equiv("Accept-Encoding"))
+        .map(|header| header.value.as_str())
+        .collect::<Vec<_>>()
+        .join(",");
+    let accepts_gzip = accept_encoding_allows_gzip(&accepts_gzip);
     let content_type = request
         .headers()
         .iter()
@@ -916,7 +925,7 @@ fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpR
         sync.terminal_session,
         sync.terminal_revision,
     )?;
-    Ok(json_response(StatusCode(200), &payload))
+    Ok(sync_json_response(StatusCode(200), &payload, accepts_gzip))
 }
 
 #[derive(Serialize)]
@@ -1418,6 +1427,74 @@ fn unauthorized_response() -> HttpResponse {
     )
 }
 
+fn accept_encoding_allows_gzip(value: &str) -> bool {
+    let mut gzip_quality: Option<f32> = None;
+    let mut wildcard_quality: Option<f32> = None;
+    for coding in value.split(',') {
+        let mut parts = coding.split(';');
+        let name = parts.next().unwrap_or_default().trim();
+        let mut quality = 1.0_f32;
+        for parameter in parts {
+            let Some((key, value)) = parameter.split_once('=') else {
+                continue;
+            };
+            if key.trim().eq_ignore_ascii_case("q") {
+                quality = value
+                    .trim()
+                    .parse::<f32>()
+                    .ok()
+                    .filter(|quality| (0.0..=1.0).contains(quality))
+                    .unwrap_or(0.0);
+            }
+        }
+        let slot = if name.eq_ignore_ascii_case("gzip") {
+            Some(&mut gzip_quality)
+        } else if name == "*" {
+            Some(&mut wildcard_quality)
+        } else {
+            None
+        };
+        if let Some(slot) = slot {
+            *slot = Some(slot.map_or(quality, |current| current.max(quality)));
+        }
+    }
+    gzip_quality
+        .or(wildcard_quality)
+        .is_some_and(|quality| quality > 0.0)
+}
+
+fn sync_json_response(
+    status: StatusCode,
+    value: &impl Serialize,
+    accepts_gzip: bool,
+) -> HttpResponse {
+    let body = serde_json::to_vec(value)
+        .unwrap_or_else(|error| format!(r#"{{"ok":false,"error":"{error}"}}"#).into_bytes());
+    let (body, compressed) = if accepts_gzip {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        match encoder.write_all(&body).and_then(|()| encoder.finish()) {
+            Ok(compressed) => (compressed, true),
+            Err(_) => (body, false),
+        }
+    } else {
+        (body, false)
+    };
+    let mut response = Response::from_data(body)
+        .with_status_code(status)
+        .with_header(content_type("application/json; charset=utf-8"))
+        .with_header(
+            Header::from_bytes("Vary", "Accept-Encoding").expect("static Vary header is valid"),
+        )
+        .with_header(no_store());
+    if compressed {
+        response = response.with_header(
+            Header::from_bytes("Content-Encoding", "gzip")
+                .expect("static Content-Encoding header is valid"),
+        );
+    }
+    response
+}
+
 fn json_response(status: StatusCode, value: &impl Serialize) -> HttpResponse {
     let body = serde_json::to_vec(value)
         .unwrap_or_else(|error| format!(r#"{{"ok":false,"error":"{error}"}}"#).into_bytes());
@@ -1451,7 +1528,7 @@ fn no_store() -> Header {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, net::TcpListener, path::PathBuf, thread};
+    use std::{fs, io::Read as _, net::TcpListener, path::PathBuf, thread};
 
     use super::*;
     use crate::{
@@ -1693,7 +1770,20 @@ mod tests {
     }
 
     #[test]
+    fn http_sync_gzip_negotiation_respects_quality_and_wildcards() {
+        assert!(accept_encoding_allows_gzip("gzip"));
+        assert!(accept_encoding_allows_gzip("br, gzip; q=0.7"));
+        assert!(accept_encoding_allows_gzip("br, *;q=0.5"));
+        assert!(!accept_encoding_allows_gzip(""));
+        assert!(!accept_encoding_allows_gzip("br"));
+        assert!(!accept_encoding_allows_gzip("gzip;q=0"));
+        assert!(!accept_encoding_allows_gzip("gzip;q=0, *;q=1"));
+        assert!(!accept_encoding_allows_gzip("gzip;q=invalid"));
+    }
+
+    #[test]
     fn http_sync_event_batches_are_bounded_without_splitting_events() {
+        assert_eq!(MAX_EVENT_BATCH_BYTES, 1024 * 1024);
         let events = (1..=4)
             .map(|id| {
                 Event::UserPrompt(UserPromptEvent {
@@ -1712,6 +1802,15 @@ mod tests {
         assert_eq!(count, 1, "one atomic event must always make progress");
         assert_eq!(bytes, first_size);
         assert_eq!(event_prefix_within_budget(&events, 0).unwrap(), (0, 0));
+
+        let oversized = vec![Event::UserPrompt(UserPromptEvent {
+            id: 9,
+            timestamp_ms: 9,
+            content: "x".repeat(MAX_EVENT_BATCH_BYTES + 1024),
+        })];
+        let (count, bytes) = event_prefix_within_budget(&oversized, MAX_EVENT_BATCH_BYTES).unwrap();
+        assert_eq!(count, 1, "an oversized atomic event must still be sent");
+        assert!(bytes > MAX_EVENT_BATCH_BYTES);
     }
 
     #[test]
@@ -2346,7 +2445,9 @@ mod tests {
         assert!(!APP_JS.contains("/api/events/"));
         assert!(!APP_JS.contains("/api/terminals/"));
         assert!(!APP_JS.contains("/api/terminal/"));
-        assert!(APP_JS.contains("status: apiActivityChanged"));
+        assert!(
+            APP_JS.contains("status: !bulkRecoveryPending && !recoveryReady && apiActivityChanged")
+        );
         assert!(APP_JS.contains("receivedSseEvents"));
         assert!(APP_JS.contains("if (request.status || changes.status) renderStatus()"));
         assert!(APP_JS.contains("else if (request.workerEvents && state.view.kind === \"chat\")"));
@@ -2715,6 +2816,83 @@ mod tests {
                 .unwrap()
                 .status(),
             reqwest::StatusCode::NOT_FOUND
+        );
+
+        drop(server);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn http_sync_negotiates_gzip_without_changing_json() {
+        let directory = workspace();
+        let workspace = Workspace::open(
+            &directory,
+            WorkspaceConfig {
+                version: 2,
+                model: "test".into(),
+                effort: "unset".into(),
+                orchestrator: "chatbot".into(),
+            },
+            vec![model()],
+        )
+        .unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
+        let server = start_from(backend, commands, 0, None).unwrap();
+        let address = server
+            .address()
+            .replace("http://0.0.0.0:", "http://127.0.0.1:");
+        let client = reqwest::blocking::Client::new();
+        let request = json!({
+            "snapshot_revision": null, "agents": [], "selected_agent": null,
+            "terminal_session": null, "terminal_revision": null,
+        });
+
+        let identity = client
+            .post(format!("{address}/api/sync"))
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip;q=0, *;q=1")
+            .json(&request)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert!(
+            identity
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .is_none()
+        );
+        assert_eq!(
+            identity.headers().get(reqwest::header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+        let identity_body = identity.bytes().unwrap();
+
+        let compressed = client
+            .post(format!("{address}/api/sync"))
+            .header(reqwest::header::ACCEPT_ENCODING, "br, gzip;q=1")
+            .json(&request)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap();
+        assert_eq!(
+            compressed
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .unwrap(),
+            "gzip"
+        );
+        assert_eq!(
+            compressed.headers().get(reqwest::header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+        let compressed_body = compressed.bytes().unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_ref());
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&identity_body).unwrap()
         );
 
         drop(server);

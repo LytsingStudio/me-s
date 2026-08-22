@@ -12,6 +12,8 @@ function loadRuntime(relative) {
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
+      eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery,
+      eventRecoveryMatches, selectedEventRecoveryReady,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
       blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
@@ -111,6 +113,47 @@ describe("ME Gateway WebUI semantic compatibility", () => {
         expect(runtime.sidebarAgentActive(terminal)).toBe(false);
       }
     }
+  });
+
+  test("keeps bulk recovery current-session scoped and commits only at its fixed target", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      expect(runtime.shouldUseBulkEventRecovery(99, 0)).toBe(false);
+      expect(runtime.shouldUseBulkEventRecovery(100, 0)).toBe(false);
+      expect(runtime.shouldUseBulkEventRecovery(101, 0)).toBe(true);
+      const recovery = runtime.createEventRecovery("main", 4, 101, 0);
+      expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 100)).toBe(false);
+      expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 101)).toBe(true);
+      expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 140)).toBe(true);
+      expect(runtime.eventRecoveryMatches(recovery, "other", 4)).toBe(false);
+      expect(runtime.eventRecoveryMatches(recovery, "main", 5)).toBe(false);
+
+      const source = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(source).toContain("delete elements.terminalScreen.dataset.revision;\n  restoreDraft();\n  const meta =");
+      expect(source).toContain("!wasConnected || selectionChanged || Boolean(selectedUpdate?.reset)");
+      expect(source).toContain("const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(");
+      expect(source).toContain("const bulkRecoveryPending = bulkEventRecoveryActive() && !recoveryReady;");
+      expect(source).toContain("currentEvents: !bulkRecoveryPending && !recoveryReady && selectedEventsChanged");
+      expect(source).toContain("workerEvents: !bulkRecoveryPending && !recoveryReady && selectedWorkerChanged");
+      expect(source).toContain("if (bulkRecoveryPending) suppressBulkEventRecoveryRender();");
+      expect(source).toContain(`if (recoveryReady) {
+    store.projectedOrder = 0;
+    store.needsReplay = true;
+    state.eventRecovery = null;
+    requestRender({ full: true, connection: !wasConnected });
+    flushPendingRender();`);
+      expect(source).toContain("if (bulkEventRecoveryActive()) return emptyProjectionChanges();");
+      expect(source).toContain('elements.connectionRetry.classList.add("hidden")');
+      expect(source).toContain('elements.app.inert = true;');
+    }
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const first = gateway.emptyGatewayWorkspaceState();
+    const second = gateway.emptyGatewayWorkspaceState();
+    first.eventRecovery = { agentId: "main", mutationRevision: 1, targetEventCount: 101 };
+    expect(second.eventRecovery).toBeNull();
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(gatewaySource).toContain("eventRecovery: state.eventRecovery");
+    expect(gatewaySource).toContain("state.eventRecovery = workspace.eventRecovery;");
   });
 
   test("closes the portrait sidebar before selecting any Gateway session", () => {
@@ -376,6 +419,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain("const active = sidebarAgentActive(summary);");
       expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
       expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400;");
+      expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; font-weight: 700;");
       expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
       expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
       expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");

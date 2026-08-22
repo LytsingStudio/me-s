@@ -24,6 +24,11 @@ function loadProjectionRuntime() {
       toolBrief,
       renderToolCard,
       renderMessageHtml,
+      eventRecoveryBacklog,
+      shouldUseBulkEventRecovery,
+      createEventRecovery,
+      eventRecoveryMatches,
+      selectedEventRecoveryReady,
     };`);
   const runtime = factory(
     { querySelector: () => null },
@@ -299,6 +304,26 @@ describe("WebUI incremental event projections", () => {
     expect(runtime.consumeWorkMapEvents(incremental, [second])).toBe(true);
     expect({ ...incremental, _records: undefined })
       .toEqual({ ...runtime.projectWorkMap([first, second]), _records: undefined });
+  });
+
+  test("locks the 100 Event recovery boundary and fixed high-water mark", () => {
+    const runtime = loadProjectionRuntime();
+    expect(runtime.eventRecoveryBacklog(99, 0)).toBe(99);
+    expect(runtime.eventRecoveryBacklog(100, 0)).toBe(100);
+    expect(runtime.eventRecoveryBacklog(101, 0)).toBe(101);
+    expect(runtime.shouldUseBulkEventRecovery(99, 0)).toBe(false);
+    expect(runtime.shouldUseBulkEventRecovery(100, 0)).toBe(false);
+    expect(runtime.shouldUseBulkEventRecovery(101, 0)).toBe(true);
+    expect(runtime.shouldUseBulkEventRecovery(151, 50)).toBe(true);
+
+    const recovery = runtime.createEventRecovery("main", 7, 151, 50);
+    expect(recovery).toEqual({ agentId: "main", mutationRevision: 7, targetEventCount: 151 });
+    expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 150)).toBe(false);
+    expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 151)).toBe(true);
+    expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 220)).toBe(true);
+    expect(runtime.eventRecoveryMatches(recovery, "other", 7)).toBe(false);
+    expect(runtime.eventRecoveryMatches(recovery, "main", 8)).toBe(false);
+    expect(runtime.createEventRecovery("main", 7, 150, 50)).toBeNull();
   });
 
   test("advances one Worker activity index without rescanning its prefix", () => {

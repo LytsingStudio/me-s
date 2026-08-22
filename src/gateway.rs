@@ -53,6 +53,8 @@ pub struct GatewaySnapshot {
 pub struct ProxyResponse {
     pub status: u16,
     pub content_type: Option<String>,
+    pub content_encoding: Option<String>,
+    pub vary: Option<String>,
     pub body: Vec<u8>,
 }
 
@@ -378,6 +380,7 @@ impl Gateway {
         method: reqwest::Method,
         child_path: &str,
         content_type: Option<&str>,
+        accept_encoding: Option<&str>,
         body: Vec<u8>,
     ) -> Result<ProxyResponse> {
         validate_proxy_path(child_path)?;
@@ -394,6 +397,9 @@ impl Gateway {
         if let Some(content_type) = content_type {
             request = request.header(reqwest::header::CONTENT_TYPE, content_type);
         }
+        if let Some(accept_encoding) = accept_encoding {
+            request = request.header(reqwest::header::ACCEPT_ENCODING, accept_encoding);
+        }
         let response = request.send().map_err(|_| "工作区请求未能完成")?;
         let status = response.status().as_u16();
         let content_type = response
@@ -401,10 +407,22 @@ impl Gateway {
             .get(reqwest::header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .map(str::to_owned);
+        let content_encoding = response
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
+        let vary = response
+            .headers()
+            .get(reqwest::header::VARY)
+            .and_then(|value| value.to_str().ok())
+            .map(str::to_owned);
         let body = response.bytes().map_err(|_| "工作区响应未能完成")?.to_vec();
         Ok(ProxyResponse {
             status,
             content_type,
+            content_encoding,
+            vary,
             body,
         })
     }

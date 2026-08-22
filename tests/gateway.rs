@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::{BufRead, BufReader},
+    io::{BufRead, BufReader, Read as _},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
@@ -241,6 +241,59 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
         .json()
         .unwrap();
     let session_agent = child_snapshot["agents"][0]["id"].as_str().unwrap();
+    let sync_request = serde_json::json!({
+        "snapshot_revision": null, "agents": [], "selected_agent": session_agent,
+        "terminal_session": null, "terminal_revision": null,
+    });
+    let identity = http
+        .post(format!("{address}/api/workspaces/chat/sync"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip;q=0, *;q=1")
+        .json(&sync_request)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert!(
+        identity
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .is_none()
+    );
+    assert_eq!(
+        identity.headers().get(reqwest::header::VARY).unwrap(),
+        "Accept-Encoding"
+    );
+    let identity_body = identity.bytes().unwrap();
+    let compressed = http
+        .post(format!("{address}/api/workspaces/chat/sync"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+        .json(&sync_request)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap();
+    assert_eq!(
+        compressed
+            .headers()
+            .get(reqwest::header::CONTENT_ENCODING)
+            .unwrap(),
+        "gzip"
+    );
+    assert_eq!(
+        compressed.headers().get(reqwest::header::VARY).unwrap(),
+        "Accept-Encoding"
+    );
+    let compressed_body = compressed.bytes().unwrap();
+    let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_ref());
+    let mut decoded = Vec::new();
+    decoder.read_to_end(&mut decoded).unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&decoded).unwrap(),
+        serde_json::from_slice::<serde_json::Value>(&identity_body).unwrap()
+    );
+
     assert_eq!(
         http.post(format!(
             "{address}/api/workspaces/chat/session-terminal/{session_agent}/read"

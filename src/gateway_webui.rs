@@ -309,12 +309,21 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 .iter()
                 .find(|header| header.field.equiv("Content-Type"))
                 .map(|header| header.value.as_str().to_owned());
+            let accept_encoding = request
+                .headers()
+                .iter()
+                .filter(|header| header.field.equiv("Accept-Encoding"))
+                .map(|header| header.value.as_str())
+                .collect::<Vec<_>>()
+                .join(",");
+            let accept_encoding = (!accept_encoding.is_empty()).then_some(accept_encoding);
             let body = read_body(request, MAX_BODY_BYTES)?;
             match gateway.proxy(
                 workspace_id,
                 method,
                 child_path,
                 content_type.as_deref(),
+                accept_encoding.as_deref(),
                 body,
             ) {
                 Ok(response) => Ok(proxy_response(response)),
@@ -458,10 +467,16 @@ fn session_cookie(token: &str) -> Header {
 fn proxy_response(response: crate::gateway::ProxyResponse) -> HttpResponse {
     let mut response_body =
         Response::from_data(response.body).with_status_code(StatusCode(response.status));
-    if let Some(content_type) = response.content_type
-        && let Ok(header) = Header::from_bytes("Content-Type", content_type)
-    {
-        response_body = response_body.with_header(header);
+    for (name, value) in [
+        ("Content-Type", response.content_type),
+        ("Content-Encoding", response.content_encoding),
+        ("Vary", response.vary),
+    ] {
+        if let Some(value) = value
+            && let Ok(header) = Header::from_bytes(name, value)
+        {
+            response_body = response_body.with_header(header);
+        }
     }
     response_body.with_header(no_store())
 }

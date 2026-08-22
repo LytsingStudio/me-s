@@ -3,6 +3,7 @@
 const HTTP_SYNC_ACTIVE_MS = 250;
 const HTTP_SYNC_IDLE_MS = 1000;
 const HTTP_SYNC_TIMEOUT_MS = 15000;
+const EVENT_RECOVERY_THRESHOLD = 100;
 const RECONNECT_MAX_MS = 5000;
 const INPUT_ANIMATION_QUIET_MS = 250;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
@@ -33,6 +34,7 @@ const state = {
   selectedAgent: null,
   apiActivity: { agentId: null, active: false, receivedSseEvents: 0 },
   pendingAgentSelection: null,
+  eventRecovery: null,
   view: { kind: "chat", sessionId: null },
   terminals: [],
   terminalRevisions: new Map(),
@@ -444,13 +446,28 @@ function failHttpSync(title, error) {
 function showConnectionOverlay(title, message) {
   elements.connectionOverlayTitle.textContent = title;
   elements.connectionOverlayMessage.textContent = message;
+  elements.connectionRetry.classList.remove("hidden");
+  elements.connectionOverlay.classList.remove("hidden");
+  elements.app.inert = true;
+  if (elements.app.contains(document.activeElement)) document.activeElement.blur();
+}
+
+function showEventRecoveryOverlay() {
+  elements.connectionOverlayTitle.textContent = "正在恢复会话";
+  elements.connectionOverlayMessage.textContent = "正在载入较长的会话历史，请稍候。";
+  elements.connectionRetry.classList.add("hidden");
   elements.connectionOverlay.classList.remove("hidden");
   elements.app.inert = true;
   if (elements.app.contains(document.activeElement)) document.activeElement.blur();
 }
 
 function hideConnectionOverlay() {
+  if (bulkEventRecoveryActive()) {
+    showEventRecoveryOverlay();
+    return;
+  }
   elements.connectionOverlay.classList.add("hidden");
+  elements.connectionRetry.classList.remove("hidden");
   elements.app.inert = false;
 }
 
@@ -519,6 +536,7 @@ function requestHttpSyncNow() {
 }
 
 function applySyncState(payload) {
+  const hadBulkRecovery = bulkEventRecoveryActive();
   const previousSnapshot = state.snapshot;
   const wasConnected = state.connected;
   if (payload.snapshot) {
@@ -530,6 +548,14 @@ function applySyncState(payload) {
     !== snapshotPresentationSignature(state.snapshot);
   const selectionChanged = reconcileAgents();
   const updates = new Map((payload.event_updates || []).map((update) => [update.agent_id, update]));
+  const selectedMeta = state.snapshot.agents.find((meta) => meta.id === state.selectedAgent);
+  const selectedUpdate = updates.get(state.selectedAgent);
+  prepareSelectedEventRecovery(
+    selectedMeta,
+    selectedUpdate,
+    !wasConnected || selectionChanged || Boolean(selectedUpdate?.reset),
+  );
+  const recoveryTransitionedToIncremental = hadBulkRecovery && !bulkEventRecoveryActive();
   const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));
   const selectedEventsChanged = eventChanges.some((change) =>
     change.changed && change.agentId === state.selectedAgent);
@@ -547,26 +573,109 @@ function applySyncState(payload) {
   const fullyRecovered = responseMatchesSelection || wasConnected;
   state.connected = fullyRecovered;
   state.connecting = !fullyRecovered;
+  const store = currentStore();
+  const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(
+    state.eventRecovery,
+    state.selectedAgent,
+    store?.mutationRevision,
+    store?.events.length,
+  );
+  const bulkRecoveryPending = bulkEventRecoveryActive() && !recoveryReady;
   if (fullyRecovered) {
     state.reconnectAttempt = 0;
-    hideConnectionOverlay();
+    if (bulkRecoveryPending) showEventRecoveryOverlay();
+    else if (!recoveryReady && !recoveryTransitionedToIncremental) hideConnectionOverlay();
   }
   requestRender({
-    full: !wasConnected || selectionChanged,
+    full: !bulkRecoveryPending && !recoveryReady && (!wasConnected || selectionChanged),
     connection: !wasConnected,
     agents: presentationChanged || agentSummaryChanged,
     tabs: presentationChanged || terminalChanged,
-    currentEvents: selectedEventsChanged,
-    workerEvents: selectedWorkerChanged,
-    apiActivity: apiActivityChanged,
-    status: apiActivityChanged,
+    currentEvents: !bulkRecoveryPending && !recoveryReady && selectedEventsChanged,
+    workerEvents: !bulkRecoveryPending && !recoveryReady && selectedWorkerChanged,
+    apiActivity: !bulkRecoveryPending && !recoveryReady && apiActivityChanged,
+    status: !bulkRecoveryPending && !recoveryReady && apiActivityChanged,
   });
-  if (!inputHasPriority()) flushPendingRender();
+  if (bulkRecoveryPending) suppressBulkEventRecoveryRender();
+  if (recoveryReady) {
+    store.projectedOrder = 0;
+    store.needsReplay = true;
+    state.eventRecovery = null;
+    requestRender({ full: true, connection: !wasConnected });
+    flushPendingRender();
+    hideConnectionOverlay();
+  } else if (recoveryTransitionedToIncremental) {
+    flushPendingRender();
+    if (fullyRecovered) hideConnectionOverlay();
+  } else if (!inputHasPriority()) flushPendingRender();
   else if (state.view.kind === "terminal") renderTerminal();
   for (const [agentId, sync] of state.draftSync) {
     if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
   }
   if (!responseMatchesSelection) requestHttpSyncNow();
+}
+
+function eventRecoveryBacklog(authoritativeEventCount, localEventCount) {
+  return Math.max(0, Math.max(0, Number(authoritativeEventCount) || 0)
+    - Math.max(0, Number(localEventCount) || 0));
+}
+
+function shouldUseBulkEventRecovery(authoritativeEventCount, localEventCount) {
+  return eventRecoveryBacklog(authoritativeEventCount, localEventCount) > EVENT_RECOVERY_THRESHOLD;
+}
+
+function createEventRecovery(agentId, mutationRevision, authoritativeEventCount, localEventCount) {
+  if (!agentId || !shouldUseBulkEventRecovery(authoritativeEventCount, localEventCount)) return null;
+  return {
+    agentId,
+    mutationRevision: Number(mutationRevision) || 0,
+    targetEventCount: Math.max(0, Number(authoritativeEventCount) || 0),
+  };
+}
+
+function eventRecoveryMatches(recovery, agentId, mutationRevision) {
+  return Boolean(recovery) && recovery.agentId === agentId
+    && recovery.mutationRevision === (Number(mutationRevision) || 0);
+}
+
+function selectedEventRecoveryReady(recovery, agentId, mutationRevision, localEventCount) {
+  return eventRecoveryMatches(recovery, agentId, mutationRevision)
+    && Math.max(0, Number(localEventCount) || 0) >= recovery.targetEventCount;
+}
+
+function prepareSelectedEventRecovery(meta, update, startCycle) {
+  if (!meta || meta.id !== state.selectedAgent) {
+    state.eventRecovery = null;
+    return false;
+  }
+  const mutationRevision = Number(update?.mutation_revision ?? meta.mutation_revision) || 0;
+  if (state.eventRecovery
+      && !eventRecoveryMatches(state.eventRecovery, meta.id, mutationRevision)) {
+    state.eventRecovery = null;
+  }
+  if (state.eventRecovery) return true;
+  if (!startCycle) return false;
+  const store = state.stores.get(meta.id);
+  const localEventCount = update?.reset || store?.mutationRevision !== mutationRevision
+    ? 0 : store?.events.length || 0;
+  const authoritativeEventCount = update?.event_count ?? meta.event_count;
+  state.eventRecovery = createEventRecovery(
+    meta.id, mutationRevision, authoritativeEventCount, localEventCount,
+  );
+  if (state.eventRecovery) suppressBulkEventRecoveryRender();
+  return Boolean(state.eventRecovery);
+}
+
+function bulkEventRecoveryActive() {
+  return Boolean(state.eventRecovery) && state.eventRecovery.agentId === state.selectedAgent;
+}
+
+function suppressBulkEventRecoveryRender() {
+  state.pendingRender.full = false;
+  state.pendingRender.currentEvents = false;
+  state.pendingRender.workerEvents = false;
+  state.pendingRender.apiActivity = false;
+  state.pendingRender.status = false;
 }
 
 function inputHasPriority() {
@@ -1475,6 +1584,10 @@ function flushPendingRender() {
 }
 
 function renderAll() {
+  if (bulkEventRecoveryActive()) {
+    suppressBulkEventRecoveryRender();
+    return;
+  }
   state.pendingRender = emptyRenderRequest();
   const changes = advanceCurrentProjection();
   const promptConfirmed = beginConfirmedPromptRender(changes);
@@ -1530,6 +1643,7 @@ function renderIncremental(request) {
 }
 
 function advanceCurrentProjection() {
+  if (bulkEventRecoveryActive()) return emptyProjectionChanges();
   const store = currentStore();
   if (!store) return emptyProjectionChanges();
   if (store.needsReplay) {
@@ -1673,7 +1787,9 @@ function selectAgent(id) {
   delete elements.terminalScreen.dataset.terminalKey;
   delete elements.terminalScreen.dataset.revision;
   restoreDraft();
-  renderAll();
+  const meta = state.snapshot.agents.find((agent) => agent.id === id);
+  if (prepareSelectedEventRecovery(meta, null, true)) showEventRecoveryOverlay();
+  else renderAll();
   requestHttpSyncNow();
 }
 
