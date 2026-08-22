@@ -139,6 +139,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const gateway = loadRuntime("../src/gateway_webui/app.js");
     gateway.state.workspaceId = "w-one";
     expect(gateway.scopedApiPath("/api/sync")).toBe("/api/workspaces/w-one/sync");
+    expect(gateway.scopedApiPath("/api/session-terminal/main/read"))
+      .toBe("/api/workspaces/w-one/session-terminal/main/read");
     expect(gateway.scopedApiPath("/api/auth/status")).toBe("/api/auth/status");
     const first = gateway.emptyGatewayWorkspaceState();
     const second = gateway.emptyGatewayWorkspaceState();

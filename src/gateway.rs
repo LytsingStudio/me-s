@@ -570,13 +570,22 @@ fn validate_directory_name(name: &str) -> Result<()> {
 }
 
 fn validate_proxy_path(path: &str) -> Result<()> {
-    let deletion_blocker = path.strip_prefix("deletion-blocker/").is_some_and(|agent| {
+    let valid_agent = |agent: &str| {
         !agent.is_empty()
             && agent
                 .bytes()
                 .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
-    });
-    if !matches!(path, "sync" | "snapshot" | "command") && !deletion_blocker {
+    };
+    let deletion_blocker = path
+        .strip_prefix("deletion-blocker/")
+        .is_some_and(valid_agent);
+    let session_terminal = path
+        .strip_prefix("session-terminal/")
+        .and_then(|rest| rest.split_once('/'))
+        .is_some_and(|(agent, action)| {
+            valid_agent(agent) && matches!(action, "read" | "input" | "resize")
+        });
+    if !matches!(path, "sync" | "snapshot" | "command") && !deletion_blocker && !session_terminal {
         return Err("不支持的工作区接口".into());
     }
     Ok(())
@@ -594,6 +603,9 @@ mod tests {
             "command",
             "deletion-blocker/main",
             "deletion-blocker/worker_1",
+            "session-terminal/main/read",
+            "session-terminal/main/input",
+            "session-terminal/worker_1/resize",
         ] {
             validate_proxy_path(path).unwrap();
         }
@@ -605,6 +617,12 @@ mod tests {
             "deletion-blocker/",
             "deletion-blocker/main/extra",
             "deletion-blocker/..",
+            "session-terminal//read",
+            "session-terminal/main",
+            "session-terminal/main/close",
+            "session-terminal/main/read/extra",
+            "session-terminal/../read",
+            "session-terminal/main/read?cursor=1",
             "sync?private=true",
         ] {
             assert!(validate_proxy_path(path).is_err(), "{path}");

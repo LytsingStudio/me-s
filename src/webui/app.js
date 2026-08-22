@@ -97,6 +97,10 @@ const elements = {
   terminalTabs: $("#terminal-tabs"),
   chatView: $("#chat-view"),
   workmapView: $("#workmap-view"),
+  sessionTerminalView: $("#session-terminal-view"),
+  sessionTerminalScreen: $("#session-terminal-screen"),
+  sessionTerminalShell: $("#session-terminal-shell"),
+  sessionTerminalState: $("#session-terminal-state"),
   terminalView: $("#terminal-view"),
   transcript: $("#transcript"),
   transcriptContent: $("#transcript-content"),
@@ -153,6 +157,22 @@ const elements = {
   compactSummaryContent: $("#compact-summary-content"),
   toasts: $("#toast-region"),
 };
+
+let sessionTerminalIdentityKey = null;
+let sessionTerminalController = null;
+
+function getSessionTerminalController() {
+  if (!sessionTerminalController) {
+    sessionTerminalController = globalThis.MeSessionTerminal.create({
+      container: elements.sessionTerminalScreen,
+      statusElement: elements.sessionTerminalState,
+      shellElement: elements.sessionTerminalShell,
+      request: (path, options) => api(path, options),
+      onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+    });
+  }
+  return sessionTerminalController;
+}
 
 function eventParts(event) {
   const entry = Object.entries(event)[0];
@@ -249,6 +269,7 @@ async function api(path, options = {}) {
 }
 
 function showLogin(message = "") {
+  deactivateSessionTerminalView();
   stopHttpPolling();
   state.authenticated = false;
   state.connected = false;
@@ -1618,6 +1639,7 @@ function selectAgent(id) {
   closeMobileSidebar();
   closeUserMessageMenu();
   closeAgentMenu();
+  deactivateSessionTerminalView();
   saveDraft();
   state.selectedAgent = id;
   transcriptBottomFollower.follow();
@@ -1632,6 +1654,26 @@ function selectAgent(id) {
   requestHttpSyncNow();
 }
 
+function deactivateSessionTerminalView() {
+  sessionTerminalController?.deactivate();
+  sessionTerminalIdentityKey = null;
+}
+
+function syncSessionTerminalView() {
+  if (state.view.kind !== "session-terminal" || !state.selectedAgent) {
+    if (sessionTerminalIdentityKey !== null) deactivateSessionTerminalView();
+    return;
+  }
+  const key = `direct:${state.selectedAgent}`;
+  if (sessionTerminalIdentityKey === key) return;
+  getSessionTerminalController().attach({
+    key,
+    agentId: state.selectedAgent,
+    workspaceId: null,
+  });
+  sessionTerminalIdentityKey = key;
+}
+
 function renderTabs() {
   elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.classList.toggle("active", state.view.kind === button.dataset.view));
   elements.terminalTabs.innerHTML = state.terminals.map((session) =>
@@ -1642,7 +1684,9 @@ function renderTabs() {
   }));
   elements.chatView.classList.toggle("active", state.view.kind === "chat");
   elements.workmapView.classList.toggle("active", state.view.kind === "workmap");
+  elements.sessionTerminalView.classList.toggle("active", state.view.kind === "session-terminal");
   elements.terminalView.classList.toggle("active", state.view.kind === "terminal");
+  syncSessionTerminalView();
 }
 
 function showView(view) {
@@ -3442,11 +3486,13 @@ window.addEventListener("resize", () => {
 });
 window.addEventListener("pagehide", () => {
   state.pageClosing = true;
+  deactivateSessionTerminalView();
   flushDraftBeforePageCloses();
 });
 window.addEventListener("pageshow", () => {
   state.pageClosing = false;
   if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
+  if (state.view.kind === "session-terminal") renderTabs();
 });
 const transcriptBottomFollower = createTranscriptBottomFollower(
   elements.transcript,

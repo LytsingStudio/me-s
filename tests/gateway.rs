@@ -197,6 +197,17 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert!(transcript_runtime.contains("MeTranscript"));
     assert!(transcript_runtime.contains("reconcileHtmlChildren"));
 
+    let session_terminal_runtime = http
+        .get(format!("{address}/session-terminal.js"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(session_terminal_runtime.contains("MeSessionTerminal"));
+    assert!(session_terminal_runtime.contains("/api/session-terminal/"));
+
     assert_eq!(
         http.get(format!("{address}/api/gateway/state"))
             .send()
@@ -219,6 +230,52 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert_eq!(initial["workspaces"][0]["id"], "chat");
     assert!(root.join(".me-gateway/state.json").exists());
     assert!(workspace_config_path(&root).exists());
+
+    let child_snapshot: serde_json::Value = http
+        .get(format!("{address}/api/workspaces/chat/snapshot"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    let session_agent = child_snapshot["agents"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        http.post(format!(
+            "{address}/api/workspaces/chat/session-terminal/{session_agent}/read"
+        ))
+        .json(&serde_json::json!({"cursor": null}))
+        .send()
+        .unwrap()
+        .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let native_terminal: serde_json::Value = http
+        .post(format!(
+            "{address}/api/workspaces/chat/session-terminal/{session_agent}/read"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&serde_json::json!({"cursor": null}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(native_terminal["ok"], true);
+    assert!(native_terminal["events"].is_array());
+    assert_eq!(
+        http.post(format!(
+            "{address}/api/workspaces/chat/session-terminal/{session_agent}/read?cursor=0"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&serde_json::json!({"cursor": null}))
+        .send()
+        .unwrap()
+        .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
 
     let settings: serde_json::Value = http
         .get(format!("{address}/api/gateway/settings"))

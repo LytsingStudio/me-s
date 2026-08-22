@@ -129,6 +129,8 @@ impl UiSnapshot {
 pub trait UiBackend: Send + Sync {
     fn snapshot(&self) -> Result<UiSnapshot>;
 
+    fn agent_ids(&self) -> Result<Vec<AgentId>>;
+
     fn api_activity(&self, agent_id: &AgentId) -> Result<UiApiActivity>;
 
     fn terminal_sessions(&self, agent_id: &AgentId) -> Result<Vec<TerminalSessionPreview>>;
@@ -322,6 +324,10 @@ impl UiBackend for WorkspaceUiBackend {
             orchestrators: Arc::clone(&self.orchestrators),
             default_orchestrator: self.default_orchestrator.clone(),
         })
+    }
+
+    fn agent_ids(&self) -> Result<Vec<AgentId>> {
+        self.handle.agent_ids()
     }
 
     fn api_activity(&self, agent_id: &AgentId) -> Result<UiApiActivity> {
@@ -576,6 +582,10 @@ mod tests {
         else {
             panic!("AddAgent did not return its atomic creation result");
         };
+
+        // The lifecycle observer sees the new session directly from the handle;
+        // it does not depend on a browser request building a full UI snapshot.
+        assert!(reader_a.agent_ids().unwrap().contains(&draft.id));
 
         let after_a = reader_a.snapshot().unwrap();
         let after_b = reader_b.snapshot().unwrap();

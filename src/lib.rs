@@ -21,6 +21,7 @@ pub mod model;
 pub mod model_transfer;
 pub mod orchestrator;
 mod python_runtime;
+pub mod session_terminal;
 pub mod terminal;
 pub mod termination;
 mod tool_result_truncation;

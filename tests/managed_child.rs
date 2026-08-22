@@ -226,6 +226,46 @@ fn managed_child_initializes_authenticates_reports_identity_and_shuts_down() {
         .json()
         .unwrap();
     assert_eq!(sync["ok"], true);
+    let agent_id = sync["snapshot"]["agents"][0]["id"].as_str().unwrap();
+    assert_eq!(
+        client
+            .post(format!("{address}/api/session-terminal/{agent_id}/read"))
+            .json(&serde_json::json!({"cursor": null}))
+            .send()
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let native_terminal: serde_json::Value = client
+        .post(format!("{address}/api/session-terminal/{agent_id}/read"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            bearer_header_value(&launch.token),
+        )
+        .json(&serde_json::json!({"cursor": null}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(native_terminal["ok"], true);
+    assert!(native_terminal["events"].is_array());
+    assert_eq!(
+        client
+            .post(format!(
+                "{address}/api/session-terminal/{agent_id}/read?cursor=0"
+            ))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                bearer_header_value(&launch.token),
+            )
+            .json(&serde_json::json!({"cursor": null}))
+            .send()
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
     assert!(workspace_config_path(&workspace).exists());
     assert!(workspace_edb_path(&workspace).exists());
 

@@ -144,16 +144,18 @@ fn serve(mut request: Request, gateway: Arc<Gateway>, auth: Arc<WebSessionAuth>)
 type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
 
 fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Result<HttpResponse> {
-    let path = request
-        .url()
-        .split('?')
-        .next()
-        .unwrap_or(request.url())
-        .to_owned();
+    let url = request.url();
+    let has_query = url.contains('?');
+    let path = url.split('?').next().unwrap_or(url).to_owned();
     if request.method() == &Method::Get
         && let Some(font) = crate::webui::shared_katex_font(&path)
     {
         return Ok(bytes_response("font/woff2", font));
+    }
+    if request.method() == &Method::Get
+        && let Some((content_type, content)) = crate::webui::shared_session_terminal_asset(&path)
+    {
+        return Ok(text_response(content_type, content));
     }
     match (request.method(), path.as_str()) {
         (&Method::Get, "/") => return Ok(text_response("text/html; charset=utf-8", INDEX_HTML)),
@@ -290,7 +292,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 }
             }
         }
-        (method, path) if workspace_proxy_path(path).is_some() => {
+        (method, path) if !has_query && workspace_proxy_path(path).is_some() => {
             let (workspace_id, child_path) = workspace_proxy_path(path).unwrap();
             let method = match method {
                 &Method::Get => reqwest::Method::GET,

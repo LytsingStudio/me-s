@@ -9,6 +9,7 @@ use std::{
     time::Duration,
 };
 
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
@@ -20,6 +21,7 @@ use crate::{
         MANAGED_AUTH_HEADER, MANAGED_BIND_ADDRESS, MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH,
         MANAGED_SHUTDOWN_PATH, ManagedReadyResponse, bearer_token_matches,
     },
+    session_terminal::{MAX_INPUT_BYTES, SessionTerminalOperation, SessionTerminalRegistry},
     turn_history,
     ui_backend::{
         CHAT_ACTIVITY_TOOL_NAMES, CHAT_HIDDEN_TOOL_NAMES, CHAT_HIDDEN_TOOL_PREFIXES, UiBackend,
@@ -49,6 +51,11 @@ const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
 const KATEX_CSS: &str = include_str!("webui/vendor/katex.min.css");
 const STYLE_CSS: &str = include_str!("webui/style.css");
+const SESSION_TERMINAL_JS: &str = include_str!("webui/session-terminal.js");
+const XTERM_JS: &str = include_str!("webui/vendor/xterm.js");
+const XTERM_ADDON_FIT_JS: &str = include_str!("webui/vendor/xterm-addon-fit.js");
+const XTERM_ADDON_UNICODE11_JS: &str = include_str!("webui/vendor/xterm-addon-unicode11.js");
+const XTERM_CSS: &str = include_str!("webui/vendor/xterm.css");
 const KATEX_FONTS: &[(&str, &[u8])] = &[
     (
         "/fonts/KaTeX_AMS-Regular.woff2",
@@ -137,9 +144,22 @@ pub(crate) fn shared_katex_font(path: &str) -> Option<&'static [u8]> {
         .find_map(|(candidate, content)| (*candidate == path).then_some(*content))
 }
 
+pub(crate) fn shared_session_terminal_asset(path: &str) -> Option<(&'static str, &'static str)> {
+    match path {
+        "/session-terminal.js" => Some(("text/javascript; charset=utf-8", SESSION_TERMINAL_JS)),
+        "/xterm.js" => Some(("text/javascript; charset=utf-8", XTERM_JS)),
+        "/xterm-addon-fit.js" => Some(("text/javascript; charset=utf-8", XTERM_ADDON_FIT_JS)),
+        "/xterm-addon-unicode11.js" => {
+            Some(("text/javascript; charset=utf-8", XTERM_ADDON_UNICODE11_JS))
+        }
+        "/xterm.css" => Some(("text/css; charset=utf-8", XTERM_CSS)),
+        _ => None,
+    }
+}
 const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BATCH_BYTES: usize = 512 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
+const MAX_SESSION_TERMINAL_BODY_BYTES: usize = 128 * 1024;
 const SESSION_COOKIE: &str = "me_webui_session";
 
 pub struct WebUiServer {
@@ -147,6 +167,7 @@ pub struct WebUiServer {
     port: u16,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    _session_terminals: Arc<SessionTerminalRegistry>,
 }
 
 impl WebUiServer {
@@ -239,21 +260,42 @@ fn start_with_server(
         None => format!("http://{DEFAULT_BIND_ADDRESS}:{port}"),
     };
     let backend: Arc<dyn UiBackend> = Arc::new(backend);
+    let initial = backend.snapshot()?;
+    let session_terminals = Arc::new(SessionTerminalRegistry::new(
+        &initial.environment.workspace,
+    )?);
+    session_terminals.reconcile(initial.agent_ids())?;
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
     let auth = Arc::new(WebSessionAuth::new(passkey)?);
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
+    let worker_session_terminals = Arc::clone(&session_terminals);
     let worker = thread::Builder::new()
         .name("me-webui".into())
         .spawn(move || {
+            let mut last_reconcile_error = None;
             while !worker_shutdown.load(Ordering::Acquire) {
+                let reconcile = backend
+                    .agent_ids()
+                    .and_then(|agent_ids| worker_session_terminals.reconcile(agent_ids));
+                match reconcile {
+                    Ok(()) => last_reconcile_error = None,
+                    Err(error) => {
+                        let error = error.to_string();
+                        if last_reconcile_error.as_deref() != Some(error.as_str()) {
+                            eprintln!("warning: SessionTerminal reconcile failed: {error}");
+                            last_reconcile_error = Some(error);
+                        }
+                    }
+                }
                 match server.recv_timeout(Duration::from_millis(100)) {
                     Ok(Some(request)) => {
                         let backend = Arc::clone(&backend);
                         let commands = Arc::clone(&commands);
                         let auth = Arc::clone(&auth);
                         let managed = Arc::clone(&managed);
+                        let session_terminals = Arc::clone(&worker_session_terminals);
                         let _ = thread::Builder::new()
                             .name("me-webui-request".into())
                             .spawn(move || {
@@ -263,6 +305,7 @@ fn start_with_server(
                                     commands.as_ref(),
                                     auth.as_ref(),
                                     managed.as_ref().as_ref(),
+                                    session_terminals.as_ref(),
                                 );
                             });
                     }
@@ -279,6 +322,7 @@ fn start_with_server(
         port,
         shutdown,
         worker: Some(worker),
+        _session_terminals: session_terminals,
     })
 }
 
@@ -444,10 +488,11 @@ fn serve(
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
     managed: Option<&ManagedWebAccess>,
+    session_terminals: &SessionTerminalRegistry,
 ) {
     let result = match managed {
-        Some(managed) => route_managed(&mut request, backend, commands, managed),
-        None => route(&mut request, backend, commands, auth),
+        Some(managed) => route_managed(&mut request, backend, commands, managed, session_terminals),
+        None => route(&mut request, backend, commands, auth, session_terminals),
     };
     let response = match result {
         Ok(response) => response,
@@ -466,6 +511,7 @@ fn route_managed(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     managed: &ManagedWebAccess,
+    session_terminals: &SessionTerminalRegistry,
 ) -> Result<HttpResponse> {
     let authorization = request
         .headers()
@@ -502,10 +548,13 @@ fn route_managed(
         (&Method::Post, "/api/sync")
         | (&Method::Get, "/api/snapshot")
         | (&Method::Post, "/api/command") => {
-            operational_route(request, backend, commands, path, query)
+            operational_route(request, backend, commands, session_terminals, path, query)
         }
         (&Method::Get, path) if path.starts_with("/api/deletion-blocker/") => {
-            operational_route(request, backend, commands, path, query)
+            operational_route(request, backend, commands, session_terminals, path, query)
+        }
+        (&Method::Post, path) if query.is_none() && path.starts_with("/api/session-terminal/") => {
+            operational_route(request, backend, commands, session_terminals, path, query)
         }
         _ => Ok(json_response(
             StatusCode(404),
@@ -519,6 +568,7 @@ fn route(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
+    session_terminals: &SessionTerminalRegistry,
 ) -> Result<HttpResponse> {
     let url = request.url().to_owned();
     let (path, query) = split_url(&url);
@@ -526,6 +576,11 @@ fn route(
         && let Some((_, font)) = KATEX_FONTS.iter().find(|(font_path, _)| *font_path == path)
     {
         return Ok(bytes_response("font/woff2", font));
+    }
+    if request.method() == &Method::Get
+        && let Some((content_type, content)) = shared_session_terminal_asset(path)
+    {
+        return Ok(text_response(content_type, content));
     }
     match (request.method(), path) {
         (&Method::Get, "/") => {
@@ -571,13 +626,14 @@ fn route(
     if !auth.authorized(request_cookie(request, SESSION_COOKIE)) {
         return Ok(unauthorized_response());
     }
-    operational_route(request, backend, commands, path, query)
+    operational_route(request, backend, commands, session_terminals, path, query)
 }
 
 fn operational_route(
     request: &mut Request,
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
+    session_terminals: &SessionTerminalRegistry,
     path: &str,
     query: Option<&str>,
 ) -> Result<HttpResponse> {
@@ -628,12 +684,189 @@ fn operational_route(
         (&Method::Get, path) if path.starts_with("/api/terminal/") => {
             terminal_frame_response(backend, path)
         }
+        (&Method::Post, path) if query.is_none() && path.starts_with("/api/session-terminal/") => {
+            session_terminal_response(request, session_terminals, path)
+        }
         (&Method::Post, "/api/command") => command_response(request, commands),
         _ => Ok(json_response(
             StatusCode(404),
             &json!({"ok": false, "error": "not found"}),
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionTerminalReadRequest {
+    cursor: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionTerminalInputRequest {
+    data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SessionTerminalResizeRequest {
+    cols: u16,
+    rows: u16,
+}
+
+fn session_terminal_response(
+    request: &mut Request,
+    session_terminals: &SessionTerminalRegistry,
+    path: &str,
+) -> Result<HttpResponse> {
+    let Some(rest) = path.strip_prefix("/api/session-terminal/") else {
+        return Ok(json_response(
+            StatusCode(404),
+            &json!({"ok": false, "error": "not found"}),
+        ));
+    };
+    let Some((agent_id, action)) = rest.split_once('/') else {
+        return Ok(json_response(
+            StatusCode(404),
+            &json!({"ok": false, "error": "not found"}),
+        ));
+    };
+    if agent_id.is_empty()
+        || action.is_empty()
+        || action.contains('/')
+        || !matches!(action, "read" | "input" | "resize")
+    {
+        return Ok(json_response(
+            StatusCode(404),
+            &json!({"ok": false, "error": "not found"}),
+        ));
+    }
+    let agent_id = match AgentId::new(agent_id) {
+        Ok(agent_id) => agent_id,
+        Err(_) => {
+            return Ok(json_response(
+                StatusCode(404),
+                &json!({"ok": false, "error": "not found"}),
+            ));
+        }
+    };
+    let content_type = request
+        .headers()
+        .iter()
+        .find(|header| header.field.equiv("Content-Type"))
+        .map(|header| header.value.as_str());
+    if content_type.is_none_or(|value| !value.starts_with("application/json")) {
+        return Ok(json_response(
+            StatusCode(415),
+            &json!({"ok": false, "error": "Content-Type must be application/json"}),
+        ));
+    }
+    let length = request.body_length().unwrap_or(0);
+    if length > MAX_SESSION_TERMINAL_BODY_BYTES {
+        return Ok(json_response(
+            StatusCode(413),
+            &json!({"ok": false, "error": "SessionTerminal request body is too large"}),
+        ));
+    }
+    let mut body = Vec::with_capacity(length.min(MAX_SESSION_TERMINAL_BODY_BYTES));
+    request
+        .as_reader()
+        .take((MAX_SESSION_TERMINAL_BODY_BYTES + 1) as u64)
+        .read_to_end(&mut body)?;
+    if body.len() > MAX_SESSION_TERMINAL_BODY_BYTES {
+        return Ok(json_response(
+            StatusCode(413),
+            &json!({"ok": false, "error": "SessionTerminal request body is too large"}),
+        ));
+    }
+
+    match action {
+        "read" => {
+            let input: SessionTerminalReadRequest = match serde_json::from_slice(&body) {
+                Ok(input) => input,
+                Err(error) => {
+                    return Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok": false, "error": format!("invalid SessionTerminal read request: {error}")}),
+                    ));
+                }
+            };
+            let Some(read) = session_terminals.read(&agent_id, input.cursor)? else {
+                return Ok(json_response(
+                    StatusCode(404),
+                    &json!({"ok": false, "error": "session terminal not found"}),
+                ));
+            };
+            let mut payload = serde_json::to_value(read)?;
+            payload
+                .as_object_mut()
+                .expect("SessionTerminal read serializes as an object")
+                .insert("ok".into(), serde_json::Value::Bool(true));
+            Ok(json_response(StatusCode(200), &payload))
+        }
+        "input" => {
+            let input: SessionTerminalInputRequest = match serde_json::from_slice(&body) {
+                Ok(input) => input,
+                Err(error) => {
+                    return Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok": false, "error": format!("invalid SessionTerminal input request: {error}")}),
+                    ));
+                }
+            };
+            let data = match BASE64.decode(input.data.as_bytes()) {
+                Ok(data) if data.len() <= MAX_INPUT_BYTES => data,
+                Ok(_) => {
+                    return Ok(json_response(
+                        StatusCode(413),
+                        &json!({"ok": false, "error": "SessionTerminal input is too large"}),
+                    ));
+                }
+                Err(error) => {
+                    return Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok": false, "error": format!("invalid SessionTerminal input: {error}")}),
+                    ));
+                }
+            };
+            Ok(session_terminal_operation_response(
+                session_terminals.input(&agent_id, &data)?,
+            ))
+        }
+        "resize" => {
+            let input: SessionTerminalResizeRequest = match serde_json::from_slice(&body) {
+                Ok(input) => input,
+                Err(error) => {
+                    return Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok": false, "error": format!("invalid SessionTerminal resize request: {error}")}),
+                    ));
+                }
+            };
+            Ok(session_terminal_operation_response(
+                session_terminals.resize(&agent_id, input.cols, input.rows)?,
+            ))
+        }
+        _ => unreachable!("SessionTerminal action was validated"),
+    }
+}
+
+fn session_terminal_operation_response(operation: SessionTerminalOperation) -> HttpResponse {
+    let status = if !operation.found {
+        StatusCode(404)
+    } else if !operation.accepted {
+        StatusCode(409)
+    } else {
+        StatusCode(200)
+    };
+    json_response(
+        status,
+        &json!({
+            "ok": operation.accepted,
+            "state": operation.state,
+            "error": operation.error,
+        }),
+    )
 }
 
 fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpResponse> {
@@ -1234,6 +1467,10 @@ mod tests {
     impl UiBackend for SnapshotBackend {
         fn snapshot(&self) -> Result<UiSnapshot> {
             Ok(self.0.clone())
+        }
+
+        fn agent_ids(&self) -> Result<Vec<AgentId>> {
+            Ok(self.0.agent_ids())
         }
 
         fn api_activity(&self, _agent_id: &AgentId) -> Result<UiApiActivity> {
@@ -2211,6 +2448,66 @@ mod tests {
     }
 
     #[test]
+    fn session_terminal_reconciles_agent_lifecycle_without_terminal_requests() {
+        let directory = workspace();
+        let workspace = Workspace::open(
+            &directory,
+            WorkspaceConfig {
+                version: 2,
+                model: "test".into(),
+                effort: "unset".into(),
+                orchestrator: "chatbot".into(),
+            },
+            vec![model()],
+        )
+        .unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
+        let lifecycle = commands.clone();
+        let server = start_from(backend, commands, 0, None).unwrap();
+        let address = server
+            .address()
+            .replace("http://0.0.0.0:", "http://127.0.0.1:");
+        let client = reqwest::blocking::Client::new();
+
+        let UiCommandReceipt::AgentCreated(created) = lifecycle
+            .submit(UiCommand::AddAgent {
+                orchestrator: "chatbot".into(),
+            })
+            .unwrap()
+        else {
+            panic!("AddAgent did not create a session");
+        };
+
+        let created_id = created.id;
+
+        // No terminal or snapshot request drives this creation. The WebUiServer
+        // lifecycle loop must observe the Workspace handle on its own.
+        thread::sleep(Duration::from_millis(350));
+        let read = || {
+            client
+                .post(format!(
+                    "{address}/api/session-terminal/{}/read",
+                    created_id
+                ))
+                .json(&json!({"cursor": null}))
+                .send()
+                .unwrap()
+        };
+        assert_eq!(read().status(), reqwest::StatusCode::OK);
+
+        lifecycle
+            .submit(UiCommand::DeleteAgent {
+                agent_id: created_id.clone(),
+            })
+            .unwrap();
+        thread::sleep(Duration::from_millis(350));
+        assert_eq!(read().status(), reqwest::StatusCode::NOT_FOUND);
+
+        drop(server);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
     fn passkey_protects_every_operational_api_with_an_http_only_session() {
         let directory = workspace();
         let workspace = Workspace::open(
@@ -2225,6 +2522,15 @@ mod tests {
         )
         .unwrap();
         let (backend, commands) = workspace_ui_ports(workspace);
+        let UiCommandReceipt::AgentCreated(session_agent) = commands
+            .submit(UiCommand::AddAgent {
+                orchestrator: "chatbot".into(),
+            })
+            .unwrap()
+        else {
+            panic!("AddAgent did not create a session");
+        };
+        let session_agent = session_agent.id;
         let server = start_from(backend, commands, 0, Some("correct horse")).unwrap();
         let address = server
             .address()
@@ -2234,6 +2540,22 @@ mod tests {
         assert!(
             client
                 .get(format!("{address}/"))
+                .send()
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .get(format!("{address}/xterm.js"))
+                .send()
+                .unwrap()
+                .status()
+                .is_success()
+        );
+        assert!(
+            client
+                .get(format!("{address}/xterm-addon-unicode11.js"))
                 .send()
                 .unwrap()
                 .status()
@@ -2271,6 +2593,17 @@ mod tests {
             client
                 .post(format!("{address}/api/command"))
                 .json(&json!({"command": "add_agent"}))
+                .send()
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(format!(
+                    "{address}/api/session-terminal/{session_agent}/read"
+                ))
+                .json(&json!({"cursor": null}))
                 .send()
                 .unwrap()
                 .status(),
@@ -2320,6 +2653,24 @@ mod tests {
                 .status()
                 .is_success()
         );
+        let native_terminal: serde_json::Value = client
+            .post(format!(
+                "{address}/api/session-terminal/{session_agent}/read"
+            ))
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&json!({"cursor": null}))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(native_terminal["ok"], true);
+        assert!(matches!(
+            native_terminal["state"].as_str(),
+            Some("running" | "exited" | "unavailable")
+        ));
+        assert!(native_terminal["events"].is_array());
         let synchronized: serde_json::Value = client
             .post(format!("{address}/api/sync"))
             .header(reqwest::header::COOKIE, cookie)

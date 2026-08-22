@@ -7,6 +7,7 @@
   <title>ME</title>
   <script src="/theme.js"></script>
   <link rel="stylesheet" href="/katex.css">
+  <link rel="stylesheet" href="/xterm.css">
   <link rel="stylesheet" href="/style.css">
   <link rel="stylesheet" href="/theme.css">
 </head>
@@ -56,6 +57,7 @@
         </button>
         <button data-view="chat" class="active">聊天</button>
         <button data-view="workmap">WorkMap</button>
+        <button data-view="session-terminal">终端</button>
         <span id="terminal-tabs"></span>
       </nav>
 
@@ -87,6 +89,14 @@
           <div><strong>WorkMap</strong><span id="workmap-count"></span></div>
         </div>
         <div id="workmap-content" class="document-view"></div>
+      </section>
+
+      <section id="session-terminal-view" class="view session-terminal-view" aria-label="终端">
+        <div class="session-terminal-toolbar">
+          <span id="session-terminal-shell" class="session-terminal-shell">正在启动终端</span>
+          <span id="session-terminal-state" class="session-terminal-state" role="status">正在连接</span>
+        </div>
+        <div id="session-terminal-screen" class="session-terminal-screen"></div>
       </section>
 
       <section id="terminal-view" class="view terminal-view">
@@ -173,6 +183,10 @@
   <script src="/katex.js"></script>
   <script src="/markdown.js"></script>
   <script src="/transcript.js"></script>
+  <script src="/xterm.js"></script>
+  <script src="/xterm-addon-fit.js"></script>
+  <script src="/xterm-addon-unicode11.js"></script>
+  <script src="/session-terminal.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>
