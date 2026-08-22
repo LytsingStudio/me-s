@@ -88,9 +88,9 @@ const elements = {
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
   environment: $("#environment-footer"),
+  sidebarScroll: $(".sidebar-scroll"),
   agents: $("#agent-list"),
   addAgent: $("#add-agent"),
-  mobileDeleteAgent: $("#mobile-delete-agent"),
   mobileSidebarToggle: $("#mobile-sidebar-toggle"),
   mobileSidebarBackdrop: $("#mobile-sidebar-backdrop"),
   tabs: $("#view-tabs"),
@@ -158,6 +158,36 @@ const elements = {
   compactSummaryContent: $("#compact-summary-content"),
   toasts: $("#toast-region"),
 };
+
+function bindSidebarScrollbar(element, runtime = {}) {
+  if (!element?.addEventListener) return () => {};
+  const schedule = runtime.setTimeout || globalThis.setTimeout.bind(globalThis);
+  const cancel = runtime.clearTimeout || globalThis.clearTimeout.bind(globalThis);
+  const delay = runtime.delay ?? 900;
+  let hideTimer = null;
+  const hide = () => {
+    if (hideTimer !== null) cancel(hideTimer);
+    hideTimer = null;
+    element.classList.remove("scrollbar-active");
+  };
+  const reveal = () => {
+    element.classList.add("scrollbar-active");
+    if (hideTimer !== null) cancel(hideTimer);
+    hideTimer = schedule(() => {
+      hideTimer = null;
+      element.classList.remove("scrollbar-active");
+    }, delay);
+  };
+  element.addEventListener("scroll", reveal, { passive: true });
+  element.addEventListener("pointermove", reveal, { passive: true });
+  element.addEventListener("pointerleave", hide, { passive: true });
+  return () => {
+    hide();
+    element.removeEventListener("scroll", reveal);
+    element.removeEventListener("pointermove", reveal);
+    element.removeEventListener("pointerleave", hide);
+  };
+}
 
 let sessionTerminalIdentityKey = null;
 let sessionTerminalController = null;
@@ -1573,7 +1603,6 @@ function renderConnection() {
 }
 
 function renderAgents() {
-  if (state.agentMenu && !state.snapshot.agents.some((agent) => agent.id === state.agentMenu.agentId)) closeAgentMenu();
   const agents = state.snapshot.agents;
   if (!agents.length) {
     if (!elements.agents.querySelector(":scope > .empty-state")) {
@@ -1587,8 +1616,6 @@ function renderAgents() {
     const summary = state.stores.get(agent.id)?.summary;
     const active = API_ACTIVE.has(summary?.apiState);
     const label = agent.title || agent.id;
-    const secondary = [agent.orchestrator === "worker-agent" ? "Worker" : agent.kind === "sub-agent" ? "子会话" : null, summary?.model]
-      .filter(Boolean).join(" · ") || "新会话";
     let row = elements.agents.children[index];
     if (!row || row.dataset.agentRow !== agent.id) {
       while (elements.agents.children.length > index) elements.agents.lastElementChild.remove();
@@ -1596,42 +1623,33 @@ function renderAgents() {
       elements.agents.append(row);
     }
     row.classList.toggle("active", agent.id === state.selectedAgent);
-    const item = row.querySelector(".agent-item");
-    const actions = row.querySelector(".agent-actions");
-    item.dataset.agent = agent.id;
-    actions.dataset.agentMenu = agent.id;
     row.querySelector(".agent-dot").classList.toggle("active", active);
-    const title = row.querySelector(".agent-label strong");
-    const detail = row.querySelector(".agent-label span");
+    const title = row.querySelector(".agent-label");
     if (title.textContent !== label) title.textContent = label;
-    if (detail.textContent !== secondary) detail.textContent = secondary;
-    actions.setAttribute("aria-label", `打开 ${label} 的操作菜单`);
+    const deleteButton = row.querySelector(".agent-delete");
+    deleteButton.setAttribute("aria-label", `删除 ${label}`);
+    deleteButton.title = `删除 ${label}`;
   }
   while (elements.agents.children.length > agents.length) elements.agents.lastElementChild.remove();
-  if (state.agentMenu) {
-    const trigger = [...elements.agents.querySelectorAll("[data-agent-menu]")]
-      .find((button) => button.dataset.agentMenu === state.agentMenu.agentId);
-    if (trigger) {
-      state.agentMenu.trigger = trigger;
-      trigger.setAttribute("aria-expanded", "true");
-    } else closeAgentMenu();
-  }
 }
 
 function createAgentRow(agent) {
   const template = document.createElement("template");
   template.innerHTML = `<div class="agent-row" data-agent-row="${escapeAttr(agent.id)}">
     <button class="agent-item" type="button" data-agent="${escapeAttr(agent.id)}">
-      <span class="agent-dot"></span>
-      <span class="agent-label"><strong></strong><span></span></span>
+      <span class="agent-dot" aria-hidden="true"></span>
+      <span class="agent-label"></span>
     </button>
-    <button class="agent-actions" type="button" data-agent-menu="${escapeAttr(agent.id)}" aria-haspopup="menu" aria-expanded="false">···</button>
+    <button class="agent-delete" type="button" data-agent-delete="${escapeAttr(agent.id)}" title="删除会话" aria-label="删除会话">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>
+    </button>
   </div>`;
   const row = template.content.firstElementChild;
   row.querySelector(".agent-item").addEventListener("click", (event) => selectAgent(event.currentTarget.dataset.agent));
-  row.querySelector(".agent-actions").addEventListener("click", (event) => {
+  row.querySelector(".agent-delete").addEventListener("click", (event) => {
     event.stopPropagation();
-    openAgentMenu(event.currentTarget, event.currentTarget.dataset.agentMenu);
+    closeMobileSidebar();
+    void openDeleteAgent(agent.id);
   });
   return row;
 }
@@ -1707,10 +1725,7 @@ function showView(view) {
   if (state.view.kind === "terminal") void renderTerminal();
 }
 
-function renderAgentControls() {
-  const meta = agentMeta();
-  elements.mobileDeleteAgent.disabled = !meta;
-}
+function renderAgentControls() {}
 
 function openMobileSidebar() {
   document.body.classList.add("mobile-sidebar-open");
@@ -3385,6 +3400,7 @@ function renderMarkdown(source) {
 elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.addEventListener("click", () => {
   showView({ kind: button.dataset.view, sessionId: null });
 }));
+bindSidebarScrollbar(elements.sidebarScroll);
 elements.objective.addEventListener("click", toggleObjectiveDisclosure);
 elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
@@ -3401,7 +3417,6 @@ elements.connectionRetry.addEventListener("click", () => {
   startHttpPolling();
 });
 elements.addAgent.addEventListener("click", () => { closeMobileSidebar(); openAddAgent(); });
-elements.mobileDeleteAgent.addEventListener("click", () => { closeMobileSidebar(); openDeleteAgent(); });
 elements.mobileSidebarToggle.addEventListener("click", openMobileSidebar);
 elements.mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);
 if (typeof PORTRAIT_LAYOUT.addEventListener === "function") {

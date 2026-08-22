@@ -29,6 +29,7 @@ const state = {
   gatewayRefreshInFlight: false,
   lastNoticeId: 0,
   workspaceMenu: null,
+  expandedWorkspaces: new Set(),
   snapshot: {
     revision: 0, environment: null, agents: [], models: [], orchestrators: [], default_orchestrator: null,
     tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] },
@@ -79,6 +80,8 @@ const state = {
   pageClosing: false,
 };
 
+let workspacePanelSequence = 0;
+
 const $ = (selector) => document.querySelector(selector);
 const elements = {
   app: $("#app"),
@@ -94,13 +97,13 @@ const elements = {
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
   environment: $("#environment-footer"),
+  sidebarScroll: $(".sidebar-scroll"),
   workspaceList: $("#workspace-list"),
   createWorkspace: $("#create-workspace"),
   openWorkspace: $("#open-workspace"),
   openSettings: $("#open-settings"),
   agents: $("#agent-list"),
   addAgent: $("#add-agent"),
-  mobileDeleteAgent: $("#mobile-delete-agent"),
   mobileSidebarToggle: $("#mobile-sidebar-toggle"),
   mobileSidebarBackdrop: $("#mobile-sidebar-backdrop"),
   tabs: $("#view-tabs"),
@@ -170,6 +173,36 @@ const elements = {
   compactSummaryContent: $("#compact-summary-content"),
   toasts: $("#toast-region"),
 };
+
+function bindSidebarScrollbar(element, runtime = {}) {
+  if (!element?.addEventListener) return () => {};
+  const schedule = runtime.setTimeout || globalThis.setTimeout.bind(globalThis);
+  const cancel = runtime.clearTimeout || globalThis.clearTimeout.bind(globalThis);
+  const delay = runtime.delay ?? 900;
+  let hideTimer = null;
+  const hide = () => {
+    if (hideTimer !== null) cancel(hideTimer);
+    hideTimer = null;
+    element.classList.remove("scrollbar-active");
+  };
+  const reveal = () => {
+    element.classList.add("scrollbar-active");
+    if (hideTimer !== null) cancel(hideTimer);
+    hideTimer = schedule(() => {
+      hideTimer = null;
+      element.classList.remove("scrollbar-active");
+    }, delay);
+  };
+  element.addEventListener("scroll", reveal, { passive: true });
+  element.addEventListener("pointermove", reveal, { passive: true });
+  element.addEventListener("pointerleave", hide, { passive: true });
+  return () => {
+    hide();
+    element.removeEventListener("scroll", reveal);
+    element.removeEventListener("pointermove", reveal);
+    element.removeEventListener("pointerleave", hide);
+  };
+}
 
 let sessionTerminalIdentityKey = null;
 let sessionTerminalController = null;
@@ -1756,19 +1789,29 @@ function renderAgents() {
   const workspaces = state.gateway.workspaces || [];
   const chat = workspaces.find((workspace) => workspace.builtin);
   const external = workspaces.filter((workspace) => !workspace.builtin);
-  if (state.agentMenu && !state.snapshot.agents.some((agent) => agent.id === state.agentMenu.agentId)) closeAgentMenu();
-  for (let index = 0; index < external.length; index += 1) {
-    const workspace = external[index];
-    let group = elements.workspaceList.children[index];
-    if (!group || group.dataset.workspaceGroup !== workspace.id) {
-      while (elements.workspaceList.children.length > index) elements.workspaceList.lastElementChild.remove();
-      group = createWorkspaceGroup(workspace);
-      elements.workspaceList.append(group);
-    }
-    updateWorkspaceGroup(group, workspace);
-    renderWorkspaceAgentRows(group.querySelector("[data-workspace-agents]"), workspace.id);
+  const externalIds = new Set(external.map((workspace) => workspace.id));
+  for (const workspaceId of state.expandedWorkspaces) {
+    if (!externalIds.has(workspaceId)) state.expandedWorkspaces.delete(workspaceId);
   }
-  while (elements.workspaceList.children.length > external.length) elements.workspaceList.lastElementChild.remove();
+  if (!external.length) {
+    if (!elements.workspaceList.querySelector(":scope > .empty-state")) {
+      elements.workspaceList.innerHTML = `<div class="empty-state">暂无工作区</div>`;
+    }
+  } else {
+    if (elements.workspaceList.querySelector(":scope > .empty-state")) replaceElementChildren(elements.workspaceList);
+    for (let index = 0; index < external.length; index += 1) {
+      const workspace = external[index];
+      let group = elements.workspaceList.children[index];
+      if (!group || group.dataset.workspaceGroup !== workspace.id) {
+        while (elements.workspaceList.children.length > index) elements.workspaceList.lastElementChild.remove();
+        group = createWorkspaceGroup(workspace);
+        elements.workspaceList.append(group);
+      }
+      updateWorkspaceGroup(group, workspace);
+      renderWorkspaceAgentRows(group.querySelector("[data-workspace-agents]"), workspace.id);
+    }
+    while (elements.workspaceList.children.length > external.length) elements.workspaceList.lastElementChild.remove();
+  }
   renderWorkspaceAgentRows(elements.agents, chat?.id || "chat");
   if (state.workspaceMenu) {
     const trigger = [...elements.workspaceList.querySelectorAll("[data-workspace-menu]")]
@@ -1778,29 +1821,32 @@ function renderAgents() {
       trigger.setAttribute("aria-expanded", "true");
     } else closeWorkspaceMenu();
   }
-  if (state.agentMenu) {
-    const trigger = [...document.querySelectorAll("[data-workspace-id] [data-agent-menu]")]
-      .find((button) => button.closest("[data-workspace-id]")?.dataset.workspaceId === state.workspaceId
-        && button.dataset.agentMenu === state.agentMenu.agentId);
-    if (trigger) {
-      state.agentMenu.trigger = trigger;
-      trigger.setAttribute("aria-expanded", "true");
-    } else closeAgentMenu();
-  }
 }
 
 function createWorkspaceGroup(workspace) {
   const template = document.createElement("template");
   template.innerHTML = `<section class="workspace-group" data-workspace-group="${escapeAttr(workspace.id)}">
     <header class="workspace-row">
-      <button class="workspace-select" type="button" data-workspace-select="${escapeAttr(workspace.id)}"><strong></strong><span></span></button>
+      <button class="workspace-select" type="button" data-workspace-select="${escapeAttr(workspace.id)}" aria-expanded="false">
+        <svg class="workspace-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        <svg class="workspace-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.8 2h9.2l-1.6 8.5H4.4L3.5 7.5Z"/><path d="M4 7.5V5.5h5.2l1.8 2"/></svg>
+        <span class="workspace-name"></span>
+      </button>
       <button class="workspace-add-agent" type="button" data-workspace-add="${escapeAttr(workspace.id)}">＋</button>
       <button class="workspace-actions" type="button" data-workspace-menu="${escapeAttr(workspace.id)}" aria-haspopup="menu" aria-expanded="false">···</button>
     </header>
-    <div class="workspace-agent-list" data-workspace-agents="${escapeAttr(workspace.id)}"></div>
+    <div class="workspace-agent-list" data-workspace-agents="${escapeAttr(workspace.id)}" hidden></div>
   </section>`;
   const group = template.content.firstElementChild;
-  group.querySelector("[data-workspace-select]").addEventListener("click", () => activateWorkspace(workspace.id));
+  const panelId = `workspace-agents-${++workspacePanelSequence}`;
+  group.querySelector("[data-workspace-select]").setAttribute("aria-controls", panelId);
+  group.querySelector("[data-workspace-agents]").id = panelId;
+  group.querySelector("[data-workspace-select]").addEventListener("click", () => {
+    if (state.expandedWorkspaces.has(workspace.id)) state.expandedWorkspaces.delete(workspace.id);
+    else state.expandedWorkspaces.add(workspace.id);
+    updateWorkspaceGroup(group, workspace);
+    if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);
+  });
   group.querySelector("[data-workspace-add]").addEventListener("click", () => {
     activateWorkspace(workspace.id);
     openAddAgent();
@@ -1813,17 +1859,24 @@ function createWorkspaceGroup(workspace) {
 }
 
 function updateWorkspaceGroup(group, workspace) {
-  group.classList.toggle("active", workspace.id === state.workspaceId);
+  const active = workspace.id === state.workspaceId;
+  const expanded = state.expandedWorkspaces.has(workspace.id);
+  group.classList.toggle("active", active);
+  group.classList.toggle("expanded", expanded);
   const select = group.querySelector("[data-workspace-select]");
   const add = group.querySelector("[data-workspace-add]");
   const actions = group.querySelector("[data-workspace-menu]");
-  select.title = workspace.path;
-  const title = select.querySelector("strong");
-  const path = select.querySelector("span");
+  const agents = group.querySelector("[data-workspace-agents]");
+  const title = select.querySelector(".workspace-name");
   if (title.textContent !== workspace.name) title.textContent = workspace.name;
-  if (path.textContent !== workspace.path) path.textContent = workspace.path;
+  select.setAttribute("aria-expanded", String(expanded));
+  select.setAttribute("aria-label", `${expanded ? "折叠" : "展开"} ${workspace.name}`);
+  select.title = `${expanded ? "折叠" : "展开"} ${workspace.name}`;
+  agents.hidden = !expanded;
   add.setAttribute("aria-label", `在 ${workspace.name}中新建会话`);
+  add.title = `在 ${workspace.name}中新建会话`;
   actions.setAttribute("aria-label", `打开 ${workspace.name} 的工作区选项`);
+  actions.title = `打开 ${workspace.name} 的工作区选项`;
 }
 
 function renderWorkspaceAgentRows(container, workspaceId) {
@@ -1852,37 +1905,32 @@ function updateAgentRow(row, agent, workspaceId, bucket) {
   const summary = bucket.stores.get(agent.id)?.summary;
   const active = API_ACTIVE.has(summary?.apiState);
   const label = agent.title || agent.id;
-  const secondary = [agent.orchestrator === "worker-agent" ? "Worker" : agent.kind === "sub-agent" ? "子会话" : null, summary?.model]
-    .filter(Boolean).join(" · ") || "新会话";
   row.classList.toggle("active", workspaceId === state.workspaceId && agent.id === state.selectedAgent);
   row.querySelector(".agent-dot").classList.toggle("active", active);
-  const title = row.querySelector(".agent-label strong");
-  const detail = row.querySelector(".agent-label span");
+  const title = row.querySelector(".agent-label");
   if (title.textContent !== label) title.textContent = label;
-  if (detail.textContent !== secondary) detail.textContent = secondary;
-  row.querySelector(".agent-actions").setAttribute("aria-label", `打开 ${label} 的操作菜单`);
+  const deleteButton = row.querySelector(".agent-delete");
+  deleteButton.setAttribute("aria-label", `删除 ${label}`);
+  deleteButton.title = `删除 ${label}`;
 }
 
 function createAgentRow(agent, workspaceId = state.workspaceId) {
   const template = document.createElement("template");
   template.innerHTML = `<div class="agent-row" data-agent-row="${escapeAttr(agent.id)}" data-workspace-id="${escapeAttr(workspaceId)}">
     <button class="agent-item" type="button" data-agent="${escapeAttr(agent.id)}">
-      <span class="agent-dot"></span>
-      <span class="agent-label"><strong></strong><span></span></span>
+      <span class="agent-dot" aria-hidden="true"></span>
+      <span class="agent-label"></span>
     </button>
-    <button class="agent-actions" type="button" data-agent-menu="${escapeAttr(agent.id)}" aria-haspopup="menu" aria-expanded="false">···</button>
+    <button class="agent-delete" type="button" data-agent-delete="${escapeAttr(agent.id)}" title="删除会话" aria-label="删除会话">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>
+    </button>
   </div>`;
   const row = template.content.firstElementChild;
   row.querySelector(".agent-item").addEventListener("click", () => selectWorkspaceAgent(workspaceId, agent.id));
-  row.querySelector(".agent-actions").addEventListener("click", (event) => {
+  row.querySelector(".agent-delete").addEventListener("click", (event) => {
     event.stopPropagation();
     selectWorkspaceAgent(workspaceId, agent.id);
-    requestAnimationFrame(() => {
-      const trigger = [...document.querySelectorAll("[data-workspace-id] [data-agent-menu]")]
-        .find((node) => node.closest("[data-workspace-id]")?.dataset.workspaceId === workspaceId
-          && node.dataset.agentMenu === agent.id);
-      if (trigger) openAgentMenu(trigger, agent.id);
-    });
+    requestAnimationFrame(() => void openDeleteAgent(agent.id));
   });
   return row;
 }
@@ -1965,10 +2013,7 @@ function showView(view) {
   if (state.view.kind === "terminal") void renderTerminal();
 }
 
-function renderAgentControls() {
-  const meta = agentMeta();
-  elements.mobileDeleteAgent.disabled = !meta;
-}
+function renderAgentControls() {}
 
 function openMobileSidebar() {
   document.body.classList.add("mobile-sidebar-open");
@@ -3946,6 +3991,7 @@ function renderMarkdown(source) {
 elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.addEventListener("click", () => {
   showView({ kind: button.dataset.view, sessionId: null });
 }));
+bindSidebarScrollbar(elements.sidebarScroll);
 elements.objective.addEventListener("click", toggleObjectiveDisclosure);
 elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
@@ -3965,7 +4011,6 @@ elements.addAgent.addEventListener("click", () => { closeMobileSidebar(); activa
 elements.createWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("create"); });
 elements.openWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("open"); });
 elements.openSettings.addEventListener("click", () => { closeMobileSidebar(); void openGatewaySettings(); });
-elements.mobileDeleteAgent.addEventListener("click", () => { closeMobileSidebar(); openDeleteAgent(); });
 elements.mobileSidebarToggle.addEventListener("click", openMobileSidebar);
 elements.mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);
 if (typeof PORTRAIT_LAYOUT.addEventListener === "function") {

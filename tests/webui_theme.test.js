@@ -150,8 +150,8 @@ describe("shared WebUI themes", () => {
       expect(sidebarFooter).toContain('class="theme-icon theme-icon-sun"');
       expect(sidebarFooter).toContain('class="theme-icon theme-icon-moon"');
     }
-    expect(singleIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-heading">');
-    expect(gatewayIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-heading workspace-heading">');
+    expect(singleIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-scroll">\n        <div class="sidebar-heading">');
+    expect(gatewayIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-scroll">\n        <section class="sidebar-section workspace-section">');
     for (const styles of [singleStyles, gatewayStyles]) {
       expect(styles).not.toContain(".brand {");
       expect(styles).not.toContain(".brand-copy");
@@ -175,14 +175,17 @@ describe("shared WebUI themes", () => {
     expect(themeStyles.match(/:root\[data-theme=/g)).toHaveLength(18);
   });
 
-  test("keeps gateway chat near the work content and reserves the footer for controls", () => {
+  test("keeps gateway work and chat in one natural scrolling flow above fixed controls", () => {
     const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
     const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    expect(gatewayIndex.indexOf('id="workspace-list"')).toBeLessThan(gatewayIndex.indexOf('class="sidebar-heading chat-heading"'));
+    expect(gatewayIndex.indexOf('id="workspace-list"')).toBeLessThan(gatewayIndex.indexOf('class="sidebar-divider"'));
+    expect(gatewayIndex.indexOf('class="sidebar-divider"')).toBeLessThan(gatewayIndex.indexOf('class="sidebar-heading chat-heading"'));
     expect(gatewayIndex.indexOf('class="sidebar-heading chat-heading"')).toBeLessThan(gatewayIndex.indexOf('<footer class="sidebar-footer">'));
-    expect(gatewayStyles).toContain(".workspace-list { flex: 0 1 auto; max-height: 50%; min-height: 0;");
-    expect(gatewayStyles).not.toContain(".workspace-list { flex: 1 1 auto;");
-    expect(gatewayStyles).toContain("margin-top: auto;");
+    expect(gatewayStyles).toContain(".sidebar-scroll { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto;");
+    expect(gatewayStyles).toContain(".workspace-list { display: grid; grid-auto-rows: max-content;");
+    expect(gatewayStyles).not.toContain("max-height: 50%");
+    expect(gatewayStyles).not.toContain("max-height: 34%");
+    expect(gatewayStyles).toContain(".sidebar-footer { display: flex; min-width: 0; flex: 0 0 auto;");
   });
 
   test("themes common and gateway-only surfaces through semantic tokens", () => {

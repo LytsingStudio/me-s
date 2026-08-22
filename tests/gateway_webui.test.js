@@ -24,6 +24,7 @@ function loadRuntime(relative) {
       objectiveSummaryHtml: typeof objectiveSummaryHtml === "function" ? objectiveSummaryHtml : null,
       objectiveDisclosureAttributes: typeof objectiveDisclosureAttributes === "function" ? objectiveDisclosureAttributes : null,
       objectiveEventActivates: typeof objectiveEventActivates === "function" ? objectiveEventActivates : null,
+      bindSidebarScrollbar: typeof bindSidebarScrollbar === "function" ? bindSidebarScrollbar : null,
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
@@ -303,6 +304,83 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       await second;
     } finally {
       globalThis.fetch = originalFetch;
+    }
+  });
+
+  test("renders compact accessible sidebar rows and status metadata in both WebUIs", () => {
+    const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+
+    for (const [index, source, styles] of [
+      [singleIndex, singleSource, singleStyles],
+      [gatewayIndex, gatewaySource, gatewayStyles],
+    ]) {
+      expect(index).toContain('class="sidebar-scroll"');
+      expect(index).not.toContain('id="mobile-delete-agent"');
+      expect(index).toContain('class="status-model-icon"');
+      expect(index).toContain('class="status-selector status-effort" type="button" aria-haspopup="dialog" title="切换推理强度"><span');
+      expect(index).not.toContain('title="切换推理强度">(<span');
+      expect(source).toContain('class="agent-dot" aria-hidden="true"');
+      expect(source).toContain('class="agent-label"></span>');
+      expect(source).toContain('class="agent-delete"');
+      expect(source).toContain('void openDeleteAgent(agent.id)');
+      expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400;");
+      expect(styles).toContain(".statusbar { contain: layout paint style;");
+      expect(styles).toContain("font-weight: 700; white-space: nowrap;");
+      expect(styles).toContain(".status-model-icon {");
+      expect(styles).toContain(".sidebar-scroll.scrollbar-active");
+    }
+
+    expect(gatewayIndex).toContain('class="sidebar-divider" aria-hidden="true"');
+    expect(gatewaySource).toContain("expandedWorkspaces: new Set()");
+    expect(gatewaySource).toContain('class="workspace-disclosure-icon"');
+    expect(gatewaySource).toContain('class="workspace-folder-icon"');
+    expect(gatewaySource).toContain('class="workspace-name"></span>');
+    expect(gatewaySource).toContain('aria-expanded="false"');
+    expect(gatewaySource).toContain("agents.hidden = !expanded");
+    expect(gatewaySource).not.toContain("select.title = workspace.path");
+    expect(gatewayStyles).toContain(".workspace-name { display: block; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 750;");
+    expect(gatewayStyles).toContain(".sidebar-settings { display: grid; width: 32px; min-width: 32px; height: 32px; flex: 0 0 32px;");
+  });
+
+  test("auto-hides only the themed scrollbar appearance without intercepting scrolling", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      const listeners = new Map();
+      const removed = [];
+      const classes = new Set();
+      let pending = null;
+      const element = {
+        classList: {
+          add(value) { classes.add(value); },
+          remove(value) { classes.delete(value); },
+        },
+        addEventListener(type, listener, options) { listeners.set(type, { listener, options }); },
+        removeEventListener(type, listener) { removed.push([type, listener]); },
+      };
+      const dispose = runtime.bindSidebarScrollbar(element, {
+        delay: 321,
+        setTimeout(callback, delay) { pending = { callback, delay }; return 7; },
+        clearTimeout() { pending = null; },
+      });
+      expect(listeners.get("scroll").options).toEqual({ passive: true });
+      expect(listeners.get("pointermove").options).toEqual({ passive: true });
+      expect(listeners.get("pointerleave").options).toEqual({ passive: true });
+      listeners.get("scroll").listener();
+      expect(classes.has("scrollbar-active")).toBe(true);
+      expect(pending.delay).toBe(321);
+      pending.callback();
+      expect(classes.has("scrollbar-active")).toBe(false);
+      listeners.get("pointermove").listener();
+      expect(classes.has("scrollbar-active")).toBe(true);
+      listeners.get("pointerleave").listener();
+      expect(classes.has("scrollbar-active")).toBe(false);
+      dispose();
+      expect(removed.map(([type]) => type)).toEqual(["scroll", "pointermove", "pointerleave"]);
     }
   });
 });

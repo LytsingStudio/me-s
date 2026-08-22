@@ -2114,8 +2114,9 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_allows_worker_model_and_effort_controls() {
-        assert!(APP_JS.contains("agent.orchestrator === \"worker-agent\" ? \"Worker\""));
+    fn embedded_webui_allows_worker_model_and_effort_controls_without_sidebar_metadata() {
+        assert!(!APP_JS.contains("agent.orchestrator === \"worker-agent\" ? \"Worker\""));
+        assert!(!APP_JS.contains("class=\"agent-secondary\""));
         assert!(APP_JS.contains("可调整模型、推理强度或停止当前任务"));
         assert!(APP_JS.contains("const canChange = canControlRuntime();"));
         assert_eq!(
@@ -2158,15 +2159,15 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_has_targeted_agent_action_menus_with_delete_confirmation() {
-        assert!(INDEX_HTML.contains("id=\"agent-menu\""));
-        assert!(INDEX_HTML.contains("id=\"delete-agent-menu\""));
-        assert!(APP_JS.contains("data-agent-menu="));
-        assert!(APP_JS.contains("function openAgentMenu(trigger, agentId)"));
+    fn embedded_webui_has_targeted_agent_delete_controls_with_confirmation() {
+        assert!(APP_JS.contains("data-agent-delete="));
+        assert!(APP_JS.contains("row.querySelector(\".agent-delete\").addEventListener"));
+        assert!(APP_JS.contains("event.stopPropagation();"));
+        assert!(APP_JS.contains("void openDeleteAgent(agent.id);"));
         assert!(APP_JS.contains("async function openDeleteAgent(agentId = state.selectedAgent)"));
         assert!(APP_JS.contains("openConfirm(\"删除会话？\""));
         assert!(APP_JS.contains("agent_id: agentId"));
-        assert!(STYLE_CSS.contains(".user-message-menu, .agent-menu"));
+        assert!(STYLE_CSS.contains(".agent-delete {"));
     }
 
     #[test]
@@ -2290,7 +2291,9 @@ mod tests {
                 .contains("row.querySelector(\".agent-dot\").classList.toggle(\"active\", active)")
         );
         assert_eq!(
-            APP_JS.matches("<span class=\"agent-dot\"></span>").count(),
+            APP_JS
+                .matches("<span class=\"agent-dot\" aria-hidden=\"true\"></span>")
+                .count(),
             1
         );
         assert!(
