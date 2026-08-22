@@ -136,10 +136,20 @@ describe("shared WebUI themes", () => {
     for (const index of [singleIndex, gatewayIndex]) {
       expect(index.indexOf('<script src="/theme.js"></script>')).toBeLessThan(index.indexOf('href="/style.css"'));
       expect(index.indexOf('href="/style.css"')).toBeLessThan(index.indexOf('href="/theme.css"'));
-      expect(index).toContain('id="theme-cycle" class="brand-mark theme-cycle"');
-      expect(index).toContain('id="theme-mode" class="theme-mode"');
-      expect(index).toContain('class="theme-icon theme-icon-sun"');
-      expect(index).toContain('class="theme-icon theme-icon-moon"');
+      const sidebarHeaderStart = index.indexOf('<header class="brand">');
+      const sidebarHeader = index.slice(sidebarHeaderStart, index.indexOf("</header>", sidebarHeaderStart));
+      const sidebarFooterStart = index.indexOf('<footer class="sidebar-footer">');
+      const sidebarFooter = index.slice(sidebarFooterStart, index.indexOf("</footer>", sidebarFooterStart));
+      expect(sidebarHeader).not.toContain("brand-mark");
+      expect(sidebarHeader).not.toContain('id="theme-cycle"');
+      expect(sidebarHeader).not.toContain('id="theme-mode"');
+      expect(sidebarFooter).toContain('class="sidebar-appearance" role="group" aria-label="外观设置"');
+      expect(sidebarFooter).toContain('id="theme-cycle" class="theme-control theme-cycle"');
+      expect(sidebarFooter).toContain('class="theme-icon theme-icon-shirt"');
+      expect(sidebarFooter).toContain('id="theme-mode" class="theme-control theme-mode"');
+      expect(sidebarFooter.indexOf('id="theme-cycle"')).toBeLessThan(sidebarFooter.indexOf('id="theme-mode"'));
+      expect(sidebarFooter).toContain('class="theme-icon theme-icon-sun"');
+      expect(sidebarFooter).toContain('class="theme-icon theme-icon-moon"');
     }
     for (const app of [singleApp, gatewayApp]) {
       expect(app).toContain("globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode");
@@ -157,6 +167,16 @@ describe("shared WebUI themes", () => {
     expect(themeStyles.match(/:root\[data-theme=/g)).toHaveLength(18);
   });
 
+  test("keeps gateway chat near the work content and reserves the footer for controls", () => {
+    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    expect(gatewayIndex.indexOf('id="workspace-list"')).toBeLessThan(gatewayIndex.indexOf('class="sidebar-heading chat-heading"'));
+    expect(gatewayIndex.indexOf('class="sidebar-heading chat-heading"')).toBeLessThan(gatewayIndex.indexOf('<footer class="sidebar-footer">'));
+    expect(gatewayStyles).toContain(".workspace-list { flex: 0 1 auto; max-height: 50%; min-height: 0;");
+    expect(gatewayStyles).not.toContain(".workspace-list { flex: 1 1 auto;");
+    expect(gatewayStyles).toContain("margin-top: auto;");
+  });
+
   test("themes common and gateway-only surfaces through semantic tokens", () => {
     const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
@@ -165,6 +185,8 @@ describe("shared WebUI themes", () => {
       expect(styles).toContain("background: var(--terminal-bg);");
       expect(styles).toContain("background: var(--modal-backdrop-bg);");
       expect(styles).toContain("background: linear-gradient(135deg, var(--brand-start), var(--brand-mid), var(--brand-end));");
+      expect(styles).toContain(".sidebar-appearance { display: flex;");
+      expect(styles).toContain(".theme-control { display: grid;");
       expect(styles).toContain(".theme-cycle:focus-visible, .theme-mode:focus-visible");
     }
     expect(gatewayStyles).toContain("background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%);");
