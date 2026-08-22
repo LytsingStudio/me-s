@@ -88,8 +88,8 @@ button { color: inherit; }
 .agent-delete { display: grid; width: 32px; height: 32px; flex: 0 0 auto; place-items: center; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--dim); cursor: pointer; }
 .agent-delete svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .agent-delete:hover, .agent-delete:focus-visible { outline: 0; background: var(--danger-bg); color: var(--red); }
-.sidebar-footer { display: flex; min-width: 0; flex: 0 0 auto; align-items: center; gap: 10px; padding: 14px 18px; color: var(--dim); border-top: 1px solid var(--border); font: 12px ui-monospace, monospace; }
-.sidebar-footer > #environment-footer { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%; flex: 0 0 auto; align-items: center; gap: 10px; padding: 14px 18px; color: var(--dim); border-top: 1px solid var(--border); font: 12px ui-monospace, monospace; }
+.sidebar-footer > #environment-footer { min-width: 0; flex: 1 1 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mobile-sidebar-toggle, .mobile-sidebar-backdrop { display: none; }
 .mobile-sidebar-toggle svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; }
 
@@ -266,9 +266,9 @@ button { color: inherit; }
 .status-selector:hover, .status-selector:focus-visible { outline: 0; background: var(--panel-3); color: var(--text); }
 .status-selector:disabled { opacity: .65; cursor: default; }
 .status-selector:disabled:hover { background: transparent; color: inherit; }
-.status-model-selector { display: inline-flex; min-width: 0; align-items: center; gap: 7px; overflow: hidden; color: var(--sand); }
+.status-model-selector { display: inline-flex; min-width: 0; max-width: 100%; align-items: center; gap: 7px; color: var(--sand); }
 .status-model-icon { width: 16px; height: 16px; flex: 0 0 auto; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
-#status-model { display: block; overflow: hidden; text-overflow: ellipsis; }
+#status-model { display: block; min-width: 0; flex: 0 1 auto; padding-right: 2px; overflow: hidden; text-overflow: ellipsis; }
 .status-effort { color: var(--muted); }
 .status-live-tokens { color: var(--cyan); font-variant-numeric: tabular-nums; }
 .status-context-selector { flex: 0 0 auto; margin-left: auto; color: var(--cyan); text-align: right; }

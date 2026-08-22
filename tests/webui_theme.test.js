@@ -185,7 +185,7 @@ describe("shared WebUI themes", () => {
     expect(gatewayStyles).toContain(".workspace-list { display: grid; grid-auto-rows: max-content;");
     expect(gatewayStyles).not.toContain("max-height: 50%");
     expect(gatewayStyles).not.toContain("max-height: 34%");
-    expect(gatewayStyles).toContain(".sidebar-footer { display: flex; min-width: 0; flex: 0 0 auto;");
+    expect(gatewayStyles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%; flex: 0 0 auto;");
   });
 
   test("themes common and gateway-only surfaces through semantic tokens", () => {
@@ -196,8 +196,12 @@ describe("shared WebUI themes", () => {
       expect(styles).toContain("background: var(--terminal-bg);");
       expect(styles).toContain("background: var(--modal-backdrop-bg);");
       expect(styles).toContain("background: linear-gradient(135deg, var(--brand-start), var(--brand-mid), var(--brand-end));");
+      expect(styles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%;");
+      expect(styles).toContain(".sidebar-footer > #environment-footer { min-width: 0; flex: 1 1 0;");
       expect(styles).toContain(".sidebar-appearance { display: flex;");
       expect(styles).toContain(".theme-control { display: grid;");
+      expect(styles).toContain(".status-model-selector { display: inline-flex; min-width: 0; max-width: 100%;");
+      expect(styles).toContain("#status-model { display: block; min-width: 0; flex: 0 1 auto; padding-right: 2px;");
       expect(styles).toContain(".theme-cycle:focus-visible, .theme-mode:focus-visible");
     }
     expect(gatewayStyles).toContain("background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%);");
