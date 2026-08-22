@@ -180,6 +180,23 @@ describe("WebUI transcript bottom follower", () => {
     expect(subject.viewport.scrollTop).toBe(600);
   });
 
+  test("keeps explicit follow locked through programmatic scrollend and late inertia", () => {
+    const subject = harness();
+    scrollAway(subject);
+    subject.follower.follow();
+    subject.flushFrames();
+
+    subject.follower.noteScrollEnd();
+    subject.viewport.scrollTop = 360;
+    subject.follower.noteScroll();
+    expect(subject.viewport.scrollTop).toBe(600);
+
+    subject.flushTimers();
+    subject.viewport.scrollTop = 420;
+    subject.follower.noteScroll();
+    expect(subject.viewport.scrollTop).toBe(600);
+  });
+
   test("recreates the scroll layer without leaking temporary inline styles", () => {
     const operations = [];
     const values = new Map();

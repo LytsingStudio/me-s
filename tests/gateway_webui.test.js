@@ -380,11 +380,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
       expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");
       expect(styles).not.toContain(".agent-row.active { background: var(--agent-selected-bg); box-shadow:");
-      expect(styles).toContain("animation: agent-dot-breathe 4s ease-in-out infinite;");
+      expect(styles).toContain("animation: agent-dot-breathe 3s ease-in-out infinite;");
       expect(styles).toContain("linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%)");
-      expect(styles).toContain("animation: agent-label-sweep 4s ease-in-out infinite;");
-      expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 50%, 100% { opacity: 1; } 25% { opacity: .35; } }");
-      expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 50%, 100% { background-position: 0 0; } }");
+      expect(styles).toContain("animation: agent-label-sweep 3s ease-in-out infinite;");
+      expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
+      expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
       expect(styles).toContain(".statusbar { contain: layout paint style;");
       expect(styles).toContain("font-weight: 700; white-space: nowrap;");
       expect(styles).toContain(".status-model-icon {");

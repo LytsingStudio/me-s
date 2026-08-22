@@ -82,14 +82,10 @@
     function finishSettling() {
       settleTimer = null;
       if (forcing) {
-        if (isNearBottom()) {
-          forcing = false;
-          following = true;
-          notify();
-        } else {
-          scheduleFollow();
-          scheduleSettling();
-        }
+        // A programmatic bottom write can emit scrollend before compositor momentum is finished.
+        // Keep the explicit lock until a new real user gesture calls beginUserInteraction().
+        if (!isNearBottom()) scheduleFollow();
+        notify();
         return;
       }
       if (userScrolling) {
