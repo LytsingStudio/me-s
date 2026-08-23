@@ -4,6 +4,8 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
+require("../src/webui/edb-cache.js");
+
 function loadDraftRuntime(options = {}) {
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");

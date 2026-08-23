@@ -4,6 +4,8 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
+require("../src/webui/edb-cache.js");
+
 function loadToolPresenters() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
   new Function(source)();
@@ -517,7 +519,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(styles).toContain(".message-modal-backdrop .modal > footer { min-height: 72px;");
       expect(styles).toContain(".message-modal-backdrop .modal { width: 100%; min-height: min(280px, calc(86dvh - env(safe-area-inset-top))); }");
     }
-    expect(singleSource).toContain("const messageOnly = modal.choices.length === 0;");
+    expect(singleSource).toContain("const messageOnly = modal.html == null && choices.length === 0;");
     expect(singleSource).toContain('classList.remove("message-modal-backdrop")');
     expect(gatewaySource).toContain("const messageOnly = modal.html == null && !choices.length;");
     expect(gatewaySource).toContain('classList.remove("directory-modal-backdrop", "message-modal-backdrop")');

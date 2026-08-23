@@ -17,7 +17,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
     Result,
-    event::{Event, EventId},
+    event::{Event, EventBase, EventId},
     managed_protocol::{
         MANAGED_AUTH_HEADER, MANAGED_BIND_ADDRESS, MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH,
         MANAGED_SHUTDOWN_PATH, ManagedReadyResponse, bearer_token_matches,
@@ -48,6 +48,7 @@ const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const TOOL_PRESENTERS_JS: &str = include_str!("webui/tool-presenters.js");
+const EDB_CACHE_JS: &str = include_str!("webui/edb-cache.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
@@ -336,6 +337,8 @@ struct SyncRequest {
     selected_agent: Option<String>,
     terminal_session: Option<String>,
     terminal_revision: Option<u64>,
+    #[serde(default)]
+    cache_metadata_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -343,6 +346,19 @@ struct SyncAgentCursor {
     id: String,
     event_count: usize,
     mutation_revision: u64,
+    #[serde(default)]
+    cursor_event_hash: Option<String>,
+}
+
+fn cursor_event_hash_matches(cursor: &SyncAgentCursor, events: &[Event]) -> bool {
+    let Some(expected) = cursor.cursor_event_hash.as_deref() else {
+        return true;
+    };
+    cursor
+        .event_count
+        .checked_sub(1)
+        .and_then(|index| events.get(index))
+        .is_some_and(|event| event.getHash() == expected)
 }
 
 fn sync_state_payload(
@@ -352,6 +368,7 @@ fn sync_state_payload(
     selected_agent: Option<String>,
     terminal_session: Option<String>,
     terminal_revision: Option<u64>,
+    cache_metadata_only: bool,
 ) -> Result<serde_json::Value> {
     let snapshot = backend.snapshot()?;
     let snapshot_changed = snapshot_revision != Some(snapshot.revision);
@@ -366,61 +383,84 @@ fn sync_state_payload(
     let mut event_updates = Vec::new();
     let mut remaining_event_bytes = MAX_EVENT_BATCH_BYTES;
     let mut more_events = false;
-    let mut agent_indexes = (0..snapshot.agents.len()).collect::<Vec<_>>();
-    agent_indexes.sort_by_key(|index| {
-        usize::from(selected_agent.as_ref() != Some(&snapshot.agents[*index].id))
-    });
-    for index in agent_indexes {
-        let agent = &snapshot.agents[index];
-        let cursor = cursors.get(agent.id.as_str());
-        if !snapshot_changed
-            && cursor.is_some_and(|cursor| {
-                cursor.event_count == agent.events.len()
-                    && cursor.mutation_revision == agent.mutation_revision
-            })
-        {
-            continue;
-        }
-        let reset = cursor.is_none_or(|cursor| {
-            cursor.mutation_revision != agent.mutation_revision
-                || cursor.event_count > agent.events.len()
+    if !cache_metadata_only {
+        let mut agent_indexes = (0..snapshot.agents.len()).collect::<Vec<_>>();
+        agent_indexes.sort_by_key(|index| {
+            usize::from(selected_agent.as_ref() != Some(&snapshot.agents[*index].id))
         });
-        let start = if reset {
-            0
-        } else {
-            cursor.map_or(0, |cursor| cursor.event_count)
-        };
-        if !reset && start == agent.events.len() {
-            continue;
+        for index in agent_indexes {
+            let agent = &snapshot.agents[index];
+            let cursor = cursors.get(agent.id.as_str());
+            if !snapshot_changed
+                && cursor.is_some_and(|cursor| {
+                    cursor.event_count == agent.events.len()
+                        && cursor.mutation_revision == agent.mutation_revision
+                        && cursor_event_hash_matches(cursor, &agent.events)
+                })
+            {
+                continue;
+            }
+            let reset = cursor.is_none_or(|cursor| {
+                cursor.mutation_revision != agent.mutation_revision
+                    || cursor.event_count > agent.events.len()
+                    || !cursor_event_hash_matches(cursor, &agent.events)
+            });
+            let start = if reset {
+                0
+            } else {
+                cursor.map_or(0, |cursor| cursor.event_count)
+            };
+            if !reset && start == agent.events.len() {
+                continue;
+            }
+            let available = &agent.events[start..];
+            if available.is_empty() {
+                if reset {
+                    event_updates.push(json!({
+                        "agent_id": agent.id.to_string(),
+                        "reset": true,
+                        "event_count": agent.events.len(),
+                        "mutation_revision": agent.mutation_revision,
+                        "cursor_event_hash": serde_json::Value::Null,
+                        "turn_history_updated": true,
+                        "turn_history": serde_json::Value::Null,
+                        "events": [],
+                    }));
+                }
+                continue;
+            }
+            if remaining_event_bytes == 0 {
+                more_events = true;
+                continue;
+            }
+            let (event_count, encoded_bytes) =
+                event_prefix_within_budget(available, remaining_event_bytes)?;
+            let events = &available[..event_count];
+            remaining_event_bytes = remaining_event_bytes.saturating_sub(encoded_bytes);
+            more_events |= event_count < available.len();
+            let client_event_count = start + event_count;
+            let cursor_event_hash = agent
+                .events
+                .get(client_event_count - 1)
+                .map(EventBase::getHash);
+            let turn_history_updated = turn_history_needs_refresh(reset, start, events);
+            let turn_history = if turn_history_updated && agent.orchestrator_name != "worker-agent"
+            {
+                turn_history::latest_snapshot(&agent.events)?
+            } else {
+                None
+            };
+            event_updates.push(json!({
+                "agent_id": agent.id.to_string(),
+                "reset": reset,
+                "event_count": agent.events.len(),
+                "mutation_revision": agent.mutation_revision,
+                "cursor_event_hash": cursor_event_hash,
+                "turn_history_updated": turn_history_updated,
+                "turn_history": turn_history,
+                "events": events,
+            }));
         }
-        let available = &agent.events[start..];
-        if available.is_empty() {
-            continue;
-        }
-        if remaining_event_bytes == 0 {
-            more_events = true;
-            continue;
-        }
-        let (event_count, encoded_bytes) =
-            event_prefix_within_budget(available, remaining_event_bytes)?;
-        let events = &available[..event_count];
-        remaining_event_bytes = remaining_event_bytes.saturating_sub(encoded_bytes);
-        more_events |= event_count < available.len();
-        let turn_history_updated = turn_history_needs_refresh(reset, start, events);
-        let turn_history = if turn_history_updated && agent.orchestrator_name != "worker-agent" {
-            turn_history::latest_snapshot(&agent.events)?
-        } else {
-            None
-        };
-        event_updates.push(json!({
-            "agent_id": agent.id.to_string(),
-            "reset": reset,
-            "event_count": agent.events.len(),
-            "mutation_revision": agent.mutation_revision,
-            "turn_history_updated": turn_history_updated,
-            "turn_history": turn_history,
-            "events": events,
-        }));
     }
 
     let api_activity = selected_agent
@@ -444,13 +484,15 @@ fn sync_state_payload(
             }
             _ => (false, None),
         };
-    let snapshot_payload = snapshot_changed.then(|| snapshot_metadata(snapshot));
+    let snapshot_payload =
+        snapshot_changed.then(|| snapshot_metadata(snapshot, cache_metadata_only));
     let selected_agent_id = selected_agent.as_ref().map(ToString::to_string);
     Ok(json!({
         "ok": true,
         "type": "state",
         "snapshot": snapshot_payload,
         "event_updates": event_updates,
+        "cache_metadata_only": cache_metadata_only,
         "more_events": more_events,
         "selected_agent": selected_agent_id,
         "api_activity": {
@@ -604,6 +646,12 @@ fn route(
             return Ok(text_response(
                 "text/javascript; charset=utf-8",
                 TOOL_PRESENTERS_JS,
+            ));
+        }
+        (&Method::Get, "/edb-cache.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                EDB_CACHE_JS,
             ));
         }
         (&Method::Get, "/markdown.js") => {
@@ -931,6 +979,7 @@ fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpR
         sync.selected_agent,
         sync.terminal_session,
         sync.terminal_revision,
+        sync.cache_metadata_only,
     )?;
     Ok(sync_json_response(StatusCode(200), &payload, accepts_gzip))
 }
@@ -971,6 +1020,7 @@ struct AgentMetadata {
     edb_size_bytes: u64,
     event_count: usize,
     last_event_id: Option<EventId>,
+    last_event_hash: Option<String>,
     mutation_revision: u64,
     prompt_submission_revision: u64,
     input_draft: String,
@@ -988,11 +1038,11 @@ struct ModelMetadata {
 fn snapshot_response(backend: &dyn UiBackend) -> Result<HttpResponse> {
     Ok(json_response(
         StatusCode(200),
-        &snapshot_metadata(backend.snapshot()?),
+        &snapshot_metadata(backend.snapshot()?, false),
     ))
 }
 
-fn snapshot_metadata(snapshot: UiSnapshot) -> SnapshotResponse {
+fn snapshot_metadata(snapshot: UiSnapshot, include_event_hashes: bool) -> SnapshotResponse {
     let UiSnapshot {
         revision,
         environment,
@@ -1013,6 +1063,9 @@ fn snapshot_metadata(snapshot: UiSnapshot) -> SnapshotResponse {
             edb_size_bytes: agent.edb_size_bytes,
             event_count: agent.events.len(),
             last_event_id: agent.events.last().map(Event::id),
+            last_event_hash: include_event_hashes
+                .then(|| agent.events.last().map(EventBase::getHash))
+                .flatten(),
             mutation_revision: agent.mutation_revision,
             prompt_submission_revision: agent.prompt_submission_revision,
             input_draft: agent.input_draft,
@@ -1620,6 +1673,47 @@ mod tests {
         directory
     }
 
+    fn sync_test_events(count: u64) -> Vec<Event> {
+        (1..=count)
+            .map(|id| {
+                Event::UserPrompt(UserPromptEvent {
+                    id,
+                    timestamp_ms: id,
+                    content: format!("event-{id}"),
+                })
+            })
+            .collect()
+    }
+
+    fn sync_test_backend(events: Vec<Event>, mutation_revision: u64) -> SnapshotBackend {
+        SnapshotBackend(UiSnapshot {
+            revision: 7,
+            environment: Arc::new(UiEnvironment {
+                workspace: PathBuf::from("/cache/workspace"),
+                os: "test".into(),
+                arch: "test".into(),
+            }),
+            agents: vec![UiAgentSnapshot {
+                id: AgentId::new("main").unwrap(),
+                title: Some("Cached session".into()),
+                kind: crate::event::AgentKind::SubAgent,
+                parent_agent_id: None,
+                orchestrator_name: "worker-agent".into(),
+                edb_path: PathBuf::from("main.edb"),
+                edb_size_bytes: 0,
+                mutation_revision,
+                last_mutation: None,
+                prompt_submission_revision: 0,
+                input_draft: String::new(),
+                input_draft_revision: 0,
+                events: events.into(),
+            }],
+            models: Arc::from([]),
+            orchestrators: Arc::from([]),
+            default_orchestrator: "main-agent".into(),
+        })
+    }
+
     #[test]
     fn url_helpers_reject_ambiguous_agent_paths() {
         assert_eq!(
@@ -1764,6 +1858,8 @@ mod tests {
         }))
         .unwrap();
         assert_eq!(parsed.snapshot_revision, Some(4));
+        assert!(!parsed.cache_metadata_only);
+        assert_eq!(parsed.agents[0].cursor_event_hash, None);
         assert!(
             serde_json::from_value::<SyncRequest>(json!({
                 "snapshot_revision": null,
@@ -1774,6 +1870,161 @@ mod tests {
             }))
             .is_err()
         );
+    }
+
+    #[test]
+    fn http_sync_metadata_only_returns_authoritative_cache_metadata_without_events() {
+        let events = sync_test_events(3);
+        let last_hash = events.last().unwrap().getHash();
+        let backend = sync_test_backend(events, 4);
+        let payload = sync_state_payload(
+            &backend,
+            None,
+            Vec::new(),
+            Some("main".into()),
+            None,
+            None,
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(payload["cache_metadata_only"], true);
+        assert_eq!(payload["event_updates"], json!([]));
+        assert_eq!(payload["more_events"], false);
+        assert_eq!(
+            payload["snapshot"]["environment"]["workspace"],
+            "/cache/workspace"
+        );
+        assert_eq!(
+            payload["snapshot"]["agents"][0]["last_event_hash"],
+            last_hash
+        );
+        let ordinary =
+            serde_json::to_value(snapshot_metadata(backend.snapshot().unwrap(), false)).unwrap();
+        assert_eq!(
+            ordinary["agents"][0]["last_event_hash"],
+            serde_json::Value::Null
+        );
+    }
+
+    #[test]
+    fn http_sync_validates_cached_prefix_hash_and_keeps_old_clients_compatible() {
+        let events = sync_test_events(3);
+        let first_hash = events[0].getHash();
+        let final_hash = events[2].getHash();
+        let backend = sync_test_backend(events, 4);
+        let cursor = |cursor_event_hash| SyncAgentCursor {
+            id: "main".into(),
+            event_count: 1,
+            mutation_revision: 4,
+            cursor_event_hash,
+        };
+
+        let valid = sync_state_payload(
+            &backend,
+            Some(7),
+            vec![cursor(Some(first_hash))],
+            Some("main".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let update = &valid["event_updates"][0];
+        assert_eq!(update["reset"], false);
+        assert_eq!(update["events"].as_array().unwrap().len(), 2);
+        assert_eq!(update["cursor_event_hash"], final_hash);
+
+        let legacy = sync_state_payload(
+            &backend,
+            Some(7),
+            vec![cursor(None)],
+            Some("main".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(legacy["event_updates"][0]["reset"], false);
+
+        let invalid = sync_state_payload(
+            &backend,
+            Some(7),
+            vec![cursor(Some("wrong-prefix".into()))],
+            Some("main".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let reset = &invalid["event_updates"][0];
+        assert_eq!(reset["reset"], true);
+        assert_eq!(reset["events"].as_array().unwrap().len(), 3);
+    }
+
+    #[test]
+    fn http_sync_resets_invalid_length_mutation_and_authoritative_empty_edb() {
+        let backend = sync_test_backend(sync_test_events(2), 4);
+        for cursor in [
+            SyncAgentCursor {
+                id: "main".into(),
+                event_count: 3,
+                mutation_revision: 4,
+                cursor_event_hash: None,
+            },
+            SyncAgentCursor {
+                id: "main".into(),
+                event_count: 1,
+                mutation_revision: 5,
+                cursor_event_hash: None,
+            },
+        ] {
+            let payload = sync_state_payload(
+                &backend,
+                Some(7),
+                vec![cursor],
+                Some("main".into()),
+                None,
+                None,
+                false,
+            )
+            .unwrap();
+            assert_eq!(payload["event_updates"][0]["reset"], true);
+        }
+
+        let empty = sync_test_backend(Vec::new(), 9);
+        let payload = sync_state_payload(
+            &empty,
+            Some(7),
+            vec![SyncAgentCursor {
+                id: "main".into(),
+                event_count: 1,
+                mutation_revision: 9,
+                cursor_event_hash: Some("stale".into()),
+            }],
+            Some("main".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let reset = &payload["event_updates"][0];
+        assert_eq!(reset["reset"], true);
+        assert_eq!(reset["event_count"], 0);
+        assert_eq!(reset["cursor_event_hash"], serde_json::Value::Null);
+        assert_eq!(reset["events"], json!([]));
+    }
+
+    #[test]
+    fn embedded_webui_loads_the_raw_edb_cache_before_the_application() {
+        let cache_script = INDEX_HTML.find("/edb-cache.js").unwrap();
+        let app_script = INDEX_HTML.find("/app.js").unwrap();
+        assert!(cache_script < app_script);
+        assert!(INDEX_HTML.contains("id=\"open-settings\""));
+        assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
+        assert!(EDB_CACHE_JS.contains("keyPath: [\"sessionKey\", \"order\"]"));
+        assert!(APP_JS.contains("cache_metadata_only: !state.edbCacheInitialized"));
+        assert!(APP_JS.contains("persistAgentEdb(meta, store, Boolean(payload.reset))"));
     }
 
     #[test]
@@ -1868,6 +2119,7 @@ mod tests {
             Some("selected".into()),
             None,
             None,
+            false,
         )
         .unwrap();
         let updates = payload["event_updates"].as_array().unwrap();
@@ -2515,7 +2767,19 @@ mod tests {
         assert!(APP_JS.contains("else if (request.workerEvents && state.view.kind === \"chat\")"));
         assert!(APP_JS.contains("function refreshWorkerActivityCards()"));
         assert!(APP_JS.contains("function showView(view)"));
-        assert_eq!(APP_JS.matches("renderAll();").count(), 2);
+        let sync_agent_events = APP_JS
+            .split_once("function syncAgentEvents(meta, payload) {")
+            .and_then(|(_, tail)| tail.split_once("\nfunction observeInputDraft("))
+            .map(|(body, _)| body)
+            .expect("syncAgentEvents function should exist");
+        assert!(!sync_agent_events.contains("renderAll();"));
+        let cache_hydration = APP_JS
+            .split_once("async function hydrateEdbCache(snapshot) {")
+            .and_then(|(_, tail)| tail.split_once("\nfunction persistAgentEdb("))
+            .map(|(body, _)| body)
+            .expect("hydrateEdbCache function should exist");
+        assert_eq!(cache_hydration.matches("renderAll();").count(), 1);
+        assert_eq!(APP_JS.matches("renderAll();").count(), 3);
         assert!(APP_JS.contains("if (changes.workmap)"));
         assert!(APP_JS.contains("while (cache.nextOrder < events.length)"));
         assert!(APP_JS.contains("store.needsReplay = true"));

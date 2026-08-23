@@ -4,6 +4,8 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { reconcileChildren, reconcileNode } = require("../src/webui/transcript.js");
+require("../src/webui/edb-cache.js");
+
 
 class FakeNode {
   constructor(nodeType, value = "") {

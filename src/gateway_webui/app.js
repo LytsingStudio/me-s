@@ -28,6 +28,7 @@ const COMMANDS = [
 ];
 const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
 
+const edbCache = MeEdbCache.create();
 function isIosWebKit(navigatorValue = navigator) {
   const userAgent = String(navigatorValue?.userAgent || "");
   const platform = String(navigatorValue?.platform || "");
@@ -89,6 +90,7 @@ const state = {
   connected: false,
   connecting: false,
   snapshotInitialized: false,
+  edbCacheInitialized: false,
   syncGeneration: 0,
   syncController: null,
   syncInFlight: false,
@@ -306,6 +308,72 @@ function canControlRuntime(meta = agentMeta()) {
   return !!meta && (meta.kind !== "sub-agent" || isWorkerAgent(meta));
 }
 
+function edbCacheScope(snapshot = state.snapshot) {
+  return String(snapshot?.environment?.workspace || "");
+}
+
+function createAgentStore(meta, cached = null) {
+  const events = Array.isArray(cached?.events) ? cached.events : [];
+  return {
+    events,
+    mutationRevision: cached ? Number(cached.mutationRevision) || 0 : meta.mutation_revision,
+    lastEventHash: cached?.lastEventHash ?? null,
+    promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
+    inputDraftRevision: Number(meta.input_draft_revision || 0),
+    pendingPromptSubmission: null,
+    projection: emptyProjection(),
+    workmap: emptyWorkMap(),
+    turnHistory: null,
+    summary: projectAgentSummary(events),
+    projectedOrder: 0,
+    needsReplay: true,
+  };
+}
+
+async function hydrateEdbCache(snapshot) {
+  if (!snapshot) throw new Error("同步响应未提供缓存元数据");
+  state.snapshot = snapshot;
+  state.snapshotInitialized = true;
+  reconcileAgents();
+  const scope = edbCacheScope(snapshot);
+  const entries = scope ? await edbCache.loadScope(scope) : [];
+  const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
+  for (const entry of entries) {
+    if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key);
+  }
+  const cachedByAgent = new Map(entries.map((entry) => [entry.agentId, entry]));
+  state.stores.clear();
+  for (const meta of snapshot.agents || []) {
+    const cached = cachedByAgent.get(meta.id);
+    const valid = Boolean(cached)
+      && cached.mutationRevision === Number(meta.mutation_revision || 0)
+      && cached.events.length <= Number(meta.event_count || 0)
+      && (cached.events.length === 0 || typeof cached.lastEventHash === "string")
+      && (cached.events.length !== Number(meta.event_count || 0)
+        || cached.lastEventHash === (meta.last_event_hash ?? null));
+    if (cached && !valid) void edbCache.discardSession(cached.key);
+    state.stores.set(meta.id, createAgentStore(meta, valid ? cached : null));
+    state.drafts.set(meta.id, String(meta.input_draft || ""));
+  }
+  state.edbCacheInitialized = true;
+  restoreDraft();
+  renderAll();
+  renderConnectionOverlayForPhase();
+}
+
+function persistAgentEdb(meta, store, replace = false) {
+  const scope = edbCacheScope();
+  if (!scope || !store) return;
+  edbCache.saveSession({
+    scope,
+    agentId: meta.id,
+    mutationRevision: store.mutationRevision,
+    lastEventHash: store.lastEventHash,
+    events: store.events,
+    replace,
+  });
+}
+
 function currentStore() {
   return state.selectedAgent ? state.stores.get(state.selectedAgent) || null : null;
 }
@@ -380,6 +448,7 @@ function emptyGatewayWorkspaceState() {
     terminalRevisions: new Map(), terminalFollowBottom: true, expandedTools: new Set(),
     expandedHistoryObjectives: new Set(), workerActivityIndexes: new Map(),
     terminalFrames: new Map(), terminalFramesUnavailable: new Set(), snapshotInitialized: false,
+    edbCacheInitialized: false,
     scrollTop: 0, followBottom: true,
   };
 }
@@ -404,6 +473,7 @@ function captureActiveWorkspace() {
     expandedTools: state.expandedTools, expandedHistoryObjectives: state.expandedHistoryObjectives,
     workerActivityIndexes: state.workerActivityIndexes, terminalFrames: state.terminalFrames,
     terminalFramesUnavailable: state.terminalFramesUnavailable, snapshotInitialized: state.snapshotInitialized,
+    edbCacheInitialized: state.edbCacheInitialized,
     scrollTop: elements.transcript.scrollTop, followBottom: transcriptBottomFollower.isFollowing(),
   });
   for (const sync of workspace.draftSync.values()) {
@@ -449,6 +519,7 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   state.terminalFrames = workspace.terminalFrames;
   state.terminalFramesUnavailable = workspace.terminalFramesUnavailable;
   state.snapshotInitialized = workspace.snapshotInitialized;
+  state.edbCacheInitialized = workspace.edbCacheInitialized;
   const selectedMeta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
   prepareSelectedEventRecovery(selectedMeta, null, true);
   resetConnectionForInitialSync();
@@ -899,13 +970,25 @@ async function requestHttpSync() {
           id,
           event_count: store.events.length,
           mutation_revision: store.mutationRevision,
+          cursor_event_hash: ["initial", "reconnecting"].includes(state.connectionPhase)
+            ? store.lastEventHash ?? null : null,
         })),
+        cache_metadata_only: !state.edbCacheInitialized,
         selected_agent: state.selectedAgent,
         terminal_session: state.view.kind === "terminal" ? state.view.sessionId : null,
         terminal_revision: terminalKey ? state.terminalRevisions.get(terminalKey) ?? null : null,
       }),
     }, state.workspaceId);
     if (generation !== state.syncGeneration || state.pageClosing) return;
+    if (message.cache_metadata_only) {
+      await hydrateEdbCache(message.snapshot);
+      if (generation !== state.syncGeneration || state.pageClosing) return;
+      state.syncInFlight = false;
+      state.syncController = null;
+      captureActiveWorkspace();
+      scheduleHttpSync(0);
+      return;
+    }
     state.syncInFlight = false;
     state.syncController = null;
     try {
@@ -1153,6 +1236,8 @@ function reconcileAgents() {
   const ids = new Set(state.snapshot.agents.map((agent) => agent.id));
   for (const id of state.stores.keys()) {
     if (!ids.has(id)) {
+      const scope = edbCacheScope();
+      if (scope) void edbCache.discardSession(MeEdbCache.sessionKey(scope, id));
       state.stores.delete(id);
       state.drafts.delete(id);
       clearDraftBatch(state.draftSync.get(id));
@@ -1179,19 +1264,7 @@ function syncAgentEvents(meta, payload) {
   let store = state.stores.get(meta.id);
   let changed = false;
   if (!store) {
-    store = {
-      events: [],
-      mutationRevision: meta.mutation_revision,
-      promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
-      inputDraftRevision: Number(meta.input_draft_revision || 0),
-      pendingPromptSubmission: null,
-      projection: emptyProjection(),
-      workmap: emptyWorkMap(),
-      turnHistory: null,
-      summary: { turnState: null },
-      projectedOrder: 0,
-      needsReplay: true,
-    };
+    store = createAgentStore(meta);
     state.stores.set(meta.id, store);
     const initialDraft = String(meta.input_draft || "");
     state.drafts.set(meta.id, initialDraft);
@@ -1203,7 +1276,8 @@ function syncAgentEvents(meta, payload) {
     changed = true;
   }
   observeInputDraft(meta, store);
-  if (store.events.length === meta.event_count && store.mutationRevision === meta.mutation_revision) {
+  if (!payload && store.events.length === meta.event_count
+      && store.mutationRevision === meta.mutation_revision) {
     observePromptSubmission(meta, store);
     return { agentId: meta.id, changed, summaryChanged: false };
   }
@@ -1222,6 +1296,8 @@ function syncAgentEvents(meta, payload) {
     updateAgentSummary(store.summary, payload.events);
   }
   store.mutationRevision = payload.mutation_revision;
+  store.lastEventHash = payload.cursor_event_hash ?? null;
+  persistAgentEdb(meta, store, Boolean(payload.reset));
   if (payload.turn_history_updated) store.turnHistory = payload.turn_history ?? null;
   observePromptSubmission(meta, store);
   return {
@@ -3960,6 +4036,38 @@ function modelSettingsHtml(model, index) {
   </details>`;
 }
 
+function resolveGatewayEdbCacheLabel(entry) {
+  let workspaceId = null;
+  let snapshot = null;
+  if (state.snapshot?.environment?.workspace === entry.scope) {
+    workspaceId = state.workspaceId;
+    snapshot = state.snapshot;
+  } else {
+    for (const [candidateId, workspace] of state.workspaceStates) {
+      if (workspace.snapshot?.environment?.workspace !== entry.scope) continue;
+      workspaceId = candidateId;
+      snapshot = workspace.snapshot;
+      break;
+    }
+  }
+  const meta = snapshot?.agents?.find((agent) => agent.id === entry.agentId);
+  const gatewayWorkspace = state.gateway.workspaces?.find((item) => item.id === workspaceId);
+  return {
+    workspace: gatewayWorkspace?.name || MeEdbCache.workspaceName(entry.scope),
+    title: meta?.title || null,
+  };
+}
+
+function renderGatewayEdbCacheSettings() {
+  const container = elements.modalContent.querySelector("#settings-edb-cache-manager");
+  if (!container) return;
+  void edbCache.renderManager(container, {
+    resolveLabel: resolveGatewayEdbCacheLabel,
+    onRemoved: () => toast("会话缓存已清除"),
+    onError: (error) => toast(error?.message || "无法清除会话缓存", true),
+  });
+}
+
 function renderSettingsModal() {
   const settings = state.modal?.settings;
   if (!settings) return;
@@ -3968,6 +4076,7 @@ function renderSettingsModal() {
     <div class="settings-models">${settings.models.map(modelSettingsHtml).join("")}</div>
     <button id="settings-add-model" type="button" class="ghost-button">新增模型</button>
     <p class="settings-help">保存后不会更改正在运行的工作区。请重启 ME Gateway 以使用新设置。</p>
+    <div id="settings-edb-cache-manager" class="edb-cache-manager"></div>
   </div>`;
   elements.modalContent.querySelector("#settings-add-model")?.addEventListener("click", () => {
     if (!captureSettingsEditor()) return;
@@ -3979,6 +4088,7 @@ function renderSettingsModal() {
     state.modal.settings.models.splice(Number(button.dataset.removeModel), 1);
     renderSettingsModal();
   }));
+  renderGatewayEdbCacheSettings();
 }
 
 function parseSettingsJson(value, label) {

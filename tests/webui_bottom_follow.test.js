@@ -4,6 +4,8 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { createTranscriptBottomFollower } = require("../src/webui/transcript.js");
+require("../src/webui/edb-cache.js");
+
 
 function loadPromptConfirmationRuntime() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");

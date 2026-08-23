@@ -29,6 +29,7 @@ const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const TOOL_PRESENTERS_JS: &str = include_str!("webui/tool-presenters.js");
+const EDB_CACHE_JS: &str = include_str!("webui/edb-cache.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
@@ -195,6 +196,12 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
             return Ok(text_response(
                 "text/javascript; charset=utf-8",
                 TOOL_PRESENTERS_JS,
+            ));
+        }
+        (&Method::Get, "/edb-cache.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                EDB_CACHE_JS,
             ));
         }
         (&Method::Get, "/style.css") => {
@@ -564,4 +571,21 @@ fn content_type(value: &'static str) -> Header {
 
 fn no_store() -> Header {
     Header::from_bytes("Cache-Control", "no-store").expect("static Cache-Control is valid")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn embedded_gateway_webui_loads_and_manages_the_shared_raw_edb_cache() {
+        let cache_script = INDEX_HTML.find("/edb-cache.js").unwrap();
+        let app_script = INDEX_HTML.find("/app.js").unwrap();
+        assert!(cache_script < app_script);
+        assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
+        assert!(APP_JS.contains("cache_metadata_only: !state.edbCacheInitialized"));
+        assert!(APP_JS.contains("id=\"settings-edb-cache-manager\""));
+        assert!(APP_JS.contains("edbCacheInitialized: state.edbCacheInitialized"));
+        assert!(APP_JS.contains("state.edbCacheInitialized = workspace.edbCacheInitialized"));
+    }
 }
