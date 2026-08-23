@@ -21,6 +21,11 @@ function loadRuntime(relative) {
       persistGatewaySelection: typeof persistGatewaySelection === "function" ? persistGatewaySelection : null,
       directoryParentRequest: typeof directoryParentRequest === "function" ? directoryParentRequest : null,
       displayHostPath: typeof displayHostPath === "function" ? displayHostPath : null,
+      directoryEntryType: typeof directoryEntryType === "function" ? directoryEntryType : null,
+      formatDirectorySize: typeof formatDirectorySize === "function" ? formatDirectorySize : null,
+      formatDirectoryModified: typeof formatDirectoryModified === "function" ? formatDirectoryModified : null,
+      filterDirectoryEntries: typeof filterDirectoryEntries === "function" ? filterDirectoryEntries : null,
+      sortDirectoryEntries: typeof sortDirectoryEntries === "function" ? sortDirectoryEntries : null,
       renderTranscript: typeof renderTranscript === "function" ? renderTranscript : null,
       emptyObjectiveDisclosure: typeof emptyObjectiveDisclosure === "function" ? emptyObjectiveDisclosure : null,
       syncObjectiveDisclosure: typeof syncObjectiveDisclosure === "function" ? syncObjectiveDisclosure : null,
@@ -324,19 +329,51 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     for (const styles of [singleStyles, gatewayStyles]) expect(styles).not.toContain(".login-brand span");
   });
 
-  test("uses a fixed, refined, compact directory window", () => {
+  test("sorts, filters, and formats host directory metadata without recursion", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const entries = [
+      { name: "Folder 10", kind: "directory", modified_at_ms: null, size_bytes: null },
+      { name: "file10.txt", kind: "file", modified_at_ms: 200, size_bytes: 10 },
+      { name: "Folder 2", kind: "directory", modified_at_ms: 100, size_bytes: null },
+      { name: "file2.pdf", kind: "file", modified_at_ms: null, size_bytes: 2 },
+      { name: "unknown.bin", kind: "file", modified_at_ms: null, size_bytes: null },
+    ];
+    expect(gateway.sortDirectoryEntries(entries, "name", "asc").map((entry) => entry.name))
+      .toEqual(["Folder 2", "Folder 10", "file2.pdf", "file10.txt", "unknown.bin"]);
+    expect(gateway.sortDirectoryEntries(entries, "size", "asc").map((entry) => entry.name))
+      .toEqual(["Folder 2", "Folder 10", "file2.pdf", "file10.txt", "unknown.bin"]);
+    expect(gateway.sortDirectoryEntries(entries, "size", "desc").map((entry) => entry.name))
+      .toEqual(["Folder 2", "Folder 10", "file10.txt", "file2.pdf", "unknown.bin"]);
+    expect(gateway.filterDirectoryEntries(entries, "FILE").map((entry) => entry.name))
+      .toEqual(["file10.txt", "file2.pdf"]);
+    expect(gateway.directoryEntryType({ name: "document.pdf", kind: "file" })).toBe("PDF 文档");
+    expect(gateway.directoryEntryType({ name: "README", kind: "file" })).toBe("文件");
+    expect(gateway.directoryEntryType({ name: "src", kind: "directory" })).toBe("文件夹");
+    expect(gateway.formatDirectorySize(0, "file")).toBe("0 B");
+    expect(gateway.formatDirectorySize(1024, "file")).toBe("1.0 KB");
+    expect(gateway.formatDirectorySize(null, "file")).toBe("—");
+    expect(gateway.formatDirectorySize(1024, "directory")).toBe("—");
+    expect(gateway.formatDirectoryModified(null)).toBe("—");
+  });
+
+  test("uses a fixed responsive Finder-style host directory window", () => {
     const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     const styles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    expect(source).toContain('kind: "directory"');
     expect(source).toContain('class="directory-list-header"');
-    expect(source).toContain('class="directory-folder-icon"');
-    expect(source).toContain('class="directory-count"');
-    expect(source).toContain('class="directory-entry-icon"');
+    expect(source).toContain('data-directory-sort="${key}"');
+    expect(source).toContain('placeholder="筛选当前目录"');
+    expect(source).toContain('class="directory-entry-mobile-meta"');
+    expect(source).toContain('row.addEventListener("dblclick"');
+    expect(source).toContain('if (row.dataset.entryKind !== "file")');
+    expect(source).toContain('body: JSON.stringify({ path: current, initialize: false })');
+    expect(source).toContain('body: JSON.stringify({ path, initialize: true })');
+    expect(source).toContain('onCancel: () => openModal(directoryModal)');
+    expect(source).toContain('"/api/gateway/directories/create"');
     expect(styles).toContain(".directory-modal-backdrop .modal {");
     expect(styles).toContain("height: min(680px, calc(100dvh - 40px));");
-    expect(styles).toContain(".directory-list { min-height: 0; flex: 1; overflow: auto;");
-    expect(styles).toContain(".directory-entry-icon {");
-    expect(styles).toContain("min-height: 38px;");
+    expect(styles).toContain("grid-template-columns: minmax(230px, 1fr) 150px 130px 90px 32px;");
+    expect(styles).toContain(".directory-entry-mobile-meta { display: flex;");
+    expect(styles).toContain(".directory-list { min-width: 0; min-height: 0; flex: 1; overflow: auto;");
   });
 
   test("locks the document while keeping content areas internally scrollable", () => {

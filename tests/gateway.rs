@@ -11,7 +11,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use me::config::{default_global_config, workspace_config_path};
+use me::{
+    config::{default_global_config, workspace_config_path},
+    workspace_bootstrap,
+};
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
@@ -59,6 +62,10 @@ fn spawn_gateway(root: &Path, config_home: &Path) -> (Child, String) {
         .current_dir(root)
         .env("ME_CONFIG_HOME", config_home)
         .env("ME_GATEWAY_ME_S", env!("CARGO_BIN_EXE_me-s"))
+        .env(
+            "ME_GATEWAY_TEST_PORT",
+            (42_000 + (std::process::id() % 10_000) as u16).to_string(),
+        )
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("http_proxy", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -344,7 +351,11 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert!(settings["models"][0].get("has_inline_api_key").is_none());
     assert!(settings["models"][0].get("clear_inline_api_key").is_none());
 
+    let default_model = settings["default_model"].as_str().unwrap().to_owned();
     fs::write(root.join("not-a-directory"), b"file").unwrap();
+    fs::create_dir(root.join("folder-2")).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(root.join("folder-2"), root.join("folder-link")).unwrap();
     let listing = post_json(
         &address,
         "/api/gateway/directories",
@@ -352,13 +363,23 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
         serde_json::json!({"path": root}),
     );
     assert_eq!(listing["ok"], true);
-    assert!(
-        listing["directories"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .all(|entry| entry["name"] != "not-a-directory")
-    );
+    let entries = listing["entries"].as_array().unwrap();
+    let file = entries
+        .iter()
+        .find(|entry| entry["name"] == "not-a-directory")
+        .unwrap();
+    assert_eq!(file["kind"], "file");
+    assert_eq!(file["size_bytes"], 4);
+    assert!(file["modified_at_ms"].is_number());
+    let folder = entries
+        .iter()
+        .find(|entry| entry["name"] == "folder-2")
+        .unwrap();
+    assert_eq!(folder["kind"], "directory");
+    assert!(folder["size_bytes"].is_null());
+    #[cfg(unix)]
+    assert!(entries.iter().all(|entry| entry["name"] != "folder-link"));
+
     let roots = post_json(
         &address,
         "/api/gateway/directories",
@@ -368,8 +389,13 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert_eq!(roots["ok"], true);
     assert_eq!(roots["root_selector"], true);
     assert!(roots["path"].is_null());
-    let root_entries = roots["directories"].as_array().unwrap();
+    let root_entries = roots["entries"].as_array().unwrap();
     assert!(!root_entries.is_empty());
+    assert!(
+        root_entries
+            .iter()
+            .all(|entry| { entry["kind"] == "drive" && entry["size_bytes"].is_null() })
+    );
     #[cfg(not(windows))]
     assert_eq!(root_entries[0]["path"], "/");
     #[cfg(windows)]
@@ -400,6 +426,122 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
         serde_json::json!({"path": root.join("not-a-directory")}),
     );
     assert_eq!(rejected_file["ok"], false);
+    let new_folder = post_json(
+        &address,
+        "/api/gateway/directories/create",
+        &cookie,
+        serde_json::json!({"parent": root, "name": "created-folder"}),
+    );
+    assert_eq!(new_folder["ok"], true);
+    assert!(root.join("created-folder").is_dir());
+    let rejected_folder = post_json(
+        &address,
+        "/api/gateway/directories/create",
+        &cookie,
+        serde_json::json!({"parent": root, "name": "nested/folder"}),
+    );
+    assert_eq!(rejected_folder["ok"], false);
+
+    let ordinary = root.join("ordinary");
+    fs::create_dir(&ordinary).unwrap();
+    let requires_initialization = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": ordinary}),
+    );
+    assert_eq!(requires_initialization["status"], "requires_initialization");
+    assert!(!ordinary.join(".me").exists());
+    assert_eq!(
+        get_state(&address, &cookie)["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    let initialized = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": ordinary, "initialize": true}),
+    );
+    assert_eq!(initialized["status"], "opened");
+    assert!(workspace_config_path(&ordinary).exists());
+    let ordinary_id = initialized["workspace_id"].as_str().unwrap();
+    assert_eq!(
+        get_state(&address, &cookie)["workspaces"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    assert_eq!(
+        post_json(
+            &address,
+            &format!("/api/gateway/workspaces/{ordinary_id}/close"),
+            &cookie,
+            serde_json::json!({}),
+        )["ok"],
+        true
+    );
+
+    let invalid = root.join("invalid");
+    fs::create_dir_all(invalid.join(".me")).unwrap();
+    let invalid_open = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": invalid}),
+    );
+    assert_eq!(invalid_open["ok"], false);
+    let invalid_initialize = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": invalid, "initialize": true}),
+    );
+    assert_eq!(invalid_initialize["ok"], false);
+    assert!(!workspace_config_path(&invalid).exists());
+
+    let invalid_file = root.join("invalid-file");
+    fs::create_dir(&invalid_file).unwrap();
+    fs::write(invalid_file.join(".me"), b"preserve").unwrap();
+    let invalid_file_open = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": invalid_file, "initialize": true}),
+    );
+    assert_eq!(invalid_file_open["ok"], false);
+    assert_eq!(fs::read(invalid_file.join(".me")).unwrap(), b"preserve");
+
+    let raced = root.join("raced");
+    fs::create_dir(&raced).unwrap();
+    let raced_missing = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": raced}),
+    );
+    assert_eq!(raced_missing["status"], "requires_initialization");
+    workspace_bootstrap::create(&raced, &default_model).unwrap();
+    let raced_open = post_json(
+        &address,
+        "/api/gateway/workspaces/open",
+        &cookie,
+        serde_json::json!({"path": raced, "initialize": true}),
+    );
+    assert_eq!(raced_open["status"], "opened");
+    let raced_id = raced_open["workspace_id"].as_str().unwrap();
+    assert_eq!(
+        post_json(
+            &address,
+            &format!("/api/gateway/workspaces/{raced_id}/close"),
+            &cookie,
+            serde_json::json!({}),
+        )["ok"],
+        true
+    );
 
     let created = post_json(
         &address,
@@ -418,6 +560,7 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
         &cookie,
         serde_json::json!({"path": workspace_path}),
     );
+    assert_eq!(duplicate["status"], "opened");
     assert_eq!(duplicate["workspace_id"], workspace_id);
     assert_eq!(
         get_state(&address, &cookie)["workspaces"]

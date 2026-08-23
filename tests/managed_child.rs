@@ -20,6 +20,7 @@ use me::{
         MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH, MANAGED_SHUTDOWN_PATH, ManagedLaunchConfig,
         ManagedReadyResponse, bearer_header_value,
     },
+    workspace_bootstrap,
 };
 
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
@@ -45,16 +46,19 @@ impl Drop for TempDirectory {
     }
 }
 
-fn prepare() -> (TempDirectory, PathBuf, PathBuf) {
+fn prepare(initialize: bool) -> (TempDirectory, PathBuf, PathBuf) {
     let root = TempDirectory::new("workspace");
     let workspace = root.0.join("workspace");
     let config_home = root.0.join("config");
     fs::create_dir_all(&workspace).unwrap();
     fs::create_dir_all(config_home.join("conf.d")).unwrap();
-    default_global_config(&config_home)
-        .unwrap()
+    let global = default_global_config(&config_home).unwrap();
+    global
         .save(&config_home.join("conf.d/models.toml"))
         .unwrap();
+    if initialize {
+        workspace_bootstrap::create_new(&workspace, &global.default_model).unwrap();
+    }
     (root, workspace, config_home)
 }
 
@@ -152,8 +156,8 @@ fn wait_for_exit(child: &mut Child) -> std::process::ExitStatus {
 }
 
 #[test]
-fn managed_child_initializes_authenticates_reports_identity_and_shuts_down() {
-    let (_root, workspace, config_home) = prepare();
+fn managed_child_loads_authenticates_reports_identity_and_shuts_down() {
+    let (_root, workspace, config_home) = prepare(true);
     let port = available_port();
     let (mut child, input, launch) = spawn_managed(&workspace, &config_home, port);
     let ready = wait_until_ready(&mut child, port, &launch);
@@ -284,7 +288,7 @@ fn managed_child_initializes_authenticates_reports_identity_and_shuts_down() {
 
 #[test]
 fn managed_child_exits_when_the_parent_control_pipe_closes() {
-    let (_root, workspace, config_home) = prepare();
+    let (_root, workspace, config_home) = prepare(true);
     let port = available_port();
     let (mut child, input, launch) = spawn_managed(&workspace, &config_home, port);
     wait_until_ready(&mut child, port, &launch);
@@ -293,8 +297,23 @@ fn managed_child_exits_when_the_parent_control_pipe_closes() {
 }
 
 #[test]
+fn managed_child_rejects_an_uninitialized_workspace_without_creating_it() {
+    let (_root, workspace, config_home) = prepare(false);
+    let port = available_port();
+    let (mut child, _input, _launch) = spawn_managed(&workspace, &config_home, port);
+    let status = wait_for_exit(&mut child);
+    let mut stderr = String::new();
+    if let Some(mut output) = child.stderr.take() {
+        std::io::Read::read_to_string(&mut output, &mut stderr).unwrap();
+    }
+    assert!(!status.success());
+    assert!(!workspace.join(".me").exists());
+    assert!(stderr.contains("workspace is not initialized"), "{stderr}");
+}
+
+#[test]
 fn managed_child_never_drifts_from_or_exposes_an_occupied_exact_port() {
-    let (_root, workspace, config_home) = prepare();
+    let (_root, workspace, config_home) = prepare(true);
     let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
     let port = listener.local_addr().unwrap().port();
     let (mut child, input, _launch) = spawn_managed(&workspace, &config_home, port);

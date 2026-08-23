@@ -246,11 +246,6 @@ button { color: inherit; }
 @keyframes cursor-blink { 50% { outline-color: transparent; } }
 
 .session-terminal-view { position: relative; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--terminal-bg); }
-.session-terminal-toolbar { display: flex; min-width: 0; min-height: 36px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 14px; padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--panel); color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.session-terminal-shell { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-.session-terminal-state { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
-.session-terminal-state[data-state="running"] { color: var(--green); }
-.session-terminal-state[data-state="exited"], .session-terminal-state[data-state="lost"], .session-terminal-state[data-state="unavailable"] { color: var(--orange); }
 .session-terminal-screen { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; background: var(--terminal-bg); }
 .session-terminal-instance { position: absolute; inset: 10px; min-width: 0; min-height: 0; overflow: hidden; }
 .session-terminal-instance[hidden] { display: none; }

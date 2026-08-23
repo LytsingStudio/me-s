@@ -246,11 +246,6 @@ button { color: inherit; }
 @keyframes cursor-blink { 50% { outline-color: transparent; } }
 
 .session-terminal-view { position: relative; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--terminal-bg); }
-.session-terminal-toolbar { display: flex; min-width: 0; min-height: 36px; flex: 0 0 auto; align-items: center; justify-content: space-between; gap: 14px; padding: 0 14px; border-bottom: 1px solid var(--border); background: var(--panel); color: var(--muted); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.session-terminal-shell { min-width: 0; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
-.session-terminal-state { flex: 0 0 auto; color: var(--muted); white-space: nowrap; }
-.session-terminal-state[data-state="running"] { color: var(--green); }
-.session-terminal-state[data-state="exited"], .session-terminal-state[data-state="lost"], .session-terminal-state[data-state="unavailable"] { color: var(--orange); }
 .session-terminal-screen { position: relative; flex: 1 1 auto; min-width: 0; min-height: 0; overflow: hidden; background: var(--terminal-bg); }
 .session-terminal-instance { position: absolute; inset: 10px; min-width: 0; min-height: 0; overflow: hidden; }
 .session-terminal-instance[hidden] { display: none; }
@@ -587,48 +582,71 @@ button { color: inherit; }
 .sidebar-settings:hover, .sidebar-settings:focus-visible { outline: 0; background: var(--panel-3); color: var(--text); }
 .modal { width: min(760px, calc(100vw - 28px)); max-height: min(86vh, 900px); }
 .modal-content { overflow: auto; }
-.directory-modal-backdrop .modal { width: min(820px, calc(100vw - 40px)); height: min(680px, calc(100dvh - 40px)); max-height: none; overflow: hidden; border-color: var(--border-bright); background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%); box-shadow: var(--directory-shadow); }
+.directory-modal-backdrop .modal { width: min(960px, calc(100vw - 40px)); height: min(680px, calc(100dvh - 40px)); max-height: none; overflow: hidden; border-color: var(--border-bright); background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%); box-shadow: var(--directory-shadow); }
 .directory-modal-backdrop .modal > p { padding-top: 11px; color: var(--muted); }
 .directory-modal-backdrop .modal-content { display: flex; min-height: 0; flex: 1; overflow: hidden; padding: 12px 17px 15px; }
-.directory-browser { display: grid; width: 100%; min-height: 0; grid-template-rows: auto minmax(0, 1fr) auto; gap: 10px; }
-.directory-toolbar { display: grid; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; }
-.directory-up { display: grid; width: 34px; height: 34px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 9px; background: linear-gradient(180deg, var(--directory-control-top), var(--directory-control-bottom)); color: var(--muted); cursor: pointer; box-shadow: inset 0 1px var(--directory-inner-highlight); }
-.directory-up:hover:not(:disabled), .directory-up:focus-visible { border-color: var(--border-bright); background: var(--panel-3); color: var(--text); outline: 0; box-shadow: 0 0 0 3px var(--accent-ring); }
-.directory-up:disabled { opacity: .3; cursor: default; box-shadow: none; }
-.directory-up svg, .directory-entry-arrow { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.directory-browser { display: grid; width: 100%; min-width: 0; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr) auto; gap: 10px; }
+.directory-toolbar { display: grid; min-width: 0; grid-template-columns: minmax(260px, 1fr) auto; align-items: center; gap: 8px; }
+.directory-navigation { display: grid; min-width: 0; grid-template-columns: 34px minmax(0, 1fr); align-items: center; gap: 7px; }
+.directory-tools { display: flex; min-width: 0; align-items: center; justify-content: flex-end; gap: 6px; }
+.directory-control { display: grid; width: 34px; height: 34px; flex: 0 0 34px; place-items: center; padding: 0; border: 1px solid var(--border); border-radius: 9px; background: linear-gradient(180deg, var(--directory-control-top), var(--directory-control-bottom)); color: var(--muted); cursor: pointer; box-shadow: inset 0 1px var(--directory-inner-highlight); }
+.directory-control:hover:not(:disabled), .directory-control:focus-visible { border-color: var(--border-bright); background: var(--panel-3); color: var(--text); outline: 0; box-shadow: 0 0 0 3px var(--accent-ring); }
+.directory-control:disabled { opacity: .3; cursor: default; box-shadow: none; }
+.directory-control svg, .directory-entry-enter svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .directory-current { display: grid; min-width: 0; height: 34px; grid-template-columns: 24px minmax(0, 1fr) auto; box-sizing: border-box; align-items: center; gap: 8px; padding: 0 8px 0 6px; border: 1px solid var(--border); border-radius: 9px; background: linear-gradient(180deg, var(--directory-control-top), var(--directory-control-bottom)); color: var(--muted); box-shadow: inset 0 1px var(--directory-inner-highlight); }
 .directory-location-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--accent-ring); border-radius: 7px; background: var(--accent-faint); }
-.directory-location-icon .directory-folder-icon { width: 15px; height: 15px; }
+.directory-location-icon .directory-file-icon { width: 15px; height: 15px; }
 .directory-current-path { min-width: 0; overflow: hidden; color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
 .directory-count { padding: 3px 7px; border: 1px solid var(--hover-fill); border-radius: 999px; background: var(--hover-fill-soft); color: var(--dim); font-size: 10px; line-height: 1; white-space: nowrap; }
-.directory-folder-icon { width: 16px; height: 16px; flex: 0 0 auto; fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
-.directory-table { display: flex; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--directory-table-bg); box-shadow: inset 0 1px var(--directory-inner-highlight), 0 10px 30px var(--accent-faint); }
-.directory-list-header, .directory-entry { display: grid; grid-template-columns: 26px minmax(120px, .7fr) minmax(180px, 1.3fr) 16px; align-items: center; gap: 8px; }
-.directory-list-header { min-height: 28px; padding: 0 10px; border-bottom: 1px solid var(--border); background: var(--directory-header-bg); color: var(--directory-header-text); font-size: 9px; font-weight: 750; letter-spacing: .07em; text-transform: uppercase; }
-.directory-list { min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--directory-scrollbar) transparent; scrollbar-width: thin; }
+.directory-search { display: grid; width: min(230px, 28vw); min-width: 150px; height: 34px; grid-template-columns: 18px minmax(0, 1fr) 22px; box-sizing: border-box; align-items: center; gap: 5px; padding: 0 5px 0 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--directory-control-bottom); color: var(--dim); }
+.directory-search:focus-within { border-color: var(--border-bright); box-shadow: 0 0 0 3px var(--accent-ring); }
+.directory-search > svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.7; }
+.directory-search input { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; color: var(--text); font-size: 12px; }
+.directory-search-clear { width: 22px; height: 22px; padding: 0; border: 0; border-radius: 6px; background: transparent; color: var(--dim); cursor: pointer; }
+.directory-search-clear:hover, .directory-search-clear:focus-visible { outline: 0; background: var(--hover-fill); color: var(--text); }
+.directory-new-folder-form { display: grid; grid-template-columns: minmax(0, 1fr) auto auto; align-items: end; gap: 7px; padding: 9px 10px; border: 1px solid var(--border); border-radius: 9px; background: var(--hover-fill-soft); }
+.directory-new-folder-form label { display: grid; gap: 5px; color: var(--muted); font-size: 11px; }
+.directory-new-folder-form input { width: 100%; box-sizing: border-box; padding: 8px 9px; border: 1px solid var(--border-bright); border-radius: 7px; outline: 0; background: var(--panel); color: var(--text); }
+.directory-new-folder-form input:focus { box-shadow: 0 0 0 3px var(--accent-ring); }
+.directory-table { display: flex; min-width: 0; min-height: 0; flex-direction: column; overflow: hidden; border: 1px solid var(--border); border-radius: 10px; background: var(--directory-table-bg); box-shadow: inset 0 1px var(--directory-inner-highlight), 0 10px 30px var(--accent-faint); }
+.directory-list-header, .directory-entry { display: grid; grid-template-columns: minmax(230px, 1fr) 150px 130px 90px 32px; align-items: center; gap: 0; }
+.directory-list-header { min-height: 31px; padding: 0 7px 0 10px; border-bottom: 1px solid var(--border); background: var(--directory-header-bg); }
+.directory-sort { display: flex; min-width: 0; height: 30px; align-items: center; justify-content: flex-start; gap: 5px; padding: 0 8px; border: 0; border-right: 1px solid var(--directory-row-border); background: transparent; color: var(--directory-header-text); font-size: 10px; font-weight: 750; letter-spacing: .03em; cursor: pointer; }
+.directory-sort:first-child { padding-left: 2px; }
+.directory-sort:hover, .directory-sort:focus-visible, .directory-sort.active { outline: 0; background: var(--hover-fill-soft); color: var(--text); }
+.directory-sort-indicator { min-width: 10px; color: var(--accent); font-size: 12px; }
+.directory-list { min-width: 0; min-height: 0; flex: 1; overflow: auto; overscroll-behavior: contain; scrollbar-color: var(--directory-scrollbar) transparent; scrollbar-width: thin; }
 .directory-list::-webkit-scrollbar { width: 8px; height: 8px; }
 .directory-list::-webkit-scrollbar-thumb { border: 2px solid transparent; border-radius: 999px; background: var(--directory-scrollbar); background-clip: padding-box; }
 .directory-list::-webkit-scrollbar-thumb:hover { background-color: var(--directory-scrollbar-hover); }
-.directory-entry { width: 100%; min-height: 38px; box-sizing: border-box; padding: 0 10px; border: 0; border-bottom: 1px solid var(--directory-row-border); background: transparent; color: inherit; text-align: left; cursor: pointer; transition: background 120ms ease, box-shadow 120ms ease; }
+.directory-entry { width: 100%; min-width: 0; min-height: 39px; box-sizing: border-box; padding: 0 7px 0 10px; border-bottom: 1px solid var(--directory-row-border); color: inherit; cursor: default; transition: background 100ms ease, box-shadow 100ms ease; }
 .directory-entry:last-child { border-bottom: 0; }
-.directory-entry:hover, .directory-entry:focus-visible { background: linear-gradient(90deg, var(--accent-soft), var(--accent-faint)); outline: 0; box-shadow: inset 2px 0 var(--accent); }
-.directory-entry:disabled { opacity: .5; cursor: wait; }
-.directory-entry-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--accent-ring); border-radius: 7px; background: var(--accent-faint); transition: border-color 120ms ease, background 120ms ease; }
-.directory-entry-icon .directory-folder-icon { width: 15px; height: 15px; }
-.directory-entry:hover .directory-entry-icon, .directory-entry:focus-visible .directory-entry-icon { border-color: var(--selected-border); background: var(--accent-soft); }
-.root-selector .directory-entry-icon { border-color: color-mix(in srgb, var(--cyan) 24%, transparent); background: color-mix(in srgb, var(--cyan) 8%, transparent); }
-.root-selector .directory-entry-icon .directory-folder-icon { stroke: var(--cyan); }
-.directory-entry-name, .directory-entry-path { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.directory-entry-name { color: var(--text); font-size: 12px; font-weight: 650; }
-.directory-entry-path { color: var(--directory-path); font: 10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.directory-entry-arrow { color: var(--dim); opacity: .55; transition: opacity 120ms ease, transform 120ms ease; }
-.directory-entry:hover .directory-entry-arrow, .directory-entry:focus-visible .directory-entry-arrow { opacity: 1; transform: translateX(2px); }
+.directory-entry:hover { background: var(--hover-fill-soft); }
+.directory-entry:focus-visible { outline: 0; background: var(--hover-fill); box-shadow: inset 2px 0 var(--accent); }
+.directory-entry.selected { background: linear-gradient(90deg, var(--accent-soft), var(--accent-faint)); box-shadow: inset 2px 0 var(--accent); }
+.directory-entry-name { display: flex; min-width: 0; align-items: center; gap: 8px; padding-right: 8px; }
+.directory-entry-copy { display: grid; min-width: 0; }
+.directory-entry-title { min-width: 0; overflow: hidden; color: var(--text); font-size: 12px; font-weight: 620; text-overflow: ellipsis; white-space: nowrap; }
+.directory-entry-modified, .directory-entry-type, .directory-entry-size { min-width: 0; overflow: hidden; padding: 0 8px; color: var(--directory-path); font-size: 10.5px; text-overflow: ellipsis; white-space: nowrap; }
+.directory-entry-size { text-align: right; font-variant-numeric: tabular-nums; }
+.directory-entry-mobile-meta { display: none; }
+.directory-entry-icon { display: grid; width: 25px; height: 25px; flex: 0 0 25px; place-items: center; border: 1px solid var(--accent-ring); border-radius: 7px; background: var(--accent-faint); }
+.directory-file-icon { width: 16px; height: 16px; fill: none; stroke: var(--accent); stroke-width: 1.55; stroke-linecap: round; stroke-linejoin: round; }
+.directory-file-icon.folder { fill: var(--accent-soft); }
+.directory-file-icon.drive { stroke: var(--cyan); }
+.directory-file-icon.file { stroke: var(--muted); }
+.directory-entry-enter { display: grid; width: 28px; height: 28px; place-items: center; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--dim); cursor: pointer; }
+.directory-entry-enter:hover, .directory-entry-enter:focus-visible { outline: 0; background: var(--hover-fill); color: var(--text); }
+.directory-entry-action { width: 28px; height: 28px; }
 .directory-empty { display: grid; min-height: 100%; place-content: center; justify-items: center; gap: 8px; padding: 30px; box-sizing: border-box; color: var(--dim); text-align: center; }
-.directory-empty > .directory-entry-icon { width: 38px; height: 38px; margin-bottom: 2px; border-radius: 11px; }
-.directory-empty > .directory-entry-icon .directory-folder-icon { width: 22px; height: 22px; }
+.directory-empty > .directory-entry-icon { width: 40px; height: 40px; margin-bottom: 2px; border-radius: 11px; }
+.directory-empty > .directory-entry-icon .directory-file-icon { width: 23px; height: 23px; }
 .directory-empty strong { color: var(--muted); font-size: 13px; }
 .directory-empty > span:last-child { max-width: 290px; font-size: 11px; line-height: 1.5; }
 .directory-browser.loading .directory-list { opacity: .48; filter: saturate(.7); transition: opacity 120ms ease; }
+.directory-selection-summary { display: flex; min-width: 0; align-items: center; justify-content: space-between; gap: 12px; color: var(--dim); font-size: 11px; }
+.directory-target { color: var(--muted); }
+.directory-selected-item { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .directory-name, .settings-editor label, .settings-model > label { display: grid; gap: 6px; color: var(--muted); font-size: 12px; }
 .directory-name input, .settings-editor input, .settings-editor select, .settings-editor textarea { width: 100%; box-sizing: border-box; padding: 9px 10px; border: 1px solid var(--border-bright); border-radius: 8px; background: var(--panel); color: var(--text); }
 .directory-help, .settings-help { margin: 0; color: var(--dim); font-size: 11px; }
@@ -646,12 +664,23 @@ button { color: inherit; }
 .settings-grid .settings-check { display: flex; align-items: center; gap: 8px; }
 .settings-grid .settings-check input { width: auto; }
 .settings-editor textarea { resize: vertical; font: 12px/1.45 ui-monospace, monospace; }
-@media (max-width: 700px) {
+@media (max-width: 800px) {
   .settings-grid { grid-template-columns: 1fr; }
   .modal { width: calc(100vw - 16px); max-height: calc(100vh - 24px); }
-  .directory-modal-backdrop .modal { width: 100%; height: 86dvh; max-height: 86dvh; }
-  .directory-modal-backdrop .modal-content { padding: 12px; }
-  .directory-list-header, .directory-entry { grid-template-columns: 26px minmax(0, 1fr) 16px; }
-  .directory-entry { min-height: 42px; }
-  .directory-list-header span:nth-child(3), .directory-entry-path { display: none; }
+  .directory-modal-backdrop .modal { width: 100%; height: 88dvh; max-height: 88dvh; }
+  .directory-modal-backdrop .modal-content { padding: 10px 12px 12px; }
+  .directory-toolbar { grid-template-columns: 1fr; gap: 7px; }
+  .directory-tools { justify-content: stretch; }
+  .directory-search { width: auto; min-width: 0; flex: 1; }
+  .directory-list-header, .directory-entry { grid-template-columns: minmax(0, 1fr) 32px; }
+  .directory-list-header { min-height: 29px; }
+  .directory-list-header .directory-sort:nth-child(2), .directory-list-header .directory-sort:nth-child(3), .directory-list-header .directory-sort:nth-child(4) { display: none; }
+  .directory-sort:first-child { border-right: 0; }
+  .directory-entry { min-height: 54px; }
+  .directory-entry-modified, .directory-entry-type, .directory-entry-size { display: none; }
+  .directory-entry-mobile-meta { display: flex; min-width: 0; gap: 5px 10px; overflow: hidden; color: var(--directory-path); font-size: 9.5px; line-height: 1.35; white-space: nowrap; }
+  .directory-entry-mobile-meta span { overflow: hidden; text-overflow: ellipsis; }
+  .directory-selection-summary { display: grid; gap: 3px; }
+  .directory-new-folder-form { grid-template-columns: minmax(0, 1fr) auto; }
+  .directory-new-folder-form label { grid-column: 1 / -1; }
 }

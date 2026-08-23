@@ -369,7 +369,7 @@ describe("SessionTerminal browser transport", () => {
     }
   });
 
-  test("renders identical one-line horizontally scrollable shortcut strips", () => {
+  test("renders terminal screens directly above identical one-line shortcut strips", () => {
     const expected = [
       ["ESC", "1b"], ["^A", "01"], ["^Z", "1a"], ["^X", "18"],
       ["^C", "03"], ["^V", "16"], ["^S", "13"], ["^D", "04"],
@@ -380,11 +380,17 @@ describe("SessionTerminal browser transport", () => {
       const controls = [...html.matchAll(/<button type="button" data-session-terminal-byte="([0-9a-f]{2})"[^>]*>([^<]+)<\/button>/g)]
         .map((match) => [match[2], match[1]]);
       expect(controls).toEqual(expected);
+      expect(html).not.toContain("session-terminal-toolbar");
+      expect(html).not.toContain("session-terminal-shell");
+      expect(html).not.toContain("session-terminal-state");
       expect(html.indexOf('id="session-terminal-screen"'))
         .toBeLessThan(html.indexOf('id="session-terminal-controls"'));
     }
     for (const stylePath of ["src/webui/style.css", "src/gateway_webui/style.css"]) {
       const styles = read(stylePath);
+      expect(styles).not.toContain(".session-terminal-toolbar");
+      expect(styles).not.toContain(".session-terminal-shell");
+      expect(styles).not.toContain(".session-terminal-state");
       expect(styles).toContain(".session-terminal-controls { min-width: 0; flex: 0 0 auto; overflow-x: auto; overflow-y: hidden;");
       expect(styles).toContain("overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x;");
       expect(styles).toContain(".session-terminal-controls::-webkit-scrollbar { display: none; }");
@@ -393,6 +399,10 @@ describe("SessionTerminal browser transport", () => {
     }
     for (const appPath of ["src/webui/app.js", "src/gateway_webui/app.js"]) {
       const app = read(appPath);
+      expect(app).not.toContain("sessionTerminalShell");
+      expect(app).not.toContain("sessionTerminalState");
+      expect(app).not.toContain("statusElement:");
+      expect(app).not.toContain("shellElement:");
       expect(app).toContain('sessionTerminalControls: $("#session-terminal-controls")');
       expect(app).toContain("controls: elements.sessionTerminalControls");
     }

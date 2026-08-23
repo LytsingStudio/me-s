@@ -118,8 +118,6 @@ const elements = {
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
   sessionTerminalControls: $("#session-terminal-controls"),
-  sessionTerminalShell: $("#session-terminal-shell"),
-  sessionTerminalState: $("#session-terminal-state"),
   terminalView: $("#terminal-view"),
   transcript: $("#transcript"),
   transcriptContent: $("#transcript-content"),
@@ -217,8 +215,6 @@ function getSessionTerminalController() {
     sessionTerminalController = globalThis.MeSessionTerminal.create({
       container: elements.sessionTerminalScreen,
       controls: elements.sessionTerminalControls,
-      statusElement: elements.sessionTerminalState,
-      shellElement: elements.sessionTerminalShell,
       request: (path, options, identity) => api(path, options, identity.workspaceId),
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
     });
@@ -3407,41 +3403,81 @@ async function selectDrawerChoice(value) {
   }
 }
 
-async function openDirectoryBrowser(mode) {
-  try {
-    const listing = await api("/api/gateway/directories", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ path: state.gateway.gateway_root || null }),
-    });
-    openModal({
-      kind: "directory",
-      title: mode === "create" ? "新建工作区" : "打开工作区",
-      description: "请选择 ME Gateway 宿主机上的目录。",
-      choices: [], selected: null, confirmLabel: mode === "create" ? "创建并打开" : "打开",
-      html: `<div class="directory-browser"></div>`,
-      onOpen: () => renderDirectoryListing(listing, mode),
-      onConfirm: async () => {
-        const current = state.modal?.directory?.path;
-        if (!current) throw new Error("请选择目录");
-        let result;
-        if (mode === "create") {
-          const name = elements.modalContent.querySelector("#new-workspace-name")?.value.trim();
-          if (!name) throw new Error("请输入工作区名称");
-          result = await api("/api/gateway/workspaces/create", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ parent: current, name }),
-          });
-        } else {
-          result = await api("/api/gateway/workspaces/open", {
-            method: "POST", headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ path: current }),
-          });
-        }
-        await refreshGatewayState();
-        activateWorkspace(result.workspace_id);
-      },
-    });
-  } catch (error) { toast(error.message, true); }
+const DIRECTORY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+const DIRECTORY_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+});
+const DIRECTORY_FILE_TYPES = {
+  txt: "文本文件", md: "Markdown 文档", markdown: "Markdown 文档", pdf: "PDF 文档",
+  doc: "Word 文档", docx: "Word 文档", xls: "Excel 工作簿", xlsx: "Excel 工作簿",
+  ppt: "PowerPoint 演示文稿", pptx: "PowerPoint 演示文稿", csv: "CSV 表格",
+  png: "PNG 图像", jpg: "JPEG 图像", jpeg: "JPEG 图像", gif: "GIF 图像", webp: "WebP 图像", svg: "SVG 图像",
+  mp3: "MP3 音频", wav: "WAV 音频", m4a: "M4A 音频", mp4: "MP4 视频", mov: "QuickTime 视频",
+  zip: "ZIP 归档", gz: "GZip 归档", tar: "TAR 归档", zst: "Zstandard 归档",
+  json: "JSON 文件", toml: "TOML 配置", yaml: "YAML 配置", yml: "YAML 配置", xml: "XML 文件",
+  js: "JavaScript 文件", mjs: "JavaScript 文件", ts: "TypeScript 文件", tsx: "TypeScript 文件",
+  html: "HTML 文档", css: "CSS 样式表", rs: "Rust 源文件", py: "Python 文件", sh: "Shell 脚本",
+  log: "日志文件", lock: "锁定文件",
+};
+
+function directoryEntryType(entry) {
+  if (entry?.kind === "drive") return "磁盘";
+  if (entry?.kind === "directory") return "文件夹";
+  const name = String(entry?.name || "");
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return "文件";
+  const extension = name.slice(dot + 1).toLowerCase();
+  return DIRECTORY_FILE_TYPES[extension] || `${extension.toUpperCase()} 文件`;
+}
+
+function formatDirectorySize(sizeBytes, kind = "file") {
+  const bytes = Number(sizeBytes);
+  if (kind !== "file" || sizeBytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, units.length - 1);
+  const value = bytes / (1024 ** (unit + 1));
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatDirectoryModified(modifiedAtMs) {
+  const value = Number(modifiedAtMs);
+  if (modifiedAtMs == null || !Number.isFinite(value) || value < 0) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : DIRECTORY_DATE_FORMATTER.format(date);
+}
+
+function filterDirectoryEntries(entries, query) {
+  const normalized = String(query || "").trim().toLocaleLowerCase();
+  if (!normalized) return [...(entries || [])];
+  return (entries || []).filter((entry) => String(entry.name || "").toLocaleLowerCase().includes(normalized));
+}
+
+function directorySortValue(entry, sortKey) {
+  if (sortKey === "modified") return entry.modified_at_ms != null && Number.isFinite(Number(entry.modified_at_ms)) ? Number(entry.modified_at_ms) : null;
+  if (sortKey === "type") return directoryEntryType(entry);
+  if (sortKey === "size") return entry.kind === "file" && entry.size_bytes != null && Number.isFinite(Number(entry.size_bytes)) ? Number(entry.size_bytes) : null;
+  return String(entry.name || "");
+}
+
+function sortDirectoryEntries(entries, sortKey = "name", direction = "asc") {
+  const multiplier = direction === "desc" ? -1 : 1;
+  return [...(entries || [])].sort((left, right) => {
+    const leftGroup = left.kind === "file" ? 1 : 0;
+    const rightGroup = right.kind === "file" ? 1 : 0;
+    if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+    const leftValue = directorySortValue(left, sortKey);
+    const rightValue = directorySortValue(right, sortKey);
+    const leftMissing = leftValue == null;
+    const rightMissing = rightValue == null;
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    let primary = 0;
+    if (!leftMissing) primary = typeof leftValue === "number"
+      ? leftValue - rightValue
+      : DIRECTORY_NAME_COLLATOR.compare(String(leftValue), String(rightValue));
+    if (primary) return primary * multiplier;
+    return DIRECTORY_NAME_COLLATOR.compare(String(left.name || ""), String(right.name || ""));
+  });
 }
 
 function directoryParentRequest(listing) {
@@ -3457,68 +3493,273 @@ function displayHostPath(path) {
   return value;
 }
 
-async function loadDirectoryListing(path, mode, roots = false) {
+function directoryEntryIcon(entry) {
+  if (entry.kind === "drive") return `<svg class="directory-file-icon drive" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M3.5 14h17"/><circle cx="17" cy="16.5" r=".8"/></svg>`;
+  if (entry.kind === "directory") return `<svg class="directory-file-icon folder" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15v-13.5Z"/><path d="M3.5 10h17"/></svg>`;
+  return `<svg class="directory-file-icon file" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h8l4 4V20H6z"/><path d="M14 3.5V8h4"/></svg>`;
+}
+
+function directoryVisibleEntries(directory) {
+  return sortDirectoryEntries(
+    filterDirectoryEntries(directory.listing.entries || [], directory.searchQuery),
+    directory.sortKey,
+    directory.sortDirection,
+  );
+}
+
+async function openDirectoryBrowser(mode) {
+  try {
+    const listing = await api("/api/gateway/directories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.gateway.gateway_root || null }),
+    });
+    openModal({
+      kind: "directory",
+      title: mode === "create" ? "新建工作区" : "打开工作区",
+      description: "浏览 ME Gateway 宿主机上的文件和文件夹。",
+      choices: [], selected: null, confirmLabel: mode === "create" ? "创建并打开" : "打开",
+      html: `<div class="directory-browser"></div>`,
+      directory: {
+        mode, listing, selectedPath: null, searchQuery: "", sortKey: "name", sortDirection: "asc",
+        workspaceName: "", creatingFolder: false,
+      },
+      onOpen: renderDirectoryBrowser,
+      onConfirm: async () => {
+        const directoryModal = state.modal;
+        const directory = directoryModal?.directory;
+        const current = directory?.listing?.path;
+        if (!current) throw new Error("请选择目录");
+        let result;
+        if (mode === "create") {
+          const name = String(directory.workspaceName || "").trim();
+          if (!name) throw new Error("请输入工作区名称");
+          result = await api("/api/gateway/workspaces/create", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ parent: current, name }),
+          });
+        } else {
+          result = await api("/api/gateway/workspaces/open", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: current, initialize: false }),
+          });
+          if (result.status === "requires_initialization") {
+            openWorkspaceInitializationConfirm(directoryModal, result.path || current);
+            return;
+          }
+        }
+        await refreshGatewayState();
+        activateWorkspace(result.workspace_id);
+      },
+    });
+  } catch (error) { toast(error.message, true); }
+}
+
+function openWorkspaceInitializationConfirm(directoryModal, path) {
+  openModal({
+    title: "创建工作区？",
+    description: `所选目录“${displayHostPath(path)}”尚不是 ME 工作区。是否在此创建并打开？`,
+    choices: [], selected: null, confirmLabel: "创建并打开",
+    onCancel: () => openModal(directoryModal),
+    onConfirm: async () => {
+      const result = await api("/api/gateway/workspaces/open", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, initialize: true }),
+      });
+      if (result.status !== "opened" || !result.workspace_id) throw new Error("无法创建该工作区");
+      await refreshGatewayState();
+      activateWorkspace(result.workspace_id);
+    },
+  });
+}
+
+async function loadDirectoryListing(path, roots = false, preserveState = false) {
+  const directory = state.modal?.directory;
+  if (!directory) return;
   const browser = elements.modalContent.querySelector(".directory-browser");
-  const controls = [...elements.modalContent.querySelectorAll("[data-directory-up], [data-directory-path]")];
+  const controls = [...elements.modalContent.querySelectorAll("[data-directory-control]")];
   browser?.classList.add("loading");
-  controls.forEach((button) => { button.disabled = true; });
+  controls.forEach((control) => { control.disabled = true; });
   try {
     const listing = await api("/api/gateway/directories", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ path, roots }),
     });
-    if (state.modal) renderDirectoryListing(listing, mode);
+    if (state.modal?.directory !== directory) return;
+    const previousSelection = preserveState ? directory.selectedPath : null;
+    directory.listing = listing;
+    directory.selectedPath = (listing.entries || []).some((entry) => entry.path === previousSelection) ? previousSelection : null;
+    if (!preserveState) directory.searchQuery = "";
+    directory.creatingFolder = false;
+    renderDirectoryBrowser();
   } catch (error) {
     browser?.classList.remove("loading");
-    controls.forEach((button) => { button.disabled = false; });
+    controls.forEach((control) => { control.disabled = false; });
     toast(error.message, true);
   }
 }
 
-function renderDirectoryListing(listing, mode) {
-  if (!state.modal) return;
-  const workspaceName = elements.modalContent.querySelector("#new-workspace-name")?.value || "";
-  const directories = listing.directories || [];
+function directorySortHeader(key, label, directory) {
+  const active = directory.sortKey === key;
+  const ariaSort = active ? (directory.sortDirection === "asc" ? "ascending" : "descending") : "none";
+  const indicator = active ? (directory.sortDirection === "asc" ? "↑" : "↓") : "";
+  return `<button type="button" class="directory-sort${active ? " active" : ""}" data-directory-sort="${key}" aria-sort="${ariaSort}" data-directory-control><span>${label}</span><span class="directory-sort-indicator" aria-hidden="true">${indicator}</span></button>`;
+}
+
+function renderDirectoryBrowser() {
+  const directory = state.modal?.directory;
+  if (!directory) return;
+  const listing = directory.listing;
   const rootSelector = listing.root_selector === true;
   const parentRequest = directoryParentRequest(listing);
   const currentLocation = rootSelector ? "此电脑" : displayHostPath(listing.path);
-  const itemCount = `${directories.length} 个${rootSelector ? "磁盘" : "文件夹"}`;
-  const folderIcon = `<svg class="directory-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15v-13.5Z"/><path d="M3.5 10h17"/></svg>`;
-  const driveIcon = `<svg class="directory-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M3.5 14h17"/><circle cx="17" cy="16.5" r=".8"/></svg>`;
-  const locationIcon = rootSelector ? driveIcon : folderIcon;
-  const entryIcon = rootSelector ? driveIcon : folderIcon;
-  const emptyTitle = rootSelector ? "没有可用磁盘" : "此位置没有子目录";
-  const emptyDescription = rootSelector ? "当前宿主机没有可浏览的逻辑盘符。" : "可以选择当前目录，或返回上一级继续浏览。";
-  state.modal.directory = listing;
+  const locationIcon = directoryEntryIcon({ kind: rootSelector ? "drive" : "directory" });
   elements.modalContent.innerHTML = `<div class="directory-browser${rootSelector ? " root-selector" : ""}">
     <div class="directory-toolbar">
-      <button type="button" class="directory-up" aria-label="返回上一级" title="返回上一级" ${parentRequest ? `data-directory-up="true"` : "disabled"}><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
-      <div class="directory-current">
-        <span class="directory-location-icon">${locationIcon}</span>
-        <span class="directory-current-path" title="${escapeAttr(currentLocation)}">${escapeHtml(currentLocation)}</span>
-        <span class="directory-count">${escapeHtml(itemCount)}</span>
+      <div class="directory-navigation">
+        <button type="button" class="directory-control directory-up" aria-label="返回上一级" title="返回上一级" ${parentRequest ? "data-directory-up" : "disabled"} data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+        <div class="directory-current">
+          <span class="directory-location-icon">${locationIcon}</span>
+          <span class="directory-current-path" title="${escapeAttr(currentLocation)}">${escapeHtml(currentLocation)}</span>
+          <span class="directory-count"></span>
+        </div>
+      </div>
+      <div class="directory-tools">
+        <button type="button" class="directory-control directory-new-folder" aria-label="新建文件夹" title="新建文件夹" ${listing.path ? "data-directory-new-folder" : "disabled"} data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7h6l2 2h9v9.5a2 2 0 0 1-2 2h-15z"/><path d="M12 12v6m-3-3h6"/></svg></button>
+        <button type="button" class="directory-control directory-refresh" aria-label="刷新" title="刷新" data-directory-refresh data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 5"/><path d="M19 4v4h-4"/></svg></button>
+        <label class="directory-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input type="search" value="${escapeAttr(directory.searchQuery)}" placeholder="筛选当前目录" aria-label="筛选当前目录">
+          <button type="button" class="directory-search-clear${directory.searchQuery ? "" : " hidden"}" aria-label="清空筛选" title="清空筛选">×</button>
+        </label>
       </div>
     </div>
+    ${directory.creatingFolder ? `<form class="directory-new-folder-form"><label>新建文件夹<input id="directory-new-folder-name" autocomplete="off" placeholder="文件夹名称"></label><button type="submit" class="ghost-button">创建</button><button type="button" class="ghost-button" data-directory-new-folder-cancel>取消</button></form>` : ""}
     <div class="directory-table">
-      <div class="directory-list-header" aria-hidden="true"><span></span><span>名称</span><span>位置</span><span></span></div>
-      <div class="directory-list" role="list">
-        ${directories.map((directory) => {
-          const displayedPath = displayHostPath(directory.path);
-          return `<button type="button" class="directory-entry" role="listitem" data-directory-path="${escapeAttr(directory.path)}" aria-label="打开目录 ${escapeAttr(directory.name)}"><span class="directory-entry-icon">${entryIcon}</span><span class="directory-entry-name">${escapeHtml(directory.name)}</span><span class="directory-entry-path" title="${escapeAttr(displayedPath)}">${escapeHtml(displayedPath)}</span><svg class="directory-entry-arrow" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>`;
-        }).join("")}
-        ${directories.length ? "" : `<div class="directory-empty"><span class="directory-entry-icon">${locationIcon}</span><strong>${emptyTitle}</strong><span>${emptyDescription}</span></div>`}
+      <div class="directory-list-header" role="row">
+        ${directorySortHeader("name", "名称", directory)}
+        ${directorySortHeader("modified", "修改时间", directory)}
+        ${directorySortHeader("type", "类型", directory)}
+        ${directorySortHeader("size", "大小", directory)}
+        <span aria-hidden="true"></span>
       </div>
+      <div class="directory-list" role="listbox" aria-label="${rootSelector ? "磁盘" : "当前目录内容"}"></div>
     </div>
-    ${rootSelector ? `<p class="directory-help">请选择一个磁盘继续浏览。</p>` : mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(workspaceName)}" placeholder="例如：my-project"></label>` : `<p class="directory-help">当前目录将作为工作区打开。</p>`}
+    ${directory.mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(directory.workspaceName)}" placeholder="例如：my-project"></label>` : `<div class="directory-selection-summary"><span class="directory-target">当前目录将作为工作区打开。</span><span class="directory-selected-item"></span></div>`}
   </div>`;
   elements.modalConfirm.disabled = !listing.path;
   elements.modalContent.querySelector("[data-directory-up]")?.addEventListener("click", () => {
-    void loadDirectoryListing(parentRequest.path, mode, parentRequest.roots);
+    void loadDirectoryListing(parentRequest.path, parentRequest.roots);
   });
-  elements.modalContent.querySelectorAll("[data-directory-path]").forEach((button) => button.addEventListener("click", () => {
-    void loadDirectoryListing(button.dataset.directoryPath, mode);
+  elements.modalContent.querySelector("[data-directory-refresh]")?.addEventListener("click", () => {
+    void loadDirectoryListing(listing.path, rootSelector, true);
+  });
+  elements.modalContent.querySelector("[data-directory-new-folder]")?.addEventListener("click", () => {
+    directory.creatingFolder = true;
+    renderDirectoryBrowser();
+    elements.modalContent.querySelector("#directory-new-folder-name")?.focus();
+  });
+  elements.modalContent.querySelector("[data-directory-new-folder-cancel]")?.addEventListener("click", () => {
+    directory.creatingFolder = false;
+    renderDirectoryBrowser();
+  });
+  elements.modalContent.querySelector(".directory-new-folder-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = elements.modalContent.querySelector("#directory-new-folder-name")?.value.trim();
+    if (!name) { toast("请输入文件夹名称", true); return; }
+    try {
+      await api("/api/gateway/directories/create", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent: listing.path, name }),
+      });
+      await loadDirectoryListing(listing.path);
+    } catch (error) { toast(error.message, true); }
+  });
+  const search = elements.modalContent.querySelector(".directory-search input");
+  search?.addEventListener("input", () => {
+    directory.searchQuery = search.value;
+    renderDirectoryRows();
+    elements.modalContent.querySelector(".directory-search-clear")?.classList.toggle("hidden", !directory.searchQuery);
+  });
+  elements.modalContent.querySelector(".directory-search-clear")?.addEventListener("click", () => {
+    directory.searchQuery = "";
+    search.value = "";
+    renderDirectoryRows();
+    elements.modalContent.querySelector(".directory-search-clear")?.classList.add("hidden");
+    search.focus();
+  });
+  elements.modalContent.querySelectorAll("[data-directory-sort]").forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.directorySort;
+    if (directory.sortKey === key) directory.sortDirection = directory.sortDirection === "asc" ? "desc" : "asc";
+    else { directory.sortKey = key; directory.sortDirection = "asc"; }
+    renderDirectoryBrowser();
+    elements.modalContent.querySelector(`[data-directory-sort="${key}"]`)?.focus();
   }));
-  elements.modalContent.querySelector("#new-workspace-name")?.focus();
+  const workspaceName = elements.modalContent.querySelector("#new-workspace-name");
+  workspaceName?.addEventListener("input", () => { directory.workspaceName = workspaceName.value; });
+  renderDirectoryRows();
+  if (directory.creatingFolder) elements.modalContent.querySelector("#directory-new-folder-name")?.focus();
+  else if (directory.mode === "create") workspaceName?.focus();
+}
+
+function renderDirectoryRows() {
+  const directory = state.modal?.directory;
+  const list = elements.modalContent.querySelector(".directory-list");
+  if (!directory || !list) return;
+  const entries = directoryVisibleEntries(directory);
+  const allEntries = directory.listing.entries || [];
+  const rootSelector = directory.listing.root_selector === true;
+  const queryActive = String(directory.searchQuery || "").trim().length > 0;
+  list.innerHTML = entries.map((entry) => {
+    const navigable = entry.kind !== "file";
+    const selected = entry.path === directory.selectedPath;
+    const modified = formatDirectoryModified(entry.modified_at_ms);
+    const type = directoryEntryType(entry);
+    const size = formatDirectorySize(entry.size_bytes, entry.kind);
+    const label = navigable ? `${type} ${entry.name}，双击进入` : `文件 ${entry.name}，仅供查看`;
+    return `<div class="directory-entry${selected ? " selected" : ""}" role="option" tabindex="0" aria-selected="${selected}" aria-label="${escapeAttr(label)}" data-directory-entry="${escapeAttr(entry.path)}" data-entry-kind="${entry.kind}">
+      <span class="directory-entry-name"><span class="directory-entry-icon">${directoryEntryIcon(entry)}</span><span class="directory-entry-copy"><span class="directory-entry-title" title="${escapeAttr(entry.name)}">${escapeHtml(entry.name)}</span><span class="directory-entry-mobile-meta"><span>${escapeHtml(modified)}</span><span>${escapeHtml(type)}</span><span>${escapeHtml(size)}</span></span></span></span>
+      <span class="directory-entry-modified">${escapeHtml(modified)}</span>
+      <span class="directory-entry-type">${escapeHtml(type)}</span>
+      <span class="directory-entry-size">${escapeHtml(size)}</span>
+      ${navigable ? `<button type="button" class="directory-entry-enter" data-directory-enter="${escapeAttr(entry.path)}" aria-label="进入 ${escapeAttr(entry.name)}" title="进入"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>` : `<span class="directory-entry-action" aria-hidden="true"></span>`}
+    </div>`;
+  }).join("");
+  if (!entries.length) {
+    const title = queryActive ? "没有匹配项" : rootSelector ? "没有可用磁盘" : "此目录为空";
+    const detail = queryActive ? "请尝试其他筛选词。" : rootSelector ? "当前宿主机没有可浏览的逻辑盘符。" : "可以在此新建文件夹，或返回上一级。";
+    list.innerHTML = `<div class="directory-empty"><span class="directory-entry-icon">${directoryEntryIcon({ kind: rootSelector ? "drive" : "directory" })}</span><strong>${title}</strong><span>${detail}</span></div>`;
+  }
+  const count = elements.modalContent.querySelector(".directory-count");
+  if (count) count.textContent = queryActive ? `${entries.length} / ${allEntries.length} 项` : `${allEntries.length} 项`;
+  const selectedEntry = allEntries.find((entry) => entry.path === directory.selectedPath);
+  const selectedItem = elements.modalContent.querySelector(".directory-selected-item");
+  if (selectedItem) selectedItem.textContent = selectedEntry
+    ? selectedEntry.kind === "file" ? `已选择“${selectedEntry.name}”（文件仅供查看）` : `已选择“${selectedEntry.name}”（双击进入）`
+    : "双击文件夹进入；文件仅供查看。";
+  list.querySelectorAll("[data-directory-entry]").forEach((row) => {
+    row.addEventListener("click", () => {
+      directory.selectedPath = row.dataset.directoryEntry;
+      renderDirectoryRows();
+      list.querySelector(`[data-directory-entry="${CSS.escape(directory.selectedPath)}"]`)?.focus();
+    });
+    row.addEventListener("dblclick", () => {
+      if (row.dataset.entryKind !== "file") void loadDirectoryListing(row.dataset.directoryEntry);
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && row.dataset.entryKind !== "file") {
+        event.preventDefault();
+        void loadDirectoryListing(row.dataset.directoryEntry);
+      } else if (event.key === " ") {
+        event.preventDefault();
+        directory.selectedPath = row.dataset.directoryEntry;
+        renderDirectoryRows();
+      }
+    });
+  });
+  list.querySelectorAll("[data-directory-enter]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void loadDirectoryListing(button.dataset.directoryEnter);
+  }));
 }
 
 function blankGatewayModel() {
@@ -3669,11 +3910,13 @@ function openConfirm(title, description, confirmLabel, onConfirm, danger = false
 
 function openModal(modal) {
   const choices = modal.choices || [];
-  state.modal = { ...modal, choices };
+  state.modal = { ...modal, choices, busy: false };
   elements.modalTitle.textContent = modal.title;
   elements.modalDescription.textContent = modal.description || "";
   elements.modalDescription.classList.toggle("hidden", !modal.description);
   elements.modalConfirm.disabled = false;
+  elements.modalCancel.disabled = false;
+  elements.modalClose.disabled = false;
   elements.modalConfirm.textContent = modal.confirmLabel || "确认";
   elements.modalConfirm.classList.toggle("danger", !!modal.danger);
   elements.modalConfirm.classList.toggle("hidden", modal.confirmLabel === null);
@@ -3686,7 +3929,7 @@ function openModal(modal) {
   }));
   elements.modalBackdrop.classList.toggle("directory-modal-backdrop", modal.kind === "directory");
   elements.modalBackdrop.classList.remove("hidden");
-  modal.onOpen?.(elements.modalContent);
+  state.modal.onOpen?.(elements.modalContent);
 }
 
 function closeModal() {
@@ -3695,15 +3938,33 @@ function closeModal() {
   elements.modalBackdrop.classList.remove("directory-modal-backdrop");
 }
 
+function cancelModal() {
+  const modal = state.modal;
+  if (!modal || modal.busy) return;
+  if (modal.onCancel) modal.onCancel();
+  else closeModal();
+}
+
 async function confirmModal() {
   const modal = state.modal;
-  if (!modal) return;
+  if (!modal || modal.busy) return;
+  modal.busy = true;
   elements.modalConfirm.disabled = true;
+  elements.modalCancel.disabled = true;
+  elements.modalClose.disabled = true;
   try {
     if (modal.onConfirm) await modal.onConfirm(modal.selected);
-    closeModal();
-  } catch (error) { toast(error.message, true); }
-  finally { elements.modalConfirm.disabled = false; }
+    if (state.modal === modal) closeModal();
+  } catch (error) {
+    if (state.modal === modal) toast(error.message, true);
+  } finally {
+    if (state.modal === modal) {
+      modal.busy = false;
+      elements.modalConfirm.disabled = false;
+      elements.modalCancel.disabled = false;
+      elements.modalClose.disabled = false;
+    }
+  }
 }
 
 async function sendCommand(payload, workspaceId = state.workspaceId) {
@@ -4241,10 +4502,10 @@ elements.input.addEventListener("keydown", (event) => {
     event.preventDefault(); escapeAction();
   }
 });
-elements.modalClose.addEventListener("click", closeModal);
-elements.modalCancel.addEventListener("click", closeModal);
+elements.modalClose.addEventListener("click", cancelModal);
+elements.modalCancel.addEventListener("click", cancelModal);
 elements.modalConfirm.addEventListener("click", confirmModal);
-elements.modalBackdrop.addEventListener("click", (event) => { if (event.target === elements.modalBackdrop) closeModal(); });
+elements.modalBackdrop.addEventListener("click", (event) => { if (event.target === elements.modalBackdrop) cancelModal(); });
 elements.drawerClose.addEventListener("click", closeChoiceDrawer);
 elements.drawerBackdrop.addEventListener("click", (event) => { if (event.target === elements.drawerBackdrop) closeChoiceDrawer(); });
 elements.contextDrawerClose.addEventListener("click", closeContextDrawer);
@@ -4271,7 +4532,7 @@ document.addEventListener("click", (event) => {
 });
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!elements.compactSummaryBackdrop.classList.contains("hidden")) closeCompactSummary(); else if (state.contextDrawerOpen) closeContextDrawer(); else if (state.drawer) closeChoiceDrawer(); else if (state.modal) closeModal(); else if (state.userMenu) closeUserMessageMenu(); else if (state.agentMenu) closeAgentMenu(); else if (state.workspaceMenu) closeWorkspaceMenu();
+  if (!elements.compactSummaryBackdrop.classList.contains("hidden")) closeCompactSummary(); else if (state.contextDrawerOpen) closeContextDrawer(); else if (state.drawer) closeChoiceDrawer(); else if (state.modal) cancelModal(); else if (state.userMenu) closeUserMessageMenu(); else if (state.agentMenu) closeAgentMenu(); else if (state.workspaceMenu) closeWorkspaceMenu();
 });
 window.addEventListener("resize", () => {
   closeUserMessageMenu();

@@ -105,8 +105,6 @@ const elements = {
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
   sessionTerminalControls: $("#session-terminal-controls"),
-  sessionTerminalShell: $("#session-terminal-shell"),
-  sessionTerminalState: $("#session-terminal-state"),
   terminalView: $("#terminal-view"),
   transcript: $("#transcript"),
   transcriptContent: $("#transcript-content"),
@@ -202,8 +200,6 @@ function getSessionTerminalController() {
     sessionTerminalController = globalThis.MeSessionTerminal.create({
       container: elements.sessionTerminalScreen,
       controls: elements.sessionTerminalControls,
-      statusElement: elements.sessionTerminalState,
-      shellElement: elements.sessionTerminalShell,
       request: (path, options) => api(path, options),
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
     });

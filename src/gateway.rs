@@ -6,7 +6,7 @@ use std::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU64, Ordering},
     },
-    time::Duration,
+    time::{Duration, UNIX_EPOCH},
 };
 
 #[cfg(windows)]
@@ -21,6 +21,7 @@ use crate::{
     gateway_settings::GatewaySettings,
     gateway_state::{BUILTIN_WORKSPACE_ID, GatewayState, WorkspaceRecord},
     managed_protocol::bearer_header_value,
+    workspace_bootstrap::{self, WorkspaceBootstrap},
 };
 
 const MAX_NOTICES: usize = 32;
@@ -58,6 +59,11 @@ pub struct ProxyResponse {
     pub body: Vec<u8>,
 }
 
+pub enum OpenWorkspaceOutcome {
+    Opened(String),
+    RequiresInitialization { path: String },
+}
+
 #[derive(Serialize)]
 pub struct DirectoryListing {
     pub ok: bool,
@@ -65,13 +71,16 @@ pub struct DirectoryListing {
     pub parent: Option<String>,
     pub root_selector: bool,
     pub parent_is_root_selector: bool,
-    pub directories: Vec<DirectoryEntry>,
+    pub entries: Vec<DirectoryEntry>,
 }
 
 #[derive(Serialize)]
 pub struct DirectoryEntry {
     pub name: String,
     pub path: String,
+    pub kind: &'static str,
+    pub modified_at_ms: Option<u64>,
+    pub size_bytes: Option<u64>,
 }
 
 pub struct Gateway {
@@ -90,11 +99,12 @@ pub struct Gateway {
 impl Gateway {
     pub fn start(root: &Path) -> Result<Arc<Self>> {
         let global_config = global_config_path()?;
-        GlobalConfig::load(&global_config)?;
+        let global = GlobalConfig::load(&global_config)?;
         let root = fs::canonicalize(root)?;
         if !root.is_dir() {
             return Err(format!("me-gateway root is not a directory: {}", root.display()).into());
         }
+        workspace_bootstrap::initialize_if_missing(&root, &global.default_model)?;
         let me_s = me_s_executable()?;
         let mut state = GatewayState::load(&root)?;
         let builtin = ManagedProcess::start(&me_s, &root)
@@ -215,14 +225,16 @@ impl Gateway {
         })
     }
 
-    pub fn open_workspace(&self, path: &Path) -> Result<String> {
+    pub fn open_workspace(&self, path: &Path, initialize: bool) -> Result<OpenWorkspaceOutcome> {
         let _lifecycle = self
             .lifecycle
             .lock()
             .map_err(|_| "gateway lifecycle is unavailable")?;
         let path = canonical_directory(path)?;
         if path == self.root {
-            return Ok(BUILTIN_WORKSPACE_ID.to_owned());
+            return Ok(OpenWorkspaceOutcome::Opened(
+                BUILTIN_WORKSPACE_ID.to_owned(),
+            ));
         }
         let mut state = self
             .state
@@ -233,7 +245,19 @@ impl Gateway {
             .iter()
             .find(|record| record.path == path)
         {
-            return Ok(record.id.clone());
+            return Ok(OpenWorkspaceOutcome::Opened(record.id.clone()));
+        }
+        match workspace_bootstrap::inspect(&path)? {
+            WorkspaceBootstrap::Ready(_) => {}
+            WorkspaceBootstrap::Missing if !initialize => {
+                return Ok(OpenWorkspaceOutcome::RequiresInitialization {
+                    path: path.to_string_lossy().into_owned(),
+                });
+            }
+            WorkspaceBootstrap::Missing => {
+                let global = GlobalConfig::load(&self.global_config)?;
+                workspace_bootstrap::create_new(&path, &global.default_model)?;
+            }
         }
         let id = self.new_workspace_id(&state)?;
         let process = ManagedProcess::start(&self.me_s, &path)?;
@@ -250,7 +274,7 @@ impl Gateway {
             .map_err(|_| "gateway process registry is unavailable")?
             .insert(id.clone(), process);
         *state = updated;
-        Ok(id)
+        Ok(OpenWorkspaceOutcome::Opened(id))
     }
 
     pub fn create_workspace(&self, parent: &Path, name: &str) -> Result<String> {
@@ -258,7 +282,22 @@ impl Gateway {
         let parent = canonical_directory(parent)?;
         let path = parent.join(name);
         fs::create_dir(&path)?;
-        self.open_workspace(&path)
+        let global = GlobalConfig::load(&self.global_config)?;
+        workspace_bootstrap::create_new(&path, &global.default_model)?;
+        match self.open_workspace(&path, false)? {
+            OpenWorkspaceOutcome::Opened(id) => Ok(id),
+            OpenWorkspaceOutcome::RequiresInitialization { .. } => {
+                Err("new Workspace was not initialized".into())
+            }
+        }
+    }
+
+    pub fn create_directory(&self, parent: &Path, name: &str) -> Result<PathBuf> {
+        validate_directory_name(name)?;
+        let parent = canonical_directory(parent)?;
+        let path = parent.join(name);
+        fs::create_dir(&path)?;
+        canonical_directory(&path)
     }
 
     pub fn close_workspace(&self, id: &str) -> Result<()> {
@@ -434,26 +473,39 @@ impl Gateway {
             parent: None,
             root_selector: true,
             parent_is_root_selector: false,
-            directories: host_directory_roots()?,
+            entries: host_directory_roots()?,
         })
     }
 
     pub fn list_directories(&self, path: Option<&Path>) -> Result<DirectoryListing> {
         let path = canonical_directory(path.unwrap_or(&self.root))?;
-        let mut directories = fs::read_dir(&path)?
+        let mut entries = fs::read_dir(&path)?
             .filter_map(|entry| entry.ok())
             .filter_map(|entry| {
-                entry
-                    .file_type()
-                    .ok()
-                    .filter(|kind| kind.is_dir())
-                    .map(|_| DirectoryEntry {
-                        name: entry.file_name().to_string_lossy().into_owned(),
-                        path: entry.path().to_string_lossy().into_owned(),
-                    })
+                let file_type = entry.file_type().ok()?;
+                if file_type.is_symlink() || (!file_type.is_dir() && !file_type.is_file()) {
+                    return None;
+                }
+                let metadata = entry.metadata().ok();
+                let kind = if file_type.is_dir() {
+                    "directory"
+                } else {
+                    "file"
+                };
+                Some(DirectoryEntry {
+                    name: entry.file_name().to_string_lossy().into_owned(),
+                    path: entry.path().to_string_lossy().into_owned(),
+                    kind,
+                    modified_at_ms: metadata.as_ref().and_then(modified_at_ms),
+                    size_bytes: if kind == "file" {
+                        metadata.as_ref().map(|value| value.len())
+                    } else {
+                        None
+                    },
+                })
             })
             .collect::<Vec<_>>();
-        directories.sort_by_key(|entry| entry.name.to_lowercase());
+        entries.sort_by_key(|entry| (entry.kind == "file", entry.name.to_lowercase()));
         let parent = path
             .parent()
             .map(|parent| parent.to_string_lossy().into_owned());
@@ -463,7 +515,7 @@ impl Gateway {
             parent_is_root_selector: cfg!(windows) && parent.is_none(),
             parent,
             root_selector: false,
-            directories,
+            entries,
         })
     }
 
@@ -538,6 +590,17 @@ fn canonical_directory(path: &Path) -> Result<PathBuf> {
     Ok(path)
 }
 
+fn modified_at_ms(metadata: &fs::Metadata) -> Option<u64> {
+    metadata
+        .modified()
+        .ok()?
+        .duration_since(UNIX_EPOCH)
+        .ok()?
+        .as_millis()
+        .try_into()
+        .ok()
+}
+
 #[cfg(windows)]
 fn host_directory_roots() -> Result<Vec<DirectoryEntry>> {
     let mask = unsafe { GetLogicalDrives() };
@@ -552,6 +615,9 @@ fn host_directory_roots() -> Result<Vec<DirectoryEntry>> {
     Ok(vec![DirectoryEntry {
         name: "/".to_owned(),
         path: "/".to_owned(),
+        kind: "drive",
+        modified_at_ms: None,
+        size_bytes: None,
     }])
 }
 
@@ -564,6 +630,9 @@ fn windows_drive_entries(mask: u32) -> Vec<DirectoryEntry> {
             DirectoryEntry {
                 name: format!("{letter}:"),
                 path: format!("{letter}:\\"),
+                kind: "drive",
+                modified_at_ms: None,
+                size_bytes: None,
             }
         })
         .collect()

@@ -14,7 +14,10 @@ use serde_json::json;
 use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
-    Result, gateway::Gateway, gateway_settings::GatewaySettings, web_auth::WebSessionAuth,
+    Result,
+    gateway::{Gateway, OpenWorkspaceOutcome},
+    gateway_settings::GatewaySettings,
+    web_auth::WebSessionAuth,
 };
 
 pub const DEFAULT_GATEWAY_PORT: u16 = 38200;
@@ -60,7 +63,23 @@ impl Drop for GatewayWebUiServer {
 }
 
 pub fn start(gateway: Arc<Gateway>, passkey: Option<&str>) -> Result<GatewayWebUiServer> {
-    start_from(gateway, DEFAULT_GATEWAY_PORT, passkey)
+    #[cfg(debug_assertions)]
+    let first_port = match std::env::var("ME_GATEWAY_TEST_PORT") {
+        Ok(value) => {
+            let port = value
+                .parse::<u16>()
+                .map_err(|_| "ME_GATEWAY_TEST_PORT must be a valid nonzero port")?;
+            if port == 0 {
+                return Err("ME_GATEWAY_TEST_PORT must be a valid nonzero port".into());
+            }
+            port
+        }
+        Err(std::env::VarError::NotPresent) => DEFAULT_GATEWAY_PORT,
+        Err(error) => return Err(error.into()),
+    };
+    #[cfg(not(debug_assertions))]
+    let first_port = DEFAULT_GATEWAY_PORT;
+    start_from(gateway, first_port, passkey)
 }
 
 fn start_from(
@@ -231,12 +250,32 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 }
             }
         }
+        (&Method::Post, "/api/gateway/directories/create") => {
+            let input: CreateDirectoryRequest = read_json(request, MAX_BODY_BYTES)?;
+            match gateway.create_directory(&PathBuf::from(input.parent), &input.name) {
+                Ok(path) => Ok(json_response(
+                    StatusCode(200),
+                    &json!({"ok": true, "path": path.to_string_lossy()}),
+                )),
+                Err(error) => {
+                    eprintln!("warning: create host directory failed: {error}");
+                    Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok": false, "error": "无法创建文件夹"}),
+                    ))
+                }
+            }
+        }
         (&Method::Post, "/api/gateway/workspaces/open") => {
             let input: OpenWorkspaceRequest = read_json(request, MAX_BODY_BYTES)?;
-            match gateway.open_workspace(&PathBuf::from(input.path)) {
-                Ok(id) => Ok(json_response(
+            match gateway.open_workspace(&PathBuf::from(input.path), input.initialize) {
+                Ok(OpenWorkspaceOutcome::Opened(id)) => Ok(json_response(
                     StatusCode(200),
-                    &json!({"ok": true, "workspace_id": id}),
+                    &json!({"ok": true, "status": "opened", "workspace_id": id}),
+                )),
+                Ok(OpenWorkspaceOutcome::RequiresInitialization { path }) => Ok(json_response(
+                    StatusCode(200),
+                    &json!({"ok": true, "status": "requires_initialization", "path": path}),
                 )),
                 Err(error) => {
                     eprintln!("warning: open Workspace failed: {error}");
@@ -362,8 +401,16 @@ struct DirectoryRequest {
 }
 
 #[derive(Deserialize)]
+struct CreateDirectoryRequest {
+    parent: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
 struct OpenWorkspaceRequest {
     path: String,
+    #[serde(default)]
+    initialize: bool,
 }
 
 #[derive(Deserialize)]

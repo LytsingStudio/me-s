@@ -37,7 +37,7 @@ pub fn run(workspace_root: &Path) -> Result<()> {
         )
     })?;
     codex_oauth::add_models_if_logged_in(&mut global)?;
-    let local = workspace_bootstrap::load_or_create(workspace_root, &global.default_model)?;
+    let local = workspace_bootstrap::load(workspace_root)?;
     let canonical_workspace = fs::canonicalize(workspace_root)?;
     let workspace = Workspace::open_with_default_model(
         workspace_root,
