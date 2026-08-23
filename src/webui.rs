@@ -2319,9 +2319,13 @@ mod tests {
     fn embedded_webui_uses_recoverable_incremental_http_polling() {
         assert!(INDEX_HTML.contains("id=\"connection-overlay\""));
         assert!(INDEX_HTML.contains("id=\"connection-retry\""));
+        assert!(INDEX_HTML.contains("id=\"event-recovery-progress\""));
+        assert!(INDEX_HTML.contains("role=\"progressbar\""));
         assert!(
             STYLE_CSS.contains(".connection-overlay { position: fixed; inset: 0; z-index: 120;")
         );
+        assert!(STYLE_CSS.contains(".event-recovery-progress-fill"));
+        assert!(APP_JS.contains("function eventRecoveryProgress(recovery, localEventCount)"));
         assert!(APP_JS.contains("api(\"/api/sync\""));
         assert!(!APP_JS.contains("new WebSocket"));
         assert!(APP_JS.contains("if (state.syncInFlight"));
@@ -2535,6 +2539,9 @@ mod tests {
             APP_JS.contains("${active ? \"■\" : \"□\"} ${escapeHtml(current.objective.title)}")
         );
         assert!(!APP_JS.contains("目标: ${escapeHtml(current.objective.title)}"));
+        assert!(STYLE_CSS.contains(
+            ".objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 400; }"
+        ));
     }
 
     #[test]

@@ -27,6 +27,7 @@ function loadProjectionRuntime() {
       eventRecoveryBacklog,
       shouldUseBulkEventRecovery,
       createEventRecovery,
+      eventRecoveryProgress,
       eventRecoveryMatches,
       selectedEventRecoveryReady,
     };`);
@@ -317,7 +318,11 @@ describe("WebUI incremental event projections", () => {
     expect(runtime.shouldUseBulkEventRecovery(151, 50)).toBe(true);
 
     const recovery = runtime.createEventRecovery("main", 7, 151, 50);
-    expect(recovery).toEqual({ agentId: "main", mutationRevision: 7, targetEventCount: 151 });
+    expect(recovery).toEqual({ agentId: "main", mutationRevision: 7, startEventCount: 50, targetEventCount: 151 });
+    expect(runtime.eventRecoveryProgress(recovery, 50)).toBe(0);
+    expect(runtime.eventRecoveryProgress(recovery, 101)).toBe(51 / 101);
+    expect(runtime.eventRecoveryProgress(recovery, 151)).toBe(1);
+    expect(runtime.eventRecoveryProgress(recovery, 220)).toBe(1);
     expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 150)).toBe(false);
     expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 151)).toBe(true);
     expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 220)).toBe(true);

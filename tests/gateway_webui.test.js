@@ -12,7 +12,7 @@ function loadRuntime(relative) {
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
-      eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery,
+      eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
       eventRecoveryMatches, selectedEventRecoveryReady,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
@@ -122,6 +122,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(runtime.shouldUseBulkEventRecovery(100, 0)).toBe(false);
       expect(runtime.shouldUseBulkEventRecovery(101, 0)).toBe(true);
       const recovery = runtime.createEventRecovery("main", 4, 101, 0);
+      expect(runtime.eventRecoveryProgress(recovery, 0)).toBe(0);
+      expect(runtime.eventRecoveryProgress(recovery, 50)).toBe(50 / 101);
+      expect(runtime.eventRecoveryProgress(recovery, 101)).toBe(1);
       expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 100)).toBe(false);
       expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 101)).toBe(true);
       expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 140)).toBe(true);
@@ -144,12 +147,14 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     flushPendingRender();`);
       expect(source).toContain("if (bulkEventRecoveryActive()) return emptyProjectionChanges();");
       expect(source).toContain('elements.connectionRetry.classList.add("hidden")');
+      expect(source).toContain('elements.eventRecoveryProgress.setAttribute("aria-valuenow", String(percent))');
+      expect(source).toContain('elements.eventRecoveryProgressFill.style.transform = `scaleX(${progress})`');
       expect(source).toContain('elements.app.inert = true;');
     }
     const gateway = loadRuntime("../src/gateway_webui/app.js");
     const first = gateway.emptyGatewayWorkspaceState();
     const second = gateway.emptyGatewayWorkspaceState();
-    first.eventRecovery = { agentId: "main", mutationRevision: 1, targetEventCount: 101 };
+    first.eventRecovery = { agentId: "main", mutationRevision: 1, startEventCount: 0, targetEventCount: 101 };
     expect(second.eventRecovery).toBeNull();
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     expect(gatewaySource).toContain("eventRecovery: state.eventRecovery");
@@ -171,6 +176,13 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("keeps Objective details scoped while the whole card is the single accessible control", () => {
+    const objectiveTitleRule =
+      ".objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 400; }";
+    for (const relative of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
+      const style = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(style).toContain(objectiveTitleRule);
+    }
+
     const current = {
       objective: { id: "objective-1", title: "Ship safely", description: "Release details" },
       plans: [{ plan: { id: "plan-1", title: "Build", state: "active" }, notes: [{}] }],

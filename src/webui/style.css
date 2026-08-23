@@ -53,8 +53,12 @@ button { color: inherit; }
 .connection-card p { min-height: 38px; margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
 .connection-card button { min-width: 112px; }
 .connection-spinner { width: 26px; height: 26px; border: 3px solid var(--border-bright); border-top-color: var(--violet); border-radius: 50%; animation: connection-spin .8s linear infinite; }
+.event-recovery-progress { display: grid; width: 100%; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; margin: -4px 0 0; }
+.event-recovery-progress-track { height: 7px; overflow: hidden; border-radius: 999px; background: var(--border-bright); }
+.event-recovery-progress-fill { display: block; width: 100%; height: 100%; border-radius: inherit; background: linear-gradient(90deg, var(--violet), var(--cyan)); transform: scaleX(0); transform-origin: left center; transition: transform .18s ease-out; }
+.event-recovery-progress-label { min-width: 36px; color: var(--text); font-size: 12px; font-variant-numeric: tabular-nums; font-weight: 700; text-align: right; }
 @keyframes connection-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .connection-spinner { animation-duration: 1.8s; } }
+@media (prefers-reduced-motion: reduce) { .connection-spinner { animation-duration: 1.8s; } .event-recovery-progress-fill { transition: none; } }
 .sidebar { display: flex; min-width: 0; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); background: var(--sidebar); }
 .sidebar-scroll { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: transparent transparent; scrollbar-width: thin; }
 .sidebar-scroll.scrollbar-active, .sidebar-scroll:focus-within { scrollbar-color: var(--border-bright) transparent; }
@@ -183,7 +187,7 @@ button { color: inherit; }
 .objective-summary:hover { border-color: var(--border-bright); background: var(--panel-2); }
 .objective-summary:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .objective-header { display: flex; align-items: center; gap: 12px; }
-.objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 750; }
+.objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 400; }
 .objective-toggle { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; color: var(--muted); pointer-events: none; }
 .objective-toggle-icon { font-size: 16px; line-height: 1; }
 .objective-description { margin: 5px 0 10px 22px; color: var(--muted); font-size: 13px; }

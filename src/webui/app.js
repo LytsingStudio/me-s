@@ -86,6 +86,9 @@ const elements = {
   connectionOverlay: $("#connection-overlay"),
   connectionOverlayTitle: $("#connection-overlay-title"),
   connectionOverlayMessage: $("#connection-overlay-message"),
+  eventRecoveryProgress: $("#event-recovery-progress"),
+  eventRecoveryProgressFill: $("#event-recovery-progress-fill"),
+  eventRecoveryProgressLabel: $("#event-recovery-progress-label"),
   connectionRetry: $("#connection-retry"),
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
@@ -443,9 +446,26 @@ function failHttpSync(title, error) {
   showConnectionOverlay(title, `${detail}。请点击“立即重试”。`);
 }
 
+function resetEventRecoveryProgress() {
+  elements.eventRecoveryProgress.classList.add("hidden");
+  elements.eventRecoveryProgress.setAttribute("aria-valuenow", "0");
+  elements.eventRecoveryProgressFill.style.transform = "scaleX(0)";
+  elements.eventRecoveryProgressLabel.textContent = "0%";
+}
+
+function renderEventRecoveryProgress() {
+  const progress = eventRecoveryProgress(state.eventRecovery, currentStore()?.events.length);
+  const percent = Math.floor(progress * 100);
+  elements.eventRecoveryProgress.classList.remove("hidden");
+  elements.eventRecoveryProgress.setAttribute("aria-valuenow", String(percent));
+  elements.eventRecoveryProgressFill.style.transform = `scaleX(${progress})`;
+  elements.eventRecoveryProgressLabel.textContent = `${percent}%`;
+}
+
 function showConnectionOverlay(title, message) {
   elements.connectionOverlayTitle.textContent = title;
   elements.connectionOverlayMessage.textContent = message;
+  resetEventRecoveryProgress();
   elements.connectionRetry.classList.remove("hidden");
   elements.connectionOverlay.classList.remove("hidden");
   elements.app.inert = true;
@@ -455,6 +475,7 @@ function showConnectionOverlay(title, message) {
 function showEventRecoveryOverlay() {
   elements.connectionOverlayTitle.textContent = "正在恢复会话";
   elements.connectionOverlayMessage.textContent = "正在载入较长的会话历史，请稍候。";
+  renderEventRecoveryProgress();
   elements.connectionRetry.classList.add("hidden");
   elements.connectionOverlay.classList.remove("hidden");
   elements.app.inert = true;
@@ -466,6 +487,7 @@ function hideConnectionOverlay() {
     showEventRecoveryOverlay();
     return;
   }
+  resetEventRecoveryProgress();
   elements.connectionOverlay.classList.add("hidden");
   elements.connectionRetry.classList.remove("hidden");
   elements.app.inert = false;
@@ -629,8 +651,18 @@ function createEventRecovery(agentId, mutationRevision, authoritativeEventCount,
   return {
     agentId,
     mutationRevision: Number(mutationRevision) || 0,
+    startEventCount: Math.max(0, Number(localEventCount) || 0),
     targetEventCount: Math.max(0, Number(authoritativeEventCount) || 0),
   };
+}
+
+function eventRecoveryProgress(recovery, localEventCount) {
+  if (!recovery) return 0;
+  const start = Math.max(0, Number(recovery.startEventCount) || 0);
+  const target = Math.max(start, Number(recovery.targetEventCount) || 0);
+  if (target === start) return 1;
+  const current = Math.max(0, Number(localEventCount) || 0);
+  return Math.min(1, Math.max(0, current - start) / (target - start));
 }
 
 function eventRecoveryMatches(recovery, agentId, mutationRevision) {

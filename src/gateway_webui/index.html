@@ -143,6 +143,10 @@
       <span class="connection-spinner" aria-hidden="true"></span>
       <h2 id="connection-overlay-title">正在重新连接</h2>
       <p id="connection-overlay-message">连接已断开，正在恢复当前界面。</p>
+      <div id="event-recovery-progress" class="event-recovery-progress hidden" role="progressbar" aria-label="会话恢复进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+        <div class="event-recovery-progress-track" aria-hidden="true"><span id="event-recovery-progress-fill" class="event-recovery-progress-fill"></span></div>
+        <span id="event-recovery-progress-label" class="event-recovery-progress-label">0%</span>
+      </div>
       <button id="connection-retry" class="primary-button" type="button">立即重试</button>
     </div>
   </div>
