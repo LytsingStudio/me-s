@@ -1,0 +1,207 @@
+diff --git a/src/browser/Terminal.ts b/src/browser/Terminal.ts
+index 0e945aa..58db3f2 100644
+--- a/src/browser/Terminal.ts
++++ b/src/browser/Terminal.ts
+@@ -1170,10 +1170,11 @@ export class Terminal extends CoreTerminal implements ITerminal {
+    * @param ev The input event to be handled.
+    */
+   protected _inputEvent(ev: InputEvent): boolean {
+-    // Only support emoji IMEs when screen reader mode is disabled as the event must bubble up to
+-    // support reading out character input which can doubling up input characters
+-    // Based on these event traces: https://github.com/xtermjs/xterm.js/issues/3679
+-    if (ev.data && ev.inputType === 'insertText' && (!ev.composed || !this._keyDownSeen) && !this.optionsService.rawOptions.screenReaderMode) {
++    const compositionHelper = this._compositionHelper!;
++    // Direct text input belongs to the input event whenever no real composition is active. Using
++    // keydown/keyup state here drops or duplicates WebKit IME passthrough input during key rollover.
++    if (ev.data && ev.inputType === 'insertText' && !compositionHelper.isComposing && !compositionHelper.isSendingComposition && !this.optionsService.rawOptions.screenReaderMode) {
++      compositionHelper.notifyInputEvent();
+       if (this._keyPressHandled) {
+         return false;
+       }
+diff --git a/src/browser/TestUtils.test.ts b/src/browser/TestUtils.test.ts
+index c7c8438..f6393fa 100644
+--- a/src/browser/TestUtils.test.ts
++++ b/src/browser/TestUtils.test.ts
+@@ -338,6 +338,9 @@ export class MockCompositionHelper implements ICompositionHelper {
+   public get isComposing(): boolean {
+     return false;
+   }
++  public get isSendingComposition(): boolean {
++    return false;
++  }
+   public compositionstart(): void {
+     throw new Error('Method not implemented.');
+   }
+@@ -353,6 +356,7 @@ export class MockCompositionHelper implements ICompositionHelper {
+   public keydown(ev: KeyboardEvent): boolean {
+     return true;
+   }
++  public notifyInputEvent(): void { }
+ }
+ 
+ export class MockCoreBrowserService implements ICoreBrowserService {
+diff --git a/src/browser/Types.d.ts b/src/browser/Types.d.ts
+index 9ebc55d..bc3ed01 100644
+--- a/src/browser/Types.d.ts
++++ b/src/browser/Types.d.ts
+@@ -37,11 +37,13 @@ export type LineData = CharData[];
+ 
+ export interface ICompositionHelper {
+   readonly isComposing: boolean;
++  readonly isSendingComposition: boolean;
+   compositionstart(): void;
+   compositionupdate(ev: CompositionEvent): void;
+   compositionend(): void;
+   updateCompositionElements(dontRecurse?: boolean): void;
+   keydown(ev: KeyboardEvent): boolean;
++  notifyInputEvent(): void;
+ }
+ 
+ export interface IBrowser {
+diff --git a/src/browser/input/CompositionHelper.test.ts b/src/browser/input/CompositionHelper.test.ts
+index e29111e..75a1967 100644
+--- a/src/browser/input/CompositionHelper.test.ts
++++ b/src/browser/input/CompositionHelper.test.ts
+@@ -218,6 +218,53 @@ describe('CompositionHelper', () => {
+       }, 0);
+     });
+ 
++    it('Should keep a composing Enter in the IME until compositionend', (done) => {
++      compositionHelper.compositionstart();
++      compositionHelper.compositionupdate({ data: 'a' });
++      textarea.value = 'a';
++      setTimeout(() => {
++        const handled = compositionHelper.keydown({ keyCode: 13, isComposing: true } as KeyboardEvent);
++        assert.isFalse(handled);
++        assert.equal(handledText, '');
++        compositionHelper.compositionend();
++        setTimeout(() => {
++          assert.equal(handledText, 'a');
++          done();
++        }, 0);
++      }, 0);
++    });
++
++    it('Should not repeat a textarea change already handled by an input event', (done) => {
++      textarea.value = 'j';
++      compositionHelper.keydown({ keyCode: 229, isComposing: false } as KeyboardEvent);
++      textarea.value = 'jk';
++      compositionHelper.notifyInputEvent();
++      setTimeout(() => {
++        assert.equal(handledText, '');
++        done();
++      }, 0);
++    });
++
++    it('Should emit only the positional replacement from the textarea fallback', (done) => {
++      textarea.value = 'history a';
++      compositionHelper.keydown({ keyCode: 229, isComposing: false } as KeyboardEvent);
++      textarea.value = 'history é';
++      setTimeout(() => {
++        assert.equal(handledText, '\x7fé');
++        done();
++      }, 0);
++    });
++
++    it('Should emit one delete per removed Unicode code point from the textarea fallback', (done) => {
++      textarea.value = 'abc😀';
++      compositionHelper.keydown({ keyCode: 229, isComposing: false } as KeyboardEvent);
++      textarea.value = 'a';
++      setTimeout(() => {
++        assert.equal(handledText, '\x7f\x7f\x7f');
++        done();
++      }, 0);
++    });
++
+     it('Should insert non-composition characters input immediately after composition characters', (done) => {
+       // First character 'ㅇ'
+       compositionHelper.compositionstart();
+diff --git a/src/browser/input/CompositionHelper.ts b/src/browser/input/CompositionHelper.ts
+index 7542969..e2d81a6 100644
+--- a/src/browser/input/CompositionHelper.ts
++++ b/src/browser/input/CompositionHelper.ts
+@@ -35,6 +35,10 @@ export class CompositionHelper {
+    * in-progress composition.
+    */
+   private _isSendingComposition: boolean;
++  public get isSendingComposition(): boolean { return this._isSendingComposition; }
++
++  private _textareaChangeRevision: number = 0;
++  private _textareaChangeTimer: ReturnType<typeof setTimeout> | undefined;
+ 
+   /**
+    * Data already sent due to keydown event.
+@@ -60,6 +64,7 @@ export class CompositionHelper {
+    */
+   public compositionstart(): void {
+     this._isComposing = true;
++    this._textareaChangeRevision++;
+     this._compositionPosition.start = this._textarea.value.length;
+     this._compositionView.textContent = '';
+     this._dataAlreadySent = '';
+@@ -93,7 +98,7 @@ export class CompositionHelper {
+    */
+   public keydown(ev: KeyboardEvent): boolean {
+     if (this._isComposing || this._isSendingComposition) {
+-      if (ev.keyCode === 229) {
++      if (ev.isComposing || ev.keyCode === 229) {
+         // Continue composing if the keyCode is the "composition character"
+         return false;
+       }
+@@ -181,25 +186,40 @@ export class CompositionHelper {
+    * character" (229) is triggered, in order to allow non-composition text to be entered when an
+    * IME is active.
+    */
+-  private _handleAnyTextareaChanges(): void {
+-    const oldValue = this._textarea.value;
+-    setTimeout(() => {
+-      // Ignore if a composition has started since the timeout
+-      if (!this._isComposing) {
+-        const newValue = this._textarea.value;
+-
+-        const diff = newValue.replace(oldValue, '');
++  public notifyInputEvent(): void {
++    this._textareaChangeRevision++;
++  }
+ 
+-        this._dataAlreadySent = diff;
++  private _handleAnyTextareaChanges(): void {
++    if (this._textareaChangeTimer !== undefined) {
++      return;
++    }
++    const oldValue = Array.from(this._textarea.value);
++    const revision = this._textareaChangeRevision;
++    this._textareaChangeTimer = setTimeout(() => {
++      this._textareaChangeTimer = undefined;
++      if (this._isComposing || revision !== this._textareaChangeRevision) {
++        return;
++      }
+ 
+-        if (newValue.length > oldValue.length) {
+-          this._coreService.triggerDataEvent(diff, true);
+-        } else if (newValue.length < oldValue.length) {
+-          this._coreService.triggerDataEvent(`${C0.DEL}`, true);
+-        } else if ((newValue.length === oldValue.length) && (newValue !== oldValue)) {
+-          this._coreService.triggerDataEvent(newValue, true);
+-        }
++      const newValue = Array.from(this._textarea.value);
++      let prefix = 0;
++      while (prefix < oldValue.length && prefix < newValue.length && oldValue[prefix] === newValue[prefix]) {
++        prefix++;
++      }
++      let oldEnd = oldValue.length;
++      let newEnd = newValue.length;
++      while (oldEnd > prefix && newEnd > prefix && oldValue[oldEnd - 1] === newValue[newEnd - 1]) {
++        oldEnd--;
++        newEnd--;
++      }
+ 
++      const removed = oldEnd - prefix;
++      const added = newValue.slice(prefix, newEnd).join('');
++      const diff = C0.DEL.repeat(removed) + added;
++      this._dataAlreadySent = added;
++      if (diff.length > 0) {
++        this._coreService.triggerDataEvent(diff, true);
+       }
+     }, 0);
+   }

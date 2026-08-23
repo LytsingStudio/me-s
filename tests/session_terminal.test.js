@@ -53,6 +53,7 @@ function fakeRuntime(requests, readResponses = []) {
     TextEncoder,
     AbortController,
     document,
+    fitSize,
     terminals,
     setTimeout,
     clearTimeout,
@@ -271,6 +272,76 @@ describe("SessionTerminal browser transport", () => {
     controller.dispose();
   });
 
+  test("coalesces pending high-latency input without crossing resize boundaries", async () => {
+    const requests = [];
+    const runtime = fakeRuntime(requests);
+    const baseRequest = runtime.request;
+    let blockFirstInput = true;
+    let releaseFirstInput = null;
+    runtime.request = async (path, options, identity) => {
+      if (blockFirstInput && path.endsWith("/input")) {
+        blockFirstInput = false;
+        requests.push({ path, options, identity });
+        await new Promise((resolve) => { releaseFirstInput = resolve; });
+        return { ok: true, state: "running", error: null };
+      }
+      return baseRequest(path, options, identity);
+    };
+    const container = {
+      clientWidth: 800,
+      clientHeight: 500,
+      appendChild(child) { child.isConnected = true; },
+    };
+    const identity = { key: "workspace-a:main", workspaceId: "workspace-a", agentId: "main" };
+    const controller = SessionTerminal.create({
+      runtime,
+      container,
+      request: runtime.request,
+    });
+
+    controller.attach(identity);
+    await new Promise((resolve) => setTimeout(resolve, 160));
+    requests.length = 0;
+
+    runtime.terminals[0].dataHandler("A");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    runtime.terminals[0].dataHandler("B");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    runtime.terminals[0].dataHandler("C");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    runtime.fitSize.cols = 111;
+    runtime.fitSize.rows = 31;
+    controller.attach(identity);
+    await new Promise((resolve) => setTimeout(resolve, 100));
+
+    runtime.terminals[0].dataHandler("D");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    runtime.terminals[0].dataHandler("E");
+    await new Promise((resolve) => setTimeout(resolve, 25));
+
+    const beforeRelease = requests.filter((request) => /\/(?:input|resize)$/.test(request.path));
+    try {
+      expect(beforeRelease.map((request) => request.path.split("/").pop())).toEqual(["input"]);
+      expect(typeof releaseFirstInput).toBe("function");
+    } finally {
+      releaseFirstInput?.();
+    }
+    await new Promise((resolve) => setTimeout(resolve, 80));
+
+    const operations = requests.filter((request) => /\/(?:input|resize)$/.test(request.path));
+    expect(operations.map((request) => request.path.split("/").pop()))
+      .toEqual(["input", "input", "resize", "input"]);
+    expect(operations
+      .filter((request) => request.path.endsWith("/input"))
+      .map((request) => new TextDecoder().decode(
+        SessionTerminal.base64ToBytes(JSON.parse(request.options.body).data),
+      )))
+      .toEqual(["A", "BC", "DE"]);
+    expect(JSON.parse(operations[2].options.body)).toEqual({ cols: 111, rows: 31 });
+    controller.dispose();
+  });
+
   test("keeps the fixed native terminal distinct from dynamic Agent Terminal tool tabs", () => {
     for (const htmlPath of ["src/webui/index.html", "src/gateway_webui/index.html"]) {
       const html = read(htmlPath);
@@ -328,7 +399,7 @@ describe("SessionTerminal browser transport", () => {
     expect(read("src/terminal.rs")).not.toContain("session-terminal-byte");
   });
 
-  test("uses ordinary HTTP polling without browser persistence or lifecycle close calls", () => {
+  test("uses ordinary HTTP polling with one in-flight ordered operation queue", () => {
     const source = read("src/webui/session-terminal.js");
     expect(source).not.toContain("new WebSocket");
     expect(source).not.toContain("EventSource");
@@ -336,10 +407,27 @@ describe("SessionTerminal browser transport", () => {
     expect(source).not.toContain("sessionStorage");
     expect(source).not.toContain("beforeunload");
     expect(source).not.toContain("pagehide");
+    expect(source).not.toContain("operationChain");
     expect(source).toContain('terminalPath(session.identity, "read")');
-    expect(source).toContain('queueOperation(session, "input"');
+    expect(source).toContain("queueInputOperation(session, bytes)");
     expect(source).toContain('queueOperation(session, "resize"');
-    expect(source).toContain("session.operationChain = session.operationChain");
+    expect(source).toContain("operationQueue: []");
+    expect(source).toContain("operationRunning: false");
     expect(source).toContain('terminal.unicode.activeVersion = "11"');
+  });
+
+  test("keeps the auditable WebKit input patch coupled to the vendored xterm bundle", () => {
+    const patch = read("src/webui/vendor/xterm-5.5.0-me-s.patch");
+    const xterm = read("src/webui/vendor/xterm.js");
+    expect(patch).toContain("!compositionHelper.isComposing && !compositionHelper.isSendingComposition");
+    expect(patch).toContain("compositionHelper.notifyInputEvent();");
+    expect(patch).toContain("if (ev.isComposing || ev.keyCode === 229)");
+    expect(patch).toContain("revision !== this._textareaChangeRevision");
+    expect(patch).toContain("const oldValue = Array.from(this._textarea.value);");
+    expect(patch).toContain("const diff = C0.DEL.repeat(removed) + added;");
+    expect(patch).toContain("Should emit one delete per removed Unicode code point");
+    expect(xterm).toContain("notifyInputEvent");
+    expect(xterm).toContain("isSendingComposition");
+    expect(xterm).toContain("_textareaChangeRevision");
   });
 });

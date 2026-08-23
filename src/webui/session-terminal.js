@@ -157,21 +157,60 @@
       });
     }
 
-    function queueOperation(session, action, body, errorMessage, ignoreConflict = false) {
-      session.operationChain = session.operationChain
-        .catch(() => {})
-        .then(() => request(terminalPath(session.identity, action), {
+    function operationBody(operation) {
+      if (operation.action !== "input") return operation.body;
+      const bytes = new Uint8Array(operation.inputBytes);
+      let offset = 0;
+      for (const chunk of operation.inputChunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return { data: bytesToBase64(bytes) };
+    }
+
+    function runNextOperation(session) {
+      if (session.operationRunning || !session.operationQueue.length) return;
+      const operation = session.operationQueue.shift();
+      session.operationRunning = true;
+      Promise.resolve()
+        .then(() => request(terminalPath(session.identity, operation.action), {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
+          body: JSON.stringify(operationBody(operation)),
         }, session.identity))
         .catch((error) => {
           if (error?.status === 401) onUnauthorized?.();
-          if (active === session && !(ignoreConflict && error?.status === 409)) {
-            setStatus(session, session.state, error?.message || errorMessage);
+          if (active === session && !(operation.ignoreConflict && error?.status === 409)) {
+            setStatus(session, session.state, error?.message || operation.errorMessage);
           }
+        })
+        .then(() => {
+          session.operationRunning = false;
+          runNextOperation(session);
         });
-      return session.operationChain;
+    }
+
+    function queueOperation(session, action, body, errorMessage, ignoreConflict = false) {
+      session.operationQueue.push({ action, body, errorMessage, ignoreConflict });
+      runNextOperation(session);
+    }
+
+    function queueInputOperation(session, bytes) {
+      const pending = session.operationQueue[session.operationQueue.length - 1];
+      if (pending?.action === "input" && pending.inputBytes + bytes.length <= MAX_INPUT_BYTES) {
+        pending.inputChunks.push(bytes);
+        pending.inputBytes += bytes.length;
+      } else {
+        session.operationQueue.push({
+          action: "input",
+          body: null,
+          errorMessage: "输入失败",
+          ignoreConflict: false,
+          inputChunks: [bytes],
+          inputBytes: bytes.length,
+        });
+      }
+      runNextOperation(session);
     }
 
     function flushResize(session) {
@@ -235,7 +274,7 @@
         if (take < chunk.length) session.inputChunks.unshift(chunk.subarray(take));
       }
       session.inputBytes -= length;
-      queueOperation(session, "input", { data: bytesToBase64(bytes) }, "输入失败");
+      queueInputOperation(session, bytes);
       if (session.inputBytes) session.inputTimer = runtime.setTimeout(() => flushInput(session), 0);
     }
 
@@ -283,7 +322,8 @@
         inputTimer: null,
         inputChunks: [],
         inputBytes: 0,
-        operationChain: Promise.resolve(),
+        operationQueue: [],
+        operationRunning: false,
       };
       terminal.onData((data) => queueInput(session, encoder.encode(data)));
       terminal.onBinary((data) => {

@@ -344,6 +344,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const gateway = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
     for (const styles of [single, gateway]) {
       expect(styles).toContain("overflow: hidden; overscroll-behavior: none;");
+      expect(styles).toContain("html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }");
       expect(styles).toContain("body { position: fixed; inset: 0; }");
       expect(styles).toContain("height: 100%; height: 100dvh; min-height: 0;");
       expect(styles).toContain(".login-screen { display: grid; width: 100%; height: 100%; min-height: 0;");
