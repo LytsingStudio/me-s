@@ -359,6 +359,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("uses a fixed responsive Finder-style host directory window", () => {
     const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     const styles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    expect(source).not.toContain("浏览 ME Gateway 宿主机上的文件和文件夹。");
     expect(source).toContain('class="directory-list-header"');
     expect(source).toContain('data-directory-sort="${key}"');
     expect(source).toContain('placeholder="筛选当前目录"');
@@ -371,6 +372,15 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain('"/api/gateway/directories/create"');
     expect(styles).toContain(".directory-modal-backdrop .modal {");
     expect(styles).toContain("height: min(680px, calc(100dvh - 40px));");
+    expect(styles).toContain(".directory-modal-backdrop .modal > header, .directory-modal-backdrop .modal > footer { flex: 0 0 auto; }");
+    expect(styles).toContain(".directory-toolbar { display: grid; min-width: 0; grid-row: 1;");
+    expect(styles).toContain(".directory-new-folder-form { display: grid; grid-row: 2;");
+    expect(styles).toContain(".directory-table { display: flex; min-width: 0; min-height: 0; grid-row: 3;");
+    expect(styles).toContain(".directory-selection-summary, .directory-name { grid-row: 4; }");
+    expect(styles).toContain(".directory-modal-backdrop { align-items: end; padding: env(safe-area-inset-top) 0 0; }");
+    expect(styles).toContain("height: min(680px, calc(100dvh - env(safe-area-inset-top))); max-height: calc(100dvh - env(safe-area-inset-top));");
+    expect(styles).toContain("@media (max-width: 800px) and (max-height: 480px) and (orientation: landscape) {");
+    expect(styles).toContain(".directory-toolbar { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 6px; }");
     expect(styles).toContain("grid-template-columns: minmax(230px, 1fr) 150px 130px 90px 32px;");
     expect(styles).toContain(".directory-entry-mobile-meta { display: flex;");
     expect(styles).toContain(".directory-list { min-width: 0; min-height: 0; flex: 1; overflow: auto;");

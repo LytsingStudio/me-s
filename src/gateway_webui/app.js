@@ -3516,7 +3516,6 @@ async function openDirectoryBrowser(mode) {
     openModal({
       kind: "directory",
       title: mode === "create" ? "新建工作区" : "打开工作区",
-      description: "浏览 ME Gateway 宿主机上的文件和文件夹。",
       choices: [], selected: null, confirmLabel: mode === "create" ? "创建并打开" : "打开",
       html: `<div class="directory-browser"></div>`,
       directory: {
