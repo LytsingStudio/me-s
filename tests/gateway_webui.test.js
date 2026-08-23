@@ -430,8 +430,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
       expect(source).toContain("const active = sidebarAgentActive(summary);");
       expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
-      expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400;");
-      expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; font-weight: 700;");
+      expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
+      expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
+      expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
       expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
       expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
       expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");

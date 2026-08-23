@@ -85,9 +85,9 @@ button { color: inherit; }
 .agent-row.active { background: var(--agent-selected-bg); }
 .agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px; gap: 9px; align-items: center; padding: 5px 8px 5px 10px; border: 0; border-radius: 9px; background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .agent-dot { width: 8px; height: 8px; flex: 0 0 auto; border: 2px solid var(--muted); border-radius: 50%; }
-.agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 400; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
+.agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap; }
 .agent-dot.active { border-color: var(--cyan); background: var(--cyan); box-shadow: var(--activity-shadow); animation: agent-dot-breathe 3s ease-in-out infinite; will-change: opacity; }
-.agent-dot.active + .agent-label { color: transparent; font-weight: 700; background: linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%); background-position: 100% 0; background-size: 300% 100%; background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: agent-label-sweep 3s ease-in-out infinite; will-change: background-position; }
+.agent-dot.active + .agent-label { color: transparent; background: linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%); background-position: 100% 0; background-size: 300% 100%; background-clip: text; -webkit-background-clip: text; -webkit-text-fill-color: transparent; animation: agent-label-sweep 3s ease-in-out infinite; will-change: background-position; }
 @keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }
 @keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }
 @media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } .agent-dot.active + .agent-label { color: inherit; background: none; -webkit-text-fill-color: currentColor; animation: none; will-change: auto; } }

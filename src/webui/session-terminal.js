@@ -254,7 +254,6 @@
         fontSize: 14,
         lineHeight: 1.2,
         rightClickSelectsWord: true,
-        screenReaderMode: true,
         scrollback: 10_000,
         theme: terminalTheme(runtime),
       });
