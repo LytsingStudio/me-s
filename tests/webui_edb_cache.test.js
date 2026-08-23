@@ -96,6 +96,7 @@ describe("browser-local raw EDB cache", () => {
       expect(source).toContain("projection: emptyProjection()");
       expect(source).toContain("workmap: emptyWorkMap()");
       expect(source).toContain("if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key)");
+      expect(source).toContain("if (payload.reset || payload.events.length > 0) {");
       expect(source).toContain("persistAgentEdb(meta, store, Boolean(payload.reset))");
     }
 

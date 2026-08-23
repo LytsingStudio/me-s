@@ -391,12 +391,19 @@ fn sync_state_payload(
         for index in agent_indexes {
             let agent = &snapshot.agents[index];
             let cursor = cursors.get(agent.id.as_str());
+            // New WebUIs send a cursor hash only while validating an initial or
+            // reconnecting raw EDB cache. Even a complete cache still needs the
+            // non-persisted turn history regenerated from the authoritative EDB.
+            let restore_turn_history = cursor.is_some_and(|cursor| {
+                cursor.cursor_event_hash.is_some() && agent.orchestrator_name != "worker-agent"
+            });
             if !snapshot_changed
                 && cursor.is_some_and(|cursor| {
                     cursor.event_count == agent.events.len()
                         && cursor.mutation_revision == agent.mutation_revision
                         && cursor_event_hash_matches(cursor, &agent.events)
                 })
+                && !restore_turn_history
             {
                 continue;
             }
@@ -410,7 +417,7 @@ fn sync_state_payload(
             } else {
                 cursor.map_or(0, |cursor| cursor.event_count)
             };
-            if !reset && start == agent.events.len() {
+            if !reset && start == agent.events.len() && !restore_turn_history {
                 continue;
             }
             let available = &agent.events[start..];
@@ -424,6 +431,18 @@ fn sync_state_payload(
                         "cursor_event_hash": serde_json::Value::Null,
                         "turn_history_updated": true,
                         "turn_history": serde_json::Value::Null,
+                        "events": [],
+                    }));
+                } else if restore_turn_history {
+                    event_updates.push(json!({
+                        "agent_id": agent.id.to_string(),
+                        "reset": false,
+                        "event_count": agent.events.len(),
+                        "mutation_revision": agent.mutation_revision,
+                        "cursor_event_hash": cursor
+                            .and_then(|cursor| cursor.cursor_event_hash.clone()),
+                        "turn_history_updated": true,
+                        "turn_history": turn_history::latest_snapshot(&agent.events)?,
                         "events": [],
                     }));
                 }
@@ -443,7 +462,8 @@ fn sync_state_payload(
                 .events
                 .get(client_event_count - 1)
                 .map(EventBase::getHash);
-            let turn_history_updated = turn_history_needs_refresh(reset, start, events);
+            let turn_history_updated =
+                restore_turn_history || turn_history_needs_refresh(reset, start, events);
             let turn_history = if turn_history_updated && agent.orchestrator_name != "worker-agent"
             {
                 turn_history::latest_snapshot(&agent.events)?
@@ -1686,6 +1706,20 @@ mod tests {
     }
 
     fn sync_test_backend(events: Vec<Event>, mutation_revision: u64) -> SnapshotBackend {
+        sync_test_backend_for_orchestrator(
+            events,
+            mutation_revision,
+            crate::event::AgentKind::SubAgent,
+            "worker-agent",
+        )
+    }
+
+    fn sync_test_backend_for_orchestrator(
+        events: Vec<Event>,
+        mutation_revision: u64,
+        kind: crate::event::AgentKind,
+        orchestrator_name: &str,
+    ) -> SnapshotBackend {
         SnapshotBackend(UiSnapshot {
             revision: 7,
             environment: Arc::new(UiEnvironment {
@@ -1696,9 +1730,9 @@ mod tests {
             agents: vec![UiAgentSnapshot {
                 id: AgentId::new("main").unwrap(),
                 title: Some("Cached session".into()),
-                kind: crate::event::AgentKind::SubAgent,
+                kind,
                 parent_agent_id: None,
-                orchestrator_name: "worker-agent".into(),
+                orchestrator_name: orchestrator_name.into(),
                 edb_path: PathBuf::from("main.edb"),
                 edb_size_bytes: 0,
                 mutation_revision,
@@ -1963,6 +1997,98 @@ mod tests {
     }
 
     #[test]
+    fn http_sync_full_cached_prefix_restores_turn_history_without_replaying_events() {
+        let mut edb = crate::event::EventDataBase::new();
+        edb.append_agent_kind_def(
+            crate::event::AgentKind::Interactive,
+            "main-agent",
+            None,
+            None,
+        )
+        .unwrap();
+        let prompt = edb.append_user_prompt("remember cached turn").unwrap();
+        let api = edb.append_api_requesting(prompt).unwrap();
+        let call = edb
+            .append_tool_call(api, prompt, "compact", crate::compact::TOOL_NAME, "{}")
+            .unwrap();
+        edb.append_tool_result(call, crate::event::ToolResultState::Succeeded, None, "ok")
+            .unwrap();
+        let compact = edb
+            .append_compact_started(call, prompt, crate::event::CompactKind::MainAgentMultiTurn)
+            .unwrap();
+        let compact_sections = [
+            "analysis",
+            "1. Primary Request and Intent\nintent",
+            "2. Key Technical Context and Decisions\ndecisions",
+            "3. Files, Code, and Artifacts\nfiles",
+            "4. Problems, Investigations, and Resolutions\nproblems",
+            "5. Current State and Continuation Plan\nnext",
+        ];
+        for (stage, content) in crate::event::CompactStage::MULTI_TURN
+            .into_iter()
+            .zip(compact_sections)
+        {
+            edb.append_compact_stage(compact, stage, content).unwrap();
+        }
+        let summary =
+            crate::compact::merge_multi_turn_summary(compact_sections.into_iter().skip(1));
+        edb.append_compact_terminal(compact, crate::event::CompactState::Completed, summary, "")
+            .unwrap();
+        let events = edb.events().to_vec();
+        let event_count = events.len();
+        let final_hash = events.last().unwrap().getHash();
+        let backend = sync_test_backend_for_orchestrator(
+            events,
+            4,
+            crate::event::AgentKind::Interactive,
+            "main-agent",
+        );
+
+        let restored = sync_state_payload(
+            &backend,
+            Some(7),
+            vec![SyncAgentCursor {
+                id: "main".into(),
+                event_count,
+                mutation_revision: 4,
+                cursor_event_hash: Some(final_hash.clone()),
+            }],
+            Some("main".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        let update = &restored["event_updates"][0];
+        assert_eq!(update["reset"], false);
+        assert_eq!(update["events"], json!([]));
+        assert_eq!(update["cursor_event_hash"], final_hash);
+        assert_eq!(update["turn_history_updated"], true);
+        assert!(
+            update["turn_history"]
+                .as_str()
+                .is_some_and(|history| history.contains("remember cached turn"))
+        );
+
+        let ordinary_poll = sync_state_payload(
+            &backend,
+            Some(7),
+            vec![SyncAgentCursor {
+                id: "main".into(),
+                event_count,
+                mutation_revision: 4,
+                cursor_event_hash: None,
+            }],
+            Some("main".into()),
+            None,
+            None,
+            false,
+        )
+        .unwrap();
+        assert_eq!(ordinary_poll["event_updates"], json!([]));
+    }
+
+    #[test]
     fn http_sync_resets_invalid_length_mutation_and_authoritative_empty_edb() {
         let backend = sync_test_backend(sync_test_events(2), 4);
         for cursor in [
@@ -2024,6 +2150,7 @@ mod tests {
         assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
         assert!(EDB_CACHE_JS.contains("keyPath: [\"sessionKey\", \"order\"]"));
         assert!(APP_JS.contains("cache_metadata_only: !state.edbCacheInitialized"));
+        assert!(APP_JS.contains("if (payload.reset || payload.events.length > 0) {"));
         assert!(APP_JS.contains("persistAgentEdb(meta, store, Boolean(payload.reset))"));
     }
 

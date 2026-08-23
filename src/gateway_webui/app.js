@@ -1297,7 +1297,9 @@ function syncAgentEvents(meta, payload) {
   }
   store.mutationRevision = payload.mutation_revision;
   store.lastEventHash = payload.cursor_event_hash ?? null;
-  persistAgentEdb(meta, store, Boolean(payload.reset));
+  if (payload.reset || payload.events.length > 0) {
+    persistAgentEdb(meta, store, Boolean(payload.reset));
+  }
   if (payload.turn_history_updated) store.turnHistory = payload.turn_history ?? null;
   observePromptSubmission(meta, store);
   return {
