@@ -4,32 +4,96 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
-function loadDraftRuntime() {
+function loadDraftRuntime(options = {}) {
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI draft runtime");
   const factory = new Function(
     "document", "performance", "matchMedia", "navigator", "fetch", "Blob", "requestAnimationFrame",
+    "setTimeout", "clearTimeout",
     `${source.slice(0, eventBindings)}
     return {
       state, elements, observeInputDraft, saveDraft, beginInputComposition, endInputComposition,
       projectChat, pendingPromptReachedProjection, promptSubmissionBoundary,
       commandResultIsUnknown, cancelPendingPromptSubmission, finishPendingPromptSubmission, sendCommand,
-      restoreDraft, flushDraftBeforePageCloses,
+      restoreDraft, flushDraftBeforePageCloses, queueDraftUpdate, runDraftSync, pauseDraftSyncForSubmission,
+      inputChangeCanShrink, autoSizeInput,
     };`);
-  const input = { value: "", style: {}, scrollHeight: 0 };
+  let inputHeight = "";
+  const heightWrites = [];
+  const input = {
+    value: "",
+    scrollHeight: 0,
+    style: {
+      get height() { return inputHeight; },
+      set height(value) { inputHeight = String(value); heightWrites.push(inputHeight); },
+    },
+  };
   const pageCloseCalls = [];
+  const fetchCalls = [];
+  const timers = new Map();
+  const animationFrames = new Map();
+  let nextTimerId = 1;
+  let nextAnimationFrameId = 1;
+  const setTimeoutFake = (callback, delay) => {
+    const id = nextTimerId++;
+    timers.set(id, { callback, delay });
+    return id;
+  };
+  const clearTimeoutFake = (id) => timers.delete(id);
+  const requestAnimationFrameFake = (callback) => {
+    const id = nextAnimationFrameId++;
+    animationFrames.set(id, callback);
+    return id;
+  };
+  const fetchFake = (...args) => {
+    pageCloseCalls.push(["fetch", ...args]);
+    fetchCalls.push(args);
+    if (options.fetch) return options.fetch(...args);
+    return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+  };
   const runtime = factory(
-    { querySelector: (selector) => selector === "#prompt-input" ? input : null },
+    { querySelector: (selector) => selector === "#prompt-input" ? input : null, cookie: "" },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
     { sendBeacon: (...args) => { pageCloseCalls.push(["beacon", ...args]); return true; } },
-    (...args) => { pageCloseCalls.push(["fetch", ...args]); return Promise.resolve(); },
+    fetchFake,
     undefined,
-    () => 1,
+    requestAnimationFrameFake,
+    setTimeoutFake,
+    clearTimeoutFake,
   );
   runtime.pageCloseCalls = pageCloseCalls;
+  runtime.fetchCalls = fetchCalls;
+  runtime.heightWrites = heightWrites;
+  runtime.pendingTimers = () => [...timers.values()];
+  runtime.pendingAnimationFrames = () => animationFrames.size;
+  runtime.runNextTimer = () => {
+    const next = timers.entries().next();
+    if (next.done) return null;
+    const [id, entry] = next.value;
+    timers.delete(id);
+    entry.callback();
+    return entry.delay;
+  };
+  runtime.runNextAnimationFrame = () => {
+    const next = animationFrames.entries().next();
+    if (next.done) return false;
+    const [id, callback] = next.value;
+    animationFrames.delete(id);
+    callback();
+    return true;
+  };
+  runtime.clearHeightWrites = () => { heightWrites.length = 0; };
   return runtime;
+}
+
+function jsonResponse(payload) {
+  return { ok: true, status: 200, json: async () => payload };
+}
+
+async function flushMicrotasks(turns = 12) {
+  for (let index = 0; index < turns; index += 1) await Promise.resolve();
 }
 
 function event(kind, id, value = {}) {
@@ -298,5 +362,140 @@ describe("WebUI authoritative input draft synchronization", () => {
     const invalidReceipt = new Error("invalid receipt");
     invalidReceipt.commandResultKnown = true;
     expect(commandResultIsUnknown(invalidReceipt)).toBe(false);
+  });
+
+  test("batches rapid local input into one accepted latest-value command without an extra sync", async () => {
+    const runtime = loadDraftRuntime({
+      fetch: () => Promise.resolve(jsonResponse({
+        ok: true, receipt: { accepted: true, input_draft_revision: 1 },
+      })),
+    });
+    runtime.state.connected = true;
+    runtime.state.connectionPhase = "connected";
+    runtime.state.stores.set("main", { inputDraftRevision: 0 });
+    runtime.queueDraftUpdate("main", "a");
+    runtime.queueDraftUpdate("main", "ab");
+    runtime.queueDraftUpdate("main", "abc");
+
+    expect(runtime.pendingTimers().map(({ delay }) => delay)).toEqual([80]);
+    expect(runtime.fetchCalls).toHaveLength(0);
+    expect(runtime.runNextTimer()).toBe(80);
+    await flushMicrotasks();
+
+    const commandCalls = runtime.fetchCalls.filter(([path]) => path === "/api/command");
+    expect(commandCalls).toHaveLength(1);
+    expect(JSON.parse(commandCalls[0][1].body)).toEqual({
+      command: "update_input_draft", agent_id: "main", expected_revision: 0, content: "abc",
+    });
+    expect(runtime.fetchCalls.some(([path]) => path === "/api/sync")).toBe(false);
+    expect(runtime.state.stores.get("main").inputDraftRevision).toBe(1);
+  });
+
+  test("keeps one draft request in flight and sends only the newest pending body", async () => {
+    let releaseFirst;
+    let commandCount = 0;
+    const runtime = loadDraftRuntime({
+      fetch: (path) => {
+        if (path !== "/api/command") throw new Error(`unexpected request: ${path}`);
+        commandCount += 1;
+        if (commandCount === 1) {
+          return new Promise((resolve) => {
+            releaseFirst = () => resolve(jsonResponse({
+              ok: true, receipt: { accepted: true, input_draft_revision: 1 },
+            }));
+          });
+        }
+        return Promise.resolve(jsonResponse({
+          ok: true, receipt: { accepted: true, input_draft_revision: 2 },
+        }));
+      },
+    });
+    runtime.state.connected = true;
+    runtime.state.connectionPhase = "connected";
+    runtime.state.stores.set("main", { inputDraftRevision: 0 });
+    runtime.queueDraftUpdate("main", "a");
+    runtime.runNextTimer();
+    expect(commandCount).toBe(1);
+
+    runtime.queueDraftUpdate("main", "ab");
+    runtime.queueDraftUpdate("main", "abcdef");
+    expect(runtime.pendingTimers()).toHaveLength(0);
+    expect(commandCount).toBe(1);
+    releaseFirst();
+    await flushMicrotasks();
+
+    const bodies = runtime.fetchCalls.map(([, options]) => JSON.parse(options.body));
+    expect(bodies.map(({ content }) => content)).toEqual(["a", "abcdef"]);
+    expect(runtime.state.stores.get("main").inputDraftRevision).toBe(2);
+    expect(runtime.state.draftSync.get("main").sending).toBe(false);
+  });
+
+  test("requests authority immediately when a draft revision is rejected", async () => {
+    const runtime = loadDraftRuntime({
+      fetch: (path) => {
+        if (path === "/api/command") {
+          return Promise.resolve(jsonResponse({
+            ok: true, receipt: { accepted: false, input_draft_revision: 4 },
+          }));
+        }
+        if (path === "/api/sync") return new Promise(() => {});
+        throw new Error(`unexpected request: ${path}`);
+      },
+    });
+    runtime.state.connected = true;
+    runtime.state.connectionPhase = "connected";
+    runtime.state.stores.set("main", { inputDraftRevision: 4, events: [], mutationRevision: 0 });
+    runtime.queueDraftUpdate("main", "stale body");
+    runtime.runNextTimer();
+    await flushMicrotasks();
+
+    expect(runtime.fetchCalls.map(([path]) => path)).toEqual(["/api/command", "/api/sync"]);
+    expect(runtime.state.draftSync.get("main").sent).toBe("stale body");
+  });
+
+  test("composition and submission pause clear deferred draft timers", async () => {
+    const runtime = loadDraftRuntime();
+    runtime.state.connected = true;
+    runtime.state.selectedAgent = "main";
+    runtime.state.stores.set("main", { inputDraftRevision: 0 });
+    runtime.elements.input.value = "完整输入";
+    runtime.queueDraftUpdate("main", "完整输入");
+    expect(runtime.pendingTimers()).toHaveLength(1);
+
+    runtime.beginInputComposition();
+    expect(runtime.pendingTimers()).toHaveLength(0);
+    runtime.endInputComposition();
+    expect(runtime.pendingTimers()).toHaveLength(1);
+    await runtime.pauseDraftSyncForSubmission("main");
+    expect(runtime.pendingTimers()).toHaveLength(0);
+    expect(runtime.state.draftSync.get("main").paused).toBe(true);
+  });
+
+  test("avoids same-height writes while preserving one growth commit and explicit shrink measurement", () => {
+    const runtime = loadDraftRuntime();
+    runtime.elements.input.scrollHeight = 40;
+    runtime.autoSizeInput(true);
+    expect(runtime.pendingAnimationFrames()).toBe(1);
+    runtime.runNextAnimationFrame();
+    expect(runtime.heightWrites).toEqual(["auto", "40px"]);
+
+    runtime.clearHeightWrites();
+    runtime.autoSizeInput(false);
+    runtime.runNextAnimationFrame();
+    expect(runtime.heightWrites).toEqual([]);
+
+    runtime.elements.input.scrollHeight = 72;
+    runtime.autoSizeInput(false);
+    runtime.runNextAnimationFrame();
+    expect(runtime.heightWrites).toEqual(["72px"]);
+
+    runtime.clearHeightWrites();
+    runtime.elements.input.scrollHeight = 28;
+    runtime.autoSizeInput(true);
+    runtime.runNextAnimationFrame();
+    expect(runtime.heightWrites).toEqual(["auto", "28px"]);
+    expect(runtime.inputChangeCanShrink({ inputType: "insertText" })).toBe(false);
+    expect(runtime.inputChangeCanShrink({ inputType: "deleteContentBackward" })).toBe(true);
+    expect(runtime.inputChangeCanShrink({ inputType: "insertFromPaste" })).toBe(true);
   });
 });

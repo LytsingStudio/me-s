@@ -5,6 +5,10 @@ const HTTP_SYNC_IDLE_MS = 1000;
 const HTTP_SYNC_TIMEOUT_MS = 15000;
 const EVENT_RECOVERY_THRESHOLD = 100;
 const RECONNECT_MAX_MS = 5000;
+const DRAFT_BATCH_MS = 80;
+const CONNECTION_DEGRADED_GRACE_MS = 2000;
+const CONNECTION_STABILIZE_MS = 1000;
+const CONNECTION_STABILIZE_SUCCESSES = 2;
 const INPUT_ANIMATION_QUIET_MS = 250;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
 const SEND_SHORTCUT_COOKIE = "me_send_shortcut";
@@ -45,6 +49,8 @@ const state = {
   workerActivityIndexes: new Map(),
   pendingRender: emptyRenderRequest(),
   inputResizeFrame: null,
+  inputHeight: null,
+  inputResizeAllowShrink: false,
   apiAnimationTick: 0,
   lastInputAt: Number.NEGATIVE_INFINITY,
   composing: false,
@@ -70,6 +76,14 @@ const state = {
   syncTimer: null,
   reconnectTimer: null,
   reconnectAttempt: 0,
+  connectionPhase: "initial",
+  connectionHadSuccess: false,
+  connectionFailureStartedAt: null,
+  connectionFailureDetail: "",
+  degradedTimer: null,
+  stabilizingSince: null,
+  stabilizingSuccesses: 0,
+  connectionOverlayMode: null,
   terminalFrames: new Map(),
   terminalFramesUnavailable: new Set(),
   pageClosing: false,
@@ -305,7 +319,9 @@ function showLogin(message = "") {
   deactivateSessionTerminalView();
   stopHttpPolling();
   state.authenticated = false;
-  state.connected = false;
+  state.connectionHadSuccess = false;
+  state.reconnectAttempt = 0;
+  setConnectionPhase("failed");
   hideConnectionOverlay();
   elements.app.classList.add("hidden");
   elements.loginScreen.classList.remove("hidden");
@@ -359,55 +375,86 @@ async function submitLogin(event) {
   }
 }
 
+function setConnectionPhase(phase) {
+  const changed = state.connectionPhase !== phase;
+  state.connectionPhase = phase;
+  state.connected = phase === "connected" || phase === "degraded";
+  state.connecting = ["initial", "degraded", "reconnecting", "stabilizing"].includes(phase);
+  if (changed) renderConnection();
+  return changed;
+}
+
+function connectionCanPoll() {
+  return state.connectionPhase !== "failed"
+    && !state.pageClosing
+    && (!state.authRequired || state.authenticated);
+}
+
+function clearDegradedTimer() {
+  clearTimeout(state.degradedTimer);
+  state.degradedTimer = null;
+  state.connectionFailureStartedAt = null;
+}
+
+function cancelActiveHttpSync() {
+  clearTimeout(state.syncTimer);
+  clearTimeout(state.reconnectTimer);
+  state.syncTimer = null;
+  state.reconnectTimer = null;
+  state.syncGeneration += 1;
+  state.syncController?.abort();
+  state.syncController = null;
+  state.syncInFlight = false;
+}
+
+function resetConnectionForInitialSync() {
+  cancelActiveHttpSync();
+  clearDegradedTimer();
+  state.connectionHadSuccess = false;
+  state.connectionFailureDetail = "";
+  state.reconnectAttempt = 0;
+  state.stabilizingSince = null;
+  state.stabilizingSuccesses = 0;
+  setConnectionPhase("initial");
+}
+
+function retryConnectionNow() {
+  cancelActiveHttpSync();
+  clearDegradedTimer();
+  state.reconnectAttempt = 0;
+  state.connectionFailureDetail = "";
+  state.stabilizingSince = null;
+  state.stabilizingSuccesses = 0;
+  setConnectionPhase(state.connectionHadSuccess ? "reconnecting" : "initial");
+  renderConnectionOverlayForPhase();
+  startHttpPolling();
+}
+
 function startHttpPolling() {
   if (state.pageClosing || (state.authRequired && !state.authenticated)) return;
   if (state.syncInFlight) return;
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
-  state.connected = false;
-  state.connecting = true;
-  renderConnection();
-  showConnectionOverlay(
-    state.reconnectAttempt ? "正在重新连接" : "正在连接",
-    state.reconnectAttempt
-      ? `连接已断开，正在进行第 ${state.reconnectAttempt + 1} 次重试。`
-      : "正在同步当前界面，请稍候。",
-  );
+  if (state.connectionPhase === "failed") {
+    setConnectionPhase(state.connectionHadSuccess ? "reconnecting" : "initial");
+  } else {
+    setConnectionPhase(state.connectionPhase);
+  }
+  renderConnectionOverlayForPhase();
   state.syncGeneration += 1;
   void requestHttpSync();
 }
 
 function stopHttpPolling() {
-  clearTimeout(state.syncTimer);
-  clearTimeout(state.reconnectTimer);
-  state.syncTimer = null;
-  state.reconnectTimer = null;
-  state.syncInFlight = false;
-  state.syncGeneration += 1;
-  state.syncController?.abort();
-  state.syncController = null;
+  cancelActiveHttpSync();
+  clearDegradedTimer();
 }
 
-function handlePollingFailure(error) {
-  clearTimeout(state.syncTimer);
-  state.syncTimer = null;
-  state.syncGeneration += 1;
-  state.syncController?.abort();
-  state.connected = false;
-  state.connecting = false;
-  state.syncInFlight = false;
-  state.syncController = null;
-  renderConnection();
-  if (state.pageClosing || (state.authRequired && !state.authenticated)) return;
-  state.reconnectAttempt += 1;
-  const delay = Math.min(RECONNECT_MAX_MS, 250 * (2 ** Math.min(state.reconnectAttempt - 1, 5)));
-  const detail = error instanceof Error ? error.message : String(error || "网络连接不可用");
-  showConnectionOverlay(
-    "正在重新连接",
-    `${detail}，将在 ${Math.max(1, Math.ceil(delay / 1000))} 秒内重试。`,
-  );
+function schedulePollingRetry(delay) {
+  clearTimeout(state.reconnectTimer);
   const generation = state.syncGeneration;
   state.reconnectTimer = setTimeout(async () => {
+    state.reconnectTimer = null;
     if (generation !== state.syncGeneration || state.pageClosing) return;
     if (state.authRequired) {
       try {
@@ -425,20 +472,72 @@ function handlePollingFailure(error) {
   }, delay);
 }
 
+function enterReconnecting(error) {
+  clearDegradedTimer();
+  state.connectionFailureDetail = error instanceof Error
+    ? error.message : String(error || "网络连接不可用");
+  state.stabilizingSince = null;
+  state.stabilizingSuccesses = 0;
+  setConnectionPhase("reconnecting");
+  state.reconnectAttempt += 1;
+  const delay = Math.min(RECONNECT_MAX_MS, 250 * (2 ** Math.min(state.reconnectAttempt - 1, 5)));
+  showConnectionOverlay(
+    "正在重新连接",
+    `${state.connectionFailureDetail}，将在 ${Math.max(1, Math.ceil(delay / 1000))} 秒内重试。`,
+  );
+  schedulePollingRetry(delay);
+}
+
+function promoteDegradedConnection() {
+  if (state.connectionPhase !== "degraded") return;
+  const detail = state.connectionFailureDetail || "网络连接持续不可用";
+  cancelActiveHttpSync();
+  enterReconnecting(new Error(detail));
+}
+
+function enterDegraded(error) {
+  const now = Date.now();
+  if (state.connectionPhase !== "degraded") {
+    state.connectionFailureStartedAt = now;
+    setConnectionPhase("degraded");
+  }
+  state.connectionFailureDetail = error instanceof Error
+    ? error.message : String(error || "网络连接不可用");
+  const elapsed = now - (state.connectionFailureStartedAt ?? now);
+  if (elapsed >= CONNECTION_DEGRADED_GRACE_MS) {
+    promoteDegradedConnection();
+    return;
+  }
+  if (state.degradedTimer === null) {
+    state.degradedTimer = setTimeout(
+      promoteDegradedConnection,
+      CONNECTION_DEGRADED_GRACE_MS - elapsed,
+    );
+  }
+  schedulePollingRetry(HTTP_SYNC_ACTIVE_MS);
+}
+
+function handlePollingFailure(error, { timedOut = false } = {}) {
+  const phase = state.connectionPhase;
+  cancelActiveHttpSync();
+  if (state.pageClosing || (state.authRequired && !state.authenticated) || phase === "failed") return;
+  if (!timedOut && state.connectionHadSuccess
+      && (phase === "connected" || phase === "degraded")) {
+    enterDegraded(error);
+    return;
+  }
+  enterReconnecting(error);
+}
+
 function failHttpSync(title, error) {
   const detail = error instanceof Error ? error.message : String(error || "未知错误");
   console.error(title, error);
-  clearTimeout(state.syncTimer);
-  clearTimeout(state.reconnectTimer);
-  state.syncTimer = null;
-  state.reconnectTimer = null;
-  state.syncInFlight = false;
-  state.connected = false;
-  state.connecting = false;
-  state.syncGeneration += 1;
-  state.syncController?.abort();
-  state.syncController = null;
-  renderConnection();
+  cancelActiveHttpSync();
+  clearDegradedTimer();
+  state.connectionFailureDetail = detail;
+  state.stabilizingSince = null;
+  state.stabilizingSuccesses = 0;
+  setConnectionPhase("failed");
   showConnectionOverlay(title, `${detail}。请点击“立即重试”。`);
 }
 
@@ -459,23 +558,28 @@ function renderEventRecoveryProgress() {
 }
 
 function showConnectionOverlay(title, message) {
-  elements.connectionOverlayTitle.textContent = title;
-  elements.connectionOverlayMessage.textContent = message;
+  if (elements.connectionOverlayTitle.textContent !== title) elements.connectionOverlayTitle.textContent = title;
+  if (elements.connectionOverlayMessage.textContent !== message) elements.connectionOverlayMessage.textContent = message;
+  if (state.connectionOverlayMode === "connection") return;
   resetEventRecoveryProgress();
   elements.connectionRetry.classList.remove("hidden");
   elements.connectionOverlay.classList.remove("hidden");
   elements.app.inert = true;
+  state.connectionOverlayMode = "connection";
   if (elements.app.contains(document.activeElement)) document.activeElement.blur();
 }
 
 function showEventRecoveryOverlay() {
-  elements.connectionOverlayTitle.textContent = "正在恢复会话";
-  elements.connectionOverlayMessage.textContent = "正在载入较长的会话历史，请稍候。";
+  if (state.connectionOverlayMode !== "recovery") {
+    elements.connectionOverlayTitle.textContent = "正在恢复会话";
+    elements.connectionOverlayMessage.textContent = "正在载入较长的会话历史，请稍候。";
+    elements.connectionRetry.classList.add("hidden");
+    elements.connectionOverlay.classList.remove("hidden");
+    elements.app.inert = true;
+    state.connectionOverlayMode = "recovery";
+    if (elements.app.contains(document.activeElement)) document.activeElement.blur();
+  }
   renderEventRecoveryProgress();
-  elements.connectionRetry.classList.add("hidden");
-  elements.connectionOverlay.classList.remove("hidden");
-  elements.app.inert = true;
-  if (elements.app.contains(document.activeElement)) document.activeElement.blur();
 }
 
 function hideConnectionOverlay() {
@@ -483,15 +587,79 @@ function hideConnectionOverlay() {
     showEventRecoveryOverlay();
     return;
   }
+  if (state.connectionOverlayMode === "hidden") return;
   resetEventRecoveryProgress();
   elements.connectionOverlay.classList.add("hidden");
   elements.connectionRetry.classList.remove("hidden");
   elements.app.inert = false;
+  state.connectionOverlayMode = "hidden";
+}
+
+function renderConnectionOverlayForPhase() {
+  if (bulkEventRecoveryActive()) {
+    showEventRecoveryOverlay();
+    return;
+  }
+  if (state.connectionPhase === "connected" || state.connectionPhase === "degraded") {
+    hideConnectionOverlay();
+  } else if (state.connectionPhase === "initial") {
+    showConnectionOverlay("正在连接", "正在同步当前界面，请稍候。");
+  } else if (state.connectionPhase === "reconnecting") {
+    showConnectionOverlay("正在重新连接", state.connectionFailureDetail || "正在恢复与服务的连接。");
+  } else if (state.connectionPhase === "stabilizing") {
+    showConnectionOverlay("连接正在恢复", "正在确认连接已稳定，请稍候。");
+  }
+}
+
+function markConnectionStable() {
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+  clearDegradedTimer();
+  state.connectionHadSuccess = true;
+  state.connectionFailureDetail = "";
+  state.reconnectAttempt = 0;
+  state.stabilizingSince = null;
+  state.stabilizingSuccesses = 0;
+  setConnectionPhase("connected");
+}
+
+function notePollingSuccess(authoritativeSelection, recoveryComplete = authoritativeSelection) {
+  clearTimeout(state.reconnectTimer);
+  state.reconnectTimer = null;
+  if (state.connectionPhase === "connected") return;
+  if (state.connectionPhase === "degraded") {
+    markConnectionStable();
+    return;
+  }
+  if (state.connectionPhase === "initial") {
+    if (authoritativeSelection) markConnectionStable();
+    return;
+  }
+  if (state.connectionPhase === "reconnecting") {
+    if (!state.connectionHadSuccess) {
+      if (authoritativeSelection) markConnectionStable();
+      else setConnectionPhase("initial");
+      return;
+    }
+    state.stabilizingSince = Date.now();
+    state.stabilizingSuccesses = 1;
+    setConnectionPhase("stabilizing");
+    return;
+  }
+  if (state.connectionPhase !== "stabilizing") return;
+  state.stabilizingSuccesses += 1;
+  const stableFor = Date.now() - (state.stabilizingSince ?? Date.now());
+  if (recoveryComplete
+      && !bulkEventRecoveryActive()
+      && state.stabilizingSuccesses >= CONNECTION_STABILIZE_SUCCESSES
+      && stableFor >= CONNECTION_STABILIZE_MS) {
+    markConnectionStable();
+  }
 }
 
 function scheduleHttpSync(delay) {
   clearTimeout(state.syncTimer);
-  if (!state.connected || state.pageClosing) return;
+  if (!connectionCanPoll()) return;
   state.syncTimer = setTimeout(requestHttpSync, delay);
 }
 
@@ -529,7 +697,8 @@ async function requestHttpSync() {
     } catch (error) {
       return failHttpSync("无法更新界面", error);
     }
-    const delay = message.more_events || state.apiActivity.active || state.view.kind === "terminal"
+    const delay = state.connectionPhase === "stabilizing"
+      || message.more_events || state.apiActivity.active || state.view.kind === "terminal"
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
     scheduleHttpSync(message.more_events ? 0 : delay);
   } catch (error) {
@@ -540,8 +709,9 @@ async function requestHttpSync() {
     if (error.status && ![502, 503, 504].includes(error.status)) {
       return failHttpSync("界面同步失败", error);
     }
-    const failure = error.name === "AbortError" ? new Error("界面同步超时") : error;
-    handlePollingFailure(failure);
+    const timedOut = error.name === "AbortError";
+    const failure = timedOut ? new Error("界面同步超时") : error;
+    handlePollingFailure(failure, { timedOut });
   } finally {
     clearTimeout(timeout);
   }
@@ -550,13 +720,14 @@ async function requestHttpSync() {
 function requestHttpSyncNow() {
   clearTimeout(state.syncTimer);
   state.syncTimer = null;
-  if (!state.syncInFlight && (state.connected || state.connecting)) void requestHttpSync();
+  if (!state.syncInFlight && connectionCanPoll()) void requestHttpSync();
 }
 
 function applySyncState(payload) {
+  const phaseBefore = state.connectionPhase;
+  const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";
   const hadBulkRecovery = bulkEventRecoveryActive();
   const previousSnapshot = state.snapshot;
-  const wasConnected = state.connected;
   if (payload.snapshot) {
     state.snapshot = payload.snapshot;
     state.snapshotInitialized = true;
@@ -571,7 +742,7 @@ function applySyncState(payload) {
   prepareSelectedEventRecovery(
     selectedMeta,
     selectedUpdate,
-    !wasConnected || selectionChanged || Boolean(selectedUpdate?.reset),
+    startingRecoveryCycle || selectionChanged || Boolean(selectedUpdate?.reset),
   );
   const recoveryTransitionedToIncremental = hadBulkRecovery && !bulkEventRecoveryActive();
   const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));
@@ -588,9 +759,6 @@ function applySyncState(payload) {
   if (responseMatchesSelection && payload.terminal_frame_updated) {
     syncTerminalFrame(payload.terminal_session, payload.terminal_frame ?? null);
   }
-  const fullyRecovered = responseMatchesSelection || wasConnected;
-  state.connected = fullyRecovered;
-  state.connecting = !fullyRecovered;
   const store = currentStore();
   const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(
     state.eventRecovery,
@@ -598,35 +766,34 @@ function applySyncState(payload) {
     store?.mutationRevision,
     store?.events.length,
   );
-  const bulkRecoveryPending = bulkEventRecoveryActive() && !recoveryReady;
-  if (fullyRecovered) {
-    state.reconnectAttempt = 0;
-    if (bulkRecoveryPending) showEventRecoveryOverlay();
-    else if (!recoveryReady && !recoveryTransitionedToIncremental) hideConnectionOverlay();
-  }
-  requestRender({
-    full: !bulkRecoveryPending && !recoveryReady && (!wasConnected || selectionChanged),
-    connection: !wasConnected,
-    agents: presentationChanged || agentSummaryChanged,
-    tabs: presentationChanged || terminalChanged,
-    currentEvents: !bulkRecoveryPending && !recoveryReady && selectedEventsChanged,
-    workerEvents: !bulkRecoveryPending && !recoveryReady && selectedWorkerChanged,
-    apiActivity: !bulkRecoveryPending && !recoveryReady && apiActivityChanged,
-    status: !bulkRecoveryPending && !recoveryReady && apiActivityChanged,
-  });
-  if (bulkRecoveryPending) suppressBulkEventRecoveryRender();
+  let forceRecoveredReplay = false;
   if (recoveryReady) {
     store.projectedOrder = 0;
     store.needsReplay = true;
     state.eventRecovery = null;
-    requestRender({ full: true, connection: !wasConnected });
-    flushPendingRender();
-    hideConnectionOverlay();
-  } else if (recoveryTransitionedToIncremental) {
-    flushPendingRender();
-    if (fullyRecovered) hideConnectionOverlay();
-  } else if (!inputHasPriority()) flushPendingRender();
+    forceRecoveredReplay = true;
+  }
+  const bulkRecoveryPending = bulkEventRecoveryActive();
+  notePollingSuccess(
+    responseMatchesSelection,
+    responseMatchesSelection && !payload.more_events,
+  );
+  const connectionChanged = phaseBefore !== state.connectionPhase;
+  requestRender({
+    full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged),
+    connection: connectionChanged,
+    agents: presentationChanged || agentSummaryChanged,
+    tabs: presentationChanged || terminalChanged,
+    currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged,
+    workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged,
+    apiActivity: !bulkRecoveryPending && !forceRecoveredReplay && apiActivityChanged,
+    status: !bulkRecoveryPending && !forceRecoveredReplay && apiActivityChanged,
+  });
+  if (bulkRecoveryPending) suppressBulkEventRecoveryRender();
+  if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();
+  else if (!inputHasPriority()) flushPendingRender();
   else if (state.view.kind === "terminal") renderTerminal();
+  renderConnectionOverlayForPhase();
   for (const [agentId, sync] of state.draftSync) {
     if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
   }
@@ -771,6 +938,7 @@ function reconcileAgents() {
     if (!ids.has(id)) {
       state.stores.delete(id);
       state.drafts.delete(id);
+      clearDraftBatch(state.draftSync.get(id));
       state.draftSync.delete(id);
       state.workerActivityIndexes.delete(id);
       changed = true;
@@ -812,7 +980,7 @@ function syncAgentEvents(meta, payload) {
     state.drafts.set(meta.id, initialDraft);
     if (state.selectedAgent === meta.id && elements.input.value !== initialDraft) {
       elements.input.value = initialDraft;
-      autoSizeInput();
+      autoSizeInput(true);
       renderSlashMenu();
     }
     changed = true;
@@ -897,7 +1065,7 @@ function adoptInputDraft(agentId, store, revision, content) {
   if (state.selectedAgent === agentId && elements.input.value !== content) {
     elements.input.value = content;
     state.slashIndex = 0;
-    autoSizeInput();
+    autoSizeInput(true);
     renderSlashMenu();
   }
   return true;
@@ -1958,6 +2126,10 @@ function updateMessageNode(node, message, afterTool, followsTool, index) {
     node.replaceWith(createMessageNode(message, afterTool, followsTool, index));
     return;
   }
+  if (visible && node.dataset.messageKind !== message.kind) {
+    node.replaceWith(createMessageNode(message, afterTool, followsTool, index));
+    return;
+  }
   if (!visible) {
     node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
     return;
@@ -1977,6 +2149,16 @@ function updateMessageNode(node, message, afterTool, followsTool, index) {
   }
   if (message.kind === "tool") {
     updateToolCardNode(node, message.tool, followsTool);
+    node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
+    return;
+  }
+  if (message.kind === "notice" || message.kind === "session") {
+    const content = node.querySelector(`:scope > .${message.kind}-content`);
+    if (!content) {
+      node.replaceWith(createMessageNode(message, afterTool, followsTool, index));
+      return;
+    }
+    content.textContent = message.content;
     node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
     return;
   }
@@ -2925,6 +3107,8 @@ function renderSlashMenu() {
     elements.slashMenu.classList.add("hidden");
     return;
   }
+  if (!elements.input.value.startsWith("/")
+      && elements.slashMenu.classList.contains("hidden")) return;
   const value = elements.input.value;
   const matches = value.startsWith("/") && !value.includes(" ")
     ? COMMANDS.filter(([name]) => name.startsWith(value)) : [];
@@ -2940,7 +3124,7 @@ async function openSlashCommand(name) {
   elements.input.value = "";
   saveDraft();
   state.slashIndex = 0;
-  autoSizeInput();
+  autoSizeInput(true);
   renderSlashMenu();
   if (!agentMeta() && name !== "/agent-add") return;
   if (name === "/agent-add") return openAddAgent();
@@ -3127,7 +3311,7 @@ async function confirmModal() {
   finally { elements.modalConfirm.disabled = false; }
 }
 
-async function sendCommand(payload) {
+async function sendCommand(payload, { refresh = true } = {}) {
   if (!state.connected) {
     const error = new Error("连接尚未恢复，请稍候");
     error.commandResultKnown = true;
@@ -3139,7 +3323,7 @@ async function sendCommand(payload) {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     });
-    requestHttpSyncNow();
+    if (refresh) requestHttpSyncNow();
     return response;
   } catch (error) {
     if (error.status === 401) showLogin("登录已失效，请重新登录");
@@ -3177,7 +3361,7 @@ function cancelPendingPromptSubmission(agentId, pending) {
   }
   if (state.selectedAgent === agentId) {
     elements.input.value = pending.displayContent;
-    autoSizeInput();
+    autoSizeInput(true);
     renderSlashMenu();
     requestAnimationFrame(() => elements.input.focus());
   }
@@ -3290,7 +3474,7 @@ async function escapeAction() {
     if (turn?.state === "active") await sendCommand({ command: "abort_turn", agent_id: state.selectedAgent });
     else if (turn?.state === "aborting") toast("正在等待当前生成中止");
     else if (turn?.state === "aborted") await sendCommand({ command: "rewind_context", agent_id: state.selectedAgent, event_id: turn.promptId });
-    else { elements.input.value = ""; saveDraft(); autoSizeInput(); renderSlashMenu(); }
+    else { elements.input.value = ""; saveDraft(); autoSizeInput(true); renderSlashMenu(); }
   } catch (error) { toast(error.message, true); }
 }
 
@@ -3306,7 +3490,7 @@ function saveDraft() {
     if (!sync) {
       sync = {
         desired: content, sent: previous, sending: false, paused: false,
-        inFlight: null, pendingRemote: null, waiters: [],
+        inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
       };
       state.draftSync.set(agentId, sync);
     } else sync.desired = content;
@@ -3318,11 +3502,16 @@ function saveDraft() {
 function beginInputComposition() {
   state.composing = true;
   const agentId = state.selectedAgent;
-  if (!agentId || state.draftSync.has(agentId)) return;
+  if (!agentId) return;
+  const existing = state.draftSync.get(agentId);
+  if (existing) {
+    clearDraftBatch(existing);
+    return;
+  }
   const content = elements.input.value;
   state.draftSync.set(agentId, {
     desired: content, sent: content, sending: false, paused: false,
-    inFlight: null, pendingRemote: null, waiters: [],
+    inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
   });
 }
 
@@ -3342,20 +3531,36 @@ function endInputComposition() {
   saveDraft();
 }
 
+function clearDraftBatch(sync) {
+  if (!sync || sync.batchTimer == null) return;
+  clearTimeout(sync.batchTimer);
+  sync.batchTimer = null;
+}
+
+function scheduleDraftSync(agentId, sync) {
+  if (sync.batchTimer != null || sync.sending || sync.paused) return;
+  sync.batchTimer = setTimeout(() => {
+    sync.batchTimer = null;
+    void runDraftSync(agentId, sync);
+  }, DRAFT_BATCH_MS);
+}
+
 function queueDraftUpdate(agentId, content) {
   let sync = state.draftSync.get(agentId);
   if (!sync) {
     sync = {
       desired: content, sent: null, sending: false, paused: false,
-      inFlight: null, pendingRemote: null, waiters: [],
+      inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
     };
     state.draftSync.set(agentId, sync);
   } else sync.desired = content;
-  void runDraftSync(agentId, sync);
+  scheduleDraftSync(agentId, sync);
 }
 
 async function runDraftSync(agentId, sync) {
-  if (sync.sending || sync.paused || !state.connected
+  if (sync.sending) return;
+  clearDraftBatch(sync);
+  if (sync.paused || !state.connected
       || (sync.retryAfter && Date.now() < sync.retryAfter)) return;
   sync.sending = true;
   let failed = false;
@@ -3376,7 +3581,7 @@ async function runDraftSync(agentId, sync) {
           agent_id: agentId,
           expected_revision: expectedRevision,
           content,
-        });
+        }, { refresh: false });
       } finally {
         if (sync.inFlight === flight) sync.inFlight = null;
       }
@@ -3386,6 +3591,7 @@ async function runDraftSync(agentId, sync) {
       if (revision < store.inputDraftRevision) continue;
       if (!accepted) {
         sync.sent = sync.desired;
+        requestHttpSyncNow();
         break;
       }
       store.inputDraftRevision = revision;
@@ -3408,7 +3614,7 @@ async function runDraftSync(agentId, sync) {
     waiters.forEach((resolve) => resolve());
     if (!failed && state.connected && !sync.paused
         && !(state.composing && state.selectedAgent === agentId) && shouldRetry) {
-      void runDraftSync(agentId, sync);
+      scheduleDraftSync(agentId, sync);
     }
   }
 }
@@ -3418,10 +3624,11 @@ async function pauseDraftSyncForSubmission(agentId) {
   if (!sync) {
     sync = {
       desired: "", sent: null, sending: false, paused: true,
-      inFlight: null, pendingRemote: null, waiters: [],
+      inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
     };
     state.draftSync.set(agentId, sync);
   } else {
+    clearDraftBatch(sync);
     sync.desired = "";
     sync.paused = true;
   }
@@ -3431,7 +3638,7 @@ async function pauseDraftSyncForSubmission(agentId) {
 function restoreDraft() {
   const pending = currentStore()?.pendingPromptSubmission;
   elements.input.value = pending?.displayContent ?? state.drafts.get(state.selectedAgent) ?? "";
-  autoSizeInput();
+  autoSizeInput(true);
 }
 
 function flushDraftBeforePageCloses() {
@@ -3465,12 +3672,26 @@ function flushDraftBeforePageCloses() {
   }
 }
 
-function autoSizeInput() {
+function inputChangeCanShrink(event) {
+  const type = String(event?.inputType || "");
+  return type.startsWith("delete")
+    || ["historyUndo", "historyRedo", "insertFromDrop", "insertFromPaste", "insertReplacementText"].includes(type);
+}
+
+function autoSizeInput(allowShrink = false) {
+  state.inputResizeAllowShrink ||= allowShrink;
   if (state.inputResizeFrame !== null) return;
   state.inputResizeFrame = requestAnimationFrame(() => {
     state.inputResizeFrame = null;
-    elements.input.style.height = "auto";
-    elements.input.style.height = `${Math.min(elements.input.scrollHeight, 180)}px`;
+    const canShrink = state.inputResizeAllowShrink;
+    state.inputResizeAllowShrink = false;
+    if (canShrink) elements.input.style.height = "auto";
+    const target = Math.min(elements.input.scrollHeight, 180);
+    if (state.inputHeight !== target || canShrink) {
+      const height = `${target}px`;
+      if (elements.input.style.height !== height) elements.input.style.height = height;
+      state.inputHeight = target;
+    }
   });
 }
 
@@ -3555,17 +3776,7 @@ elements.objective.addEventListener("click", toggleObjectiveDisclosure);
 elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
-elements.connectionRetry.addEventListener("click", () => {
-  clearTimeout(state.reconnectTimer);
-  state.reconnectTimer = null;
-  state.syncGeneration += 1;
-  state.syncController?.abort();
-  state.syncController = null;
-  state.connected = false;
-  state.connecting = false;
-  state.syncInFlight = false;
-  startHttpPolling();
-});
+elements.connectionRetry.addEventListener("click", retryConnectionNow);
 elements.addAgent.addEventListener("click", () => { closeMobileSidebar(); openAddAgent(); });
 elements.mobileSidebarToggle.addEventListener("click", openMobileSidebar);
 elements.mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);
@@ -3613,9 +3824,12 @@ elements.scrollToBottom.addEventListener("click", scrollTranscriptToBottomAfterL
 elements.statusModelTrigger.addEventListener("click", openModelDrawer);
 elements.statusEffortTrigger.addEventListener("click", openEffortDrawer);
 elements.statusContextTrigger.addEventListener("click", openContextDrawer);
-elements.input.addEventListener("input", () => {
+elements.input.addEventListener("input", (event) => {
   state.lastInputAt = performance.now();
-  saveDraft(); state.slashIndex = 0; autoSizeInput(); renderSlashMenu();
+  saveDraft();
+  state.slashIndex = 0;
+  autoSizeInput(inputChangeCanShrink(event));
+  renderSlashMenu();
 });
 elements.input.addEventListener("compositionstart", beginInputComposition);
 elements.input.addEventListener("compositionend", endInputComposition);

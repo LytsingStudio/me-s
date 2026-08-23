@@ -326,6 +326,43 @@ describe("WebUI transcript bottom follower", () => {
     expect(subject.follower.isFollowing()).toBe(false);
   });
 
+  test("deduplicates explicit and observed notifications for one layout change", () => {
+    let writes = 0;
+    const subject = harness({ onScrollTopChange() { writes += 1; } });
+    subject.viewport.clientHeight = 260;
+
+    subject.follower.layoutChanged();
+    subject.flushFrames();
+    subject.resize();
+    subject.flushFrames();
+
+    expect(writes).toBe(1);
+    expect(subject.viewport.scrollTop).toBe(740);
+  });
+
+  test("skips ordinary bottom writes when layout geometry is unchanged", () => {
+    let writes = 0;
+    const subject = harness({ onScrollTopChange() { writes += 1; } });
+
+    subject.follower.layoutChanged();
+    subject.flushFrames();
+    subject.resize();
+    subject.flushFrames();
+
+    expect(writes).toBe(0);
+    expect(subject.follower.isNearBottom()).toBe(true);
+  });
+
+  test("explicit follow still writes when layout geometry is unchanged", () => {
+    let writes = 0;
+    const subject = harness({ onScrollTopChange() { writes += 1; } });
+
+    subject.follower.follow();
+
+    expect(writes).toBe(1);
+    expect(subject.viewport.scrollTop).toBe(600);
+  });
+
   test("only this page's authoritative pending confirmation forces following", () => {
     const { beginConfirmedPromptRender } = loadPromptConfirmationRuntime();
     let followCount = 0;

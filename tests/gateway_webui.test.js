@@ -138,18 +138,21 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(source).toContain("delete elements.terminalScreen.dataset.revision;\n  restoreDraft();\n  const meta =");
-      expect(source).toContain("!wasConnected || selectionChanged || Boolean(selectedUpdate?.reset)");
+      expect(source).toContain('const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";');
+      expect(source).toContain("startingRecoveryCycle || selectionChanged || Boolean(selectedUpdate?.reset)");
       expect(source).toContain("const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(");
-      expect(source).toContain("const bulkRecoveryPending = bulkEventRecoveryActive() && !recoveryReady;");
-      expect(source).toContain("currentEvents: !bulkRecoveryPending && !recoveryReady && selectedEventsChanged");
-      expect(source).toContain("workerEvents: !bulkRecoveryPending && !recoveryReady && selectedWorkerChanged");
+      expect(source).toContain("const bulkRecoveryPending = bulkEventRecoveryActive();");
+      expect(source).toContain("currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged");
+      expect(source).toContain("workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged");
       expect(source).toContain("if (bulkRecoveryPending) suppressBulkEventRecoveryRender();");
       expect(source).toContain(`if (recoveryReady) {
     store.projectedOrder = 0;
     store.needsReplay = true;
     state.eventRecovery = null;
-    requestRender({ full: true, connection: !wasConnected });
-    flushPendingRender();`);
+    forceRecoveredReplay = true;
+  }`);
+      expect(source).toContain("full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged)");
+      expect(source).toContain("if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();");
       expect(source).toContain("if (bulkEventRecoveryActive()) return emptyProjectionChanges();");
       expect(source).toContain('elements.connectionRetry.classList.add("hidden")');
       expect(source).toContain('elements.eventRecoveryProgress.setAttribute("aria-valuenow", String(percent))');
@@ -166,6 +169,43 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gatewaySource).toContain("state.eventRecovery = workspace.eventRecovery;");
   });
 
+
+  test("keeps draft, message, paint, and connection stability policies aligned across both WebUIs", () => {
+    const sources = [
+      readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8"),
+      readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8"),
+    ];
+    for (const source of sources) {
+      expect(source).toContain("const DRAFT_BATCH_MS = 80;");
+      expect(source).toContain("batchTimer: null");
+      expect(source).toContain("refresh: false");
+      expect(source).toContain("function inputChangeCanShrink(event)");
+      expect(source).toContain("if (state.inputHeight !== target || canShrink)");
+      expect(source).toContain('message.kind === "notice" || message.kind === "session"');
+      expect(source).toContain("content.textContent = message.content;");
+      expect(source).toContain("const CONNECTION_DEGRADED_GRACE_MS = 2000;");
+      expect(source).toContain("const CONNECTION_STABILIZE_MS = 1000;");
+      expect(source).toContain("const CONNECTION_STABILIZE_SUCCESSES = 2;");
+      for (const phase of ["degraded", "reconnecting", "stabilizing"]) {
+        expect(source).toContain(`"${phase}"`);
+      }
+      expect(source).toContain('if (state.connectionOverlayMode === "connection") return;');
+      expect(source).toContain('if (state.connectionOverlayMode === "hidden") return;');
+    }
+
+    for (const relative of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
+      const style = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(style).toContain(".transcript-content > :nth-last-child(-n + 32) { content-visibility: visible; contain-intrinsic-size: none; }");
+      expect(style).toContain(".message-block { contain: layout paint style; content-visibility: auto;");
+      expect(style).toContain(".tool-card { contain: layout paint style; content-visibility: auto;");
+    }
+
+    const transcript = readFileSync(join(import.meta.dir, "../src/webui/transcript.js"), "utf8");
+    expect(transcript).toContain("let committedScrollHeight = viewport.scrollHeight;");
+    expect(transcript).toContain("scrollHeight !== committedScrollHeight");
+    expect(transcript).toContain("const applyFollowNow = (force = forcing)");
+    expect(transcript).toContain('style.setProperty("overflow", "hidden", "important")');
+  });
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {

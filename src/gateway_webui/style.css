@@ -149,6 +149,7 @@ button { color: inherit; }
 .notice .block-marker, .session .block-marker { color: var(--dim); }
 .notice-content, .session-content { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-card { contain: layout paint style; content-visibility: auto; contain-intrinsic-size: auto 31px; margin: 0 0 20px 0; border-radius: 10px; cursor: pointer; outline: none; }
+.transcript-content > :nth-last-child(-n + 32) { content-visibility: visible; contain-intrinsic-size: none; }
 .tool-card.follows-tool { margin-top: -20px; }
 .tool-card:hover, .tool-card:focus-visible { background: var(--hover-fill-soft); }
 .tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr); align-items: center; gap: 8px; min-height: 31px; min-width: 0; border: 0; background: transparent; padding: 0; cursor: pointer; }

@@ -2344,6 +2344,26 @@ mod tests {
     }
 
     #[test]
+    fn embedded_webui_batches_drafts_and_stabilizes_transcript_layout() {
+        assert!(APP_JS.contains("const DRAFT_BATCH_MS = 80;"));
+        assert!(APP_JS.contains("batchTimer: null"));
+        assert!(APP_JS.contains("refresh: false"));
+        assert!(APP_JS.contains("function inputChangeCanShrink(event)"));
+        assert!(APP_JS.contains("if (state.inputHeight !== target || canShrink)"));
+        assert!(APP_JS.contains("message.kind === \"notice\" || message.kind === \"session\""));
+        assert!(APP_JS.contains("content.textContent = message.content;"));
+        assert!(APP_JS.contains("const CONNECTION_DEGRADED_GRACE_MS = 2000;"));
+        assert!(APP_JS.contains("const CONNECTION_STABILIZE_MS = 1000;"));
+        assert!(APP_JS.contains("const CONNECTION_STABILIZE_SUCCESSES = 2;"));
+        assert!(APP_JS.contains("connectionPhase: \"initial\""));
+        assert!(APP_JS.contains("connectionOverlayMode: null"));
+        assert!(STYLE_CSS.contains(".transcript-content > :nth-last-child(-n + 32)"));
+        assert!(TRANSCRIPT_JS.contains("let committedScrollHeight = viewport.scrollHeight;"));
+        assert!(TRANSCRIPT_JS.contains("scrollHeight !== committedScrollHeight"));
+        assert!(TRANSCRIPT_JS.contains("const applyFollowNow = (force = forcing)"));
+    }
+
+    #[test]
     fn streaming_assistant_updates_keep_the_stable_message_node() {
         assert!(
             APP_JS.contains(
@@ -2356,7 +2376,7 @@ mod tests {
         assert!(APP_JS.contains(
             "if (node.meRenderRevision !== revision) updateMessageNode(node, message, afterTool, followsTool, index)"
         ));
-        assert!(TRANSCRIPT_JS.contains("viewport.scrollTop = viewport.scrollHeight"));
+        assert!(TRANSCRIPT_JS.contains("if (shouldWrite) viewport.scrollTop = scrollHeight;"));
         assert!(
             !APP_JS.contains("current.replaceWith(createMessageNode(message, afterTool, index))")
         );
@@ -2449,9 +2469,9 @@ mod tests {
         assert!(!APP_JS.contains("/api/events/"));
         assert!(!APP_JS.contains("/api/terminals/"));
         assert!(!APP_JS.contains("/api/terminal/"));
-        assert!(
-            APP_JS.contains("status: !bulkRecoveryPending && !recoveryReady && apiActivityChanged")
-        );
+        assert!(APP_JS.contains(
+            "status: !bulkRecoveryPending && !forceRecoveredReplay && apiActivityChanged"
+        ));
         assert!(APP_JS.contains("receivedSseEvents"));
         assert!(APP_JS.contains("if (request.status || changes.status) renderStatus()"));
         assert!(APP_JS.contains("else if (request.workerEvents && state.view.kind === \"chat\")"));
@@ -2515,7 +2535,7 @@ mod tests {
         assert!(APP_JS.contains("transcriptBottomFollower.layoutChanged();"));
         assert_eq!(
             TRANSCRIPT_JS
-                .matches("viewport.scrollTop = viewport.scrollHeight")
+                .matches("if (shouldWrite) viewport.scrollTop = scrollHeight;")
                 .count(),
             1
         );

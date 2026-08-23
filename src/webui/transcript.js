@@ -25,6 +25,8 @@
     let settleTimer = null;
     let kineticRestoreFrame = null;
     let kineticStyleSnapshot = null;
+    let committedScrollHeight = viewport.scrollHeight;
+    let committedClientHeight = viewport.clientHeight;
 
     const restoreKineticScrollLayer = () => {
       if (kineticRestoreFrame !== null) {
@@ -92,9 +94,17 @@
       clearSettling();
       settleTimer = setDelay(finishSettling, settleDelay);
     };
-    const applyFollowNow = () => {
+    const applyFollowNow = (force = forcing) => {
       if (!following || (userScrolling && !forcing)) return;
-      viewport.scrollTop = viewport.scrollHeight;
+      const scrollHeight = viewport.scrollHeight;
+      const clientHeight = viewport.clientHeight;
+      const shouldWrite = force
+        || scrollHeight !== committedScrollHeight
+        || clientHeight !== committedClientHeight
+        || !isNearBottom();
+      committedScrollHeight = scrollHeight;
+      committedClientHeight = clientHeight;
+      if (shouldWrite) viewport.scrollTop = scrollHeight;
       if (forcing) scheduleSettling();
       notify();
     };

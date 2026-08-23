@@ -98,6 +98,43 @@ function fragment(...children) {
   return node;
 }
 
+function loadMessageUpdateRuntime(relative) {
+  const source = readFileSync(join(import.meta.dir, relative), "utf8");
+  const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
+  if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
+  const replacement = { dataset: {}, classList: { toggle() {} }, addEventListener() {} };
+  const factory = new Function("document", "performance", "matchMedia", "MeTranscript", `${source.slice(0, eventBindings)}
+    return { state, updateMessageNode, messageRenderRevision };
+  `);
+  const runtime = factory(
+    {
+      cookie: "",
+      querySelector: () => null,
+      createElement: () => ({
+        set innerHTML(_value) {},
+        content: { firstElementChild: replacement },
+      }),
+    },
+    { now: () => 0 },
+    () => ({ matches: false, addEventListener() {} }),
+    { reconcileHtmlChildren() {} },
+  );
+  return { ...runtime, replacement };
+}
+
+function textMessageNode(kind, content) {
+  let replacement = null;
+  const node = {
+    dataset: { messageVisible: "true", messageKind: kind },
+    meRenderRevision: "old",
+    querySelector(selector) {
+      return selector === `:scope > .${kind}-content` ? content : null;
+    },
+    replaceWith(value) { replacement = value; },
+  };
+  return { node, replacement: () => replacement };
+}
+
 describe("shared WebUI transcript reconciliation", () => {
   test("preserves stable Markdown media and scroll containers while text grows", () => {
     const paragraphText = text("Stable ");
@@ -188,6 +225,32 @@ describe("shared WebUI transcript reconciliation", () => {
     for (const html of [singleIndex, gatewayIndex]) {
       expect(html.indexOf('/transcript.js')).toBeGreaterThan(html.indexOf('/markdown.js'));
       expect(html.indexOf('/transcript.js')).toBeLessThan(html.indexOf('/app.js'));
+    }
+  });
+
+  test("updates Compact notices and session text in place in both WebUIs", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadMessageUpdateRuntime(relative);
+      runtime.state.selectedAgent = "main";
+      for (const kind of ["notice", "session"]) {
+        const content = { textContent: "旧文本" };
+        const stable = textMessageNode(kind, content);
+        const message = {
+          kind, content: kind === "notice" ? "正在压缩 (1/6) ... ↓ 37" : "新会话状态",
+          revision: 7, presentationRevision: 3, timestamp: 10,
+        };
+        runtime.updateMessageNode(stable.node, message, false, false, 0);
+        expect(stable.replacement()).toBeNull();
+        expect(stable.node.querySelector(`:scope > .${kind}-content`)).toBe(content);
+        expect(content.textContent).toBe(message.content);
+        expect(stable.node.meRenderRevision).toBe("7:3:0:0:0:0");
+      }
+
+      const incompatible = textMessageNode("notice", null);
+      runtime.updateMessageNode(incompatible.node, {
+        kind: "notice", content: "结构恢复", revision: 8, presentationRevision: 0, timestamp: 11,
+      }, false, false, 0);
+      expect(incompatible.replacement()).toBe(runtime.replacement);
     }
   });
 });
