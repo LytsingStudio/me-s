@@ -3144,7 +3144,7 @@ function confirmContextClear() {
   if (!state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
   const agentId = state.selectedAgent;
   closeContextDrawer();
-  openConfirm("清空上下文？", "", "清空上下文", () => sendCommand({ command: "clear_context", agent_id: agentId }), true);
+  openConfirm("清空上下文？", "当前会话将从空白上下文继续，已有消息记录不会被删除。", "清空上下文", () => sendCommand({ command: "clear_context", agent_id: agentId }), true);
 }
 
 function renderTerminal() {
@@ -3262,7 +3262,7 @@ async function openSlashCommand(name) {
   if (name === "/agent-delete") return openDeleteAgent();
   if (name === "/model") return openModel();
   if (name === "/effort") return openEffort();
-  if (name === "/clear") return openConfirm("清空上下文？", "", "清空上下文", () => sendCommand({ command: "clear_context", agent_id: state.selectedAgent }));
+  if (name === "/clear") return openConfirm("清空上下文？", "当前会话将从空白上下文继续，已有消息记录不会被删除。", "清空上下文", () => sendCommand({ command: "clear_context", agent_id: state.selectedAgent }), true);
   if (name === "/rewind") return openRewind();
   if (name === "/exit") { window.close(); toast("浏览器不允许页面自行关闭时，请直接关闭标签页。"); }
 }
@@ -3909,6 +3909,7 @@ function openConfirm(title, description, confirmLabel, onConfirm, danger = false
 
 function openModal(modal) {
   const choices = modal.choices || [];
+  const messageOnly = modal.html == null && !choices.length;
   state.modal = { ...modal, choices, busy: false };
   elements.modalTitle.textContent = modal.title;
   elements.modalDescription.textContent = modal.description || "";
@@ -3926,6 +3927,7 @@ function openModal(modal) {
     state.modal.selected = input.value;
     elements.modalContent.querySelectorAll(".choice").forEach((choice) => choice.classList.toggle("selected", choice.contains(input)));
   }));
+  elements.modalBackdrop.classList.toggle("message-modal-backdrop", messageOnly);
   elements.modalBackdrop.classList.toggle("directory-modal-backdrop", modal.kind === "directory");
   elements.modalBackdrop.classList.remove("hidden");
   state.modal.onOpen?.(elements.modalContent);
@@ -3934,7 +3936,7 @@ function openModal(modal) {
 function closeModal() {
   state.modal = null;
   elements.modalBackdrop.classList.add("hidden");
-  elements.modalBackdrop.classList.remove("directory-modal-backdrop");
+  elements.modalBackdrop.classList.remove("directory-modal-backdrop", "message-modal-backdrop");
 }
 
 function cancelModal() {

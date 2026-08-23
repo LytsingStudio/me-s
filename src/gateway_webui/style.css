@@ -320,6 +320,10 @@ button { color: inherit; }
 .modal h2 { margin: 0; font-size: 16px; }.modal header button { border: 0; background: transparent; color: var(--muted); font-size: 23px; cursor: pointer; }
 .modal > p { margin: 0; padding: 13px 17px 0; color: var(--muted); font-size: 13px; }
 .modal-content { min-height: 60px; overflow: auto; padding: 14px 17px; }
+.message-modal-backdrop .modal { width: min(560px, calc(100vw - 40px)); min-height: min(260px, calc(100dvh - 40px)); }
+.message-modal-backdrop .modal > header { min-height: 64px; flex: 0 0 auto; padding: 16px 20px; }
+.message-modal-backdrop .modal > p { display: flex; min-height: 0; flex: 1 1 auto; align-items: center; overflow: auto; padding: 24px 22px; font-size: 14px; line-height: 1.65; overflow-wrap: anywhere; }
+.message-modal-backdrop .modal > footer { min-height: 72px; flex: 0 0 auto; padding: 16px 20px; }
 .choice-list { display: grid; gap: 5px; }
 .choice { display: flex; align-items: center; gap: 9px; padding: 10px; border: 1px solid transparent; border-radius: 9px; cursor: pointer; }
 .choice:hover, .choice.selected { border-color: var(--border-bright); background: var(--panel-3); }
@@ -538,6 +542,8 @@ button { color: inherit; }
   }
   .modal header, .modal footer { min-height: 52px; padding: 11px 14px; }
   .modal footer { padding-bottom: calc(11px + env(safe-area-inset-bottom)); }
+  .message-modal-backdrop .modal { width: 100%; min-height: min(280px, calc(86dvh - env(safe-area-inset-top))); }
+  .message-modal-backdrop .modal > footer { padding-bottom: calc(16px + env(safe-area-inset-bottom)); }
   .modal header button, .modal footer button { min-width: 44px; min-height: 44px; }
   .choice { min-height: 46px; }
   .drawer-backdrop { padding: env(safe-area-inset-top) 0 0; }

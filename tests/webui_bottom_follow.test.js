@@ -47,12 +47,13 @@ function harness(options = {}) {
     },
     interruptKineticScroll: options.interruptKineticScroll,
   };
+  const flushFrame = () => {
+    const pending = [...frames.values()];
+    frames.clear();
+    pending.forEach((callback) => callback());
+  };
   const flushFrames = () => {
-    while (frames.size) {
-      const pending = [...frames.values()];
-      frames.clear();
-      pending.forEach((callback) => callback());
-    }
+    while (frames.size) flushFrame();
   };
   const flushTimers = () => {
     const pending = [...timers.values()];
@@ -65,6 +66,7 @@ function harness(options = {}) {
     follower,
     resize: () => resizeCallback?.(),
     flushFrames,
+    flushFrame,
     flushTimers,
     pendingFrames: () => frames.size,
     pendingTimers: () => timers.size,
@@ -197,7 +199,7 @@ describe("WebUI transcript bottom follower", () => {
     expect(subject.viewport.scrollTop).toBe(600);
   });
 
-  test("recreates the scroll layer without leaking temporary inline styles", () => {
+  test("keeps the scroll layer disabled across a paint and restores it without leaking styles", () => {
     const operations = [];
     const values = new Map();
     const priorities = new Map();
@@ -231,6 +233,17 @@ describe("WebUI transcript bottom follower", () => {
       "set:overflow:hidden:important",
       "set:-webkit-overflow-scrolling:auto:important",
       "layout",
+      "scroll:600",
+    ]);
+    expect(style.getPropertyValue("overflow")).toBe("hidden");
+    expect(style.getPropertyValue("-webkit-overflow-scrolling")).toBe("auto");
+
+    subject.flushFrame();
+    expect(style.getPropertyValue("overflow")).toBe("hidden");
+    expect(style.getPropertyValue("-webkit-overflow-scrolling")).toBe("auto");
+
+    subject.flushFrame();
+    expect(operations.slice(-4)).toEqual([
       "remove:overflow",
       "remove:-webkit-overflow-scrolling",
       "layout",
@@ -238,6 +251,19 @@ describe("WebUI transcript bottom follower", () => {
     ]);
     expect(style.getPropertyValue("overflow")).toBe("");
     expect(style.getPropertyValue("-webkit-overflow-scrolling")).toBe("");
+    subject.flushFrames();
+
+    operations.length = 0;
+    subject.follower.follow();
+    subject.follower.beginUserInteraction();
+    expect(operations.slice(-3)).toEqual([
+      "remove:overflow",
+      "remove:-webkit-overflow-scrolling",
+      "layout",
+    ]);
+    expect(style.getPropertyValue("overflow")).toBe("");
+    expect(style.getPropertyValue("-webkit-overflow-scrolling")).toBe("");
+    expect(subject.pendingFrames()).toBe(0);
   });
 
   test("tracks inertia after pointer release until the scroll really settles", () => {

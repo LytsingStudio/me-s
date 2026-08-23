@@ -401,6 +401,28 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
+  test("balances short confirmation dialogs without resizing content modals", () => {
+    const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    for (const [source, styles] of [[singleSource, singleStyles], [gatewaySource, gatewayStyles]]) {
+      expect(source).toContain("当前会话将从空白上下文继续，已有消息记录不会被删除。");
+      expect(source).toContain('classList.toggle("message-modal-backdrop", messageOnly)');
+      expect(styles).toContain(".message-modal-backdrop .modal { width: min(560px, calc(100vw - 40px)); min-height: min(260px, calc(100dvh - 40px)); }");
+      expect(styles).toContain(".message-modal-backdrop .modal > header { min-height: 64px;");
+      expect(styles).toContain(".message-modal-backdrop .modal > p { display: flex;");
+      expect(styles).toContain(".message-modal-backdrop .modal > footer { min-height: 72px;");
+      expect(styles).toContain(".message-modal-backdrop .modal { width: 100%; min-height: min(280px, calc(86dvh - env(safe-area-inset-top))); }");
+    }
+    expect(singleSource).toContain("const messageOnly = modal.choices.length === 0;");
+    expect(singleSource).toContain('classList.remove("message-modal-backdrop")');
+    expect(gatewaySource).toContain("const messageOnly = modal.html == null && !choices.length;");
+    expect(gatewaySource).toContain('classList.remove("directory-modal-backdrop", "message-modal-backdrop")');
+    expect(gatewaySource).toContain('html: `<div class="directory-browser"></div>`');
+    expect(gatewaySource).toContain('html: `<div class="settings-editor"></div>`');
+  });
+
   test("routes Windows drive roots through the host root selector", () => {
     const gateway = loadRuntime("../src/gateway_webui/app.js");
     expect(gateway.directoryParentRequest({ parent: "C:\\Users", parent_is_root_selector: false }))

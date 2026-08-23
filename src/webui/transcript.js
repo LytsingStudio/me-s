@@ -16,6 +16,30 @@
       if (typeof ResizeObserver === "function") return new ResizeObserver(callback);
       return { observe() {}, disconnect() {} };
     });
+    const threshold = runtime.threshold ?? 24;
+    const settleDelay = runtime.settleDelay ?? 180;
+    let following = true;
+    let userScrolling = false;
+    let forcing = false;
+    let frame = null;
+    let settleTimer = null;
+    let kineticRestoreFrame = null;
+    let kineticStyleSnapshot = null;
+
+    const restoreKineticScrollLayer = () => {
+      if (kineticRestoreFrame !== null) {
+        cancelFrame(kineticRestoreFrame);
+        kineticRestoreFrame = null;
+      }
+      if (kineticStyleSnapshot === null) return;
+      const style = viewport.style;
+      kineticStyleSnapshot.forEach(({ name, value, priority }) => {
+        if (value) style.setProperty(name, value, priority);
+        else style.removeProperty(name);
+      });
+      kineticStyleSnapshot = null;
+      void viewport.offsetHeight;
+    };
     const interruptKineticScroll = runtime.interruptKineticScroll || (() => {
       const style = viewport.style;
       if (
@@ -26,28 +50,30 @@
         || typeof style.removeProperty !== "function"
       ) return;
       const properties = ["overflow", "-webkit-overflow-scrolling"];
-      const previous = properties.map((name) => ({
-        name,
-        value: style.getPropertyValue(name),
-        priority: style.getPropertyPriority(name),
-      }));
-      // Recreate the scroll layer before the next paint so compositor momentum cannot overwrite follow().
+      if (kineticStyleSnapshot === null) {
+        kineticStyleSnapshot = properties.map((name) => ({
+          name,
+          value: style.getPropertyValue(name),
+          priority: style.getPropertyPriority(name),
+        }));
+      }
       style.setProperty("overflow", "hidden", "important");
       style.setProperty("-webkit-overflow-scrolling", "auto", "important");
       void viewport.offsetHeight;
-      previous.forEach(({ name, value, priority }) => {
-        if (value) style.setProperty(name, value, priority);
-        else style.removeProperty(name);
+      if (kineticRestoreFrame !== null) cancelFrame(kineticRestoreFrame);
+      // Leave the scroll layer disabled for one painted frame. Restoring it in this
+      // same task lets mobile WebKit coalesce both styles and preserve old momentum.
+      kineticRestoreFrame = requestFrame(() => {
+        kineticRestoreFrame = requestFrame(() => {
+          kineticRestoreFrame = null;
+          restoreKineticScrollLayer();
+          if (forcing) {
+            applyFollowNow();
+            scheduleFollow();
+          }
+        });
       });
-      void viewport.offsetHeight;
     });
-    const threshold = runtime.threshold ?? 24;
-    const settleDelay = runtime.settleDelay ?? 180;
-    let following = true;
-    let userScrolling = false;
-    let forcing = false;
-    let frame = null;
-    let settleTimer = null;
 
     const isNearBottom = () => viewport.scrollHeight - viewport.scrollTop - viewport.clientHeight
       <= threshold;
@@ -116,6 +142,7 @@
         scheduleFollow();
       },
       restore(value) {
+        restoreKineticScrollLayer();
         following = Boolean(value);
         forcing = false;
         userScrolling = false;
@@ -124,6 +151,7 @@
         if (following) scheduleFollow(); else notify();
       },
       beginUserInteraction() {
+        restoreKineticScrollLayer();
         forcing = false;
         userScrolling = true;
         clearSettling();
