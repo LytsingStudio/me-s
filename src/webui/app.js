@@ -10,6 +10,7 @@ const CONNECTION_DEGRADED_GRACE_MS = 2000;
 const CONNECTION_STABILIZE_MS = 1000;
 const CONNECTION_STABILIZE_SUCCESSES = 2;
 const INPUT_ANIMATION_QUIET_MS = 250;
+const UI_ANIMATION_INTERVAL_MS = 100;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
 const SEND_SHORTCUT_COOKIE = "me_send_shortcut";
 const SEND_SHORTCUT_ENTER = "enter";
@@ -26,6 +27,16 @@ const COMMANDS = [
   ["/exit", "关闭当前页面"],
 ];
 const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
+
+function isIosWebKit(navigatorValue = navigator) {
+  const userAgent = String(navigatorValue?.userAgent || "");
+  const platform = String(navigatorValue?.platform || "");
+  const iosDevice = /iPhone|iPad|iPod/i.test(userAgent)
+    || (platform === "MacIntel" && Number(navigatorValue?.maxTouchPoints) > 1);
+  return iosDevice && /AppleWebKit/i.test(userAgent);
+}
+const IOS_WEBKIT = isIosWebKit();
+document.documentElement?.classList?.toggle("ios-webkit", IOS_WEBKIT);
 
 const state = {
   snapshot: {
@@ -50,8 +61,9 @@ const state = {
   pendingRender: emptyRenderRequest(),
   inputResizeFrame: null,
   inputHeight: null,
-  inputResizeAllowShrink: false,
   apiAnimationTick: 0,
+  uiAnimationTimer: null,
+  runningToolNodes: [],
   lastInputAt: Number.NEGATIVE_INFINITY,
   composing: false,
   sendShortcut: readSendShortcutCookie(typeof document.cookie === "string" ? document.cookie : ""),
@@ -126,6 +138,7 @@ const elements = {
   objective: $("#objective-summary"),
   composer: $("#composer-shell"),
   input: $("#prompt-input"),
+  inputMirror: $("#prompt-input-mirror"),
   stop: $("#stop-generation"),
   send: $("#send-prompt"),
   sendSpinner: $("#send-prompt-spinner"),
@@ -663,11 +676,26 @@ function scheduleHttpSync(delay) {
   state.syncTimer = setTimeout(requestHttpSync, delay);
 }
 
+function httpSyncProgressSignature() {
+  const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
+    ? `${state.selectedAgent}:${state.view.sessionId}` : null;
+  return JSON.stringify({
+    snapshotRevision: state.snapshotInitialized ? state.snapshot.revision : null,
+    agents: [...state.stores]
+      .map(([id, store]) => [id, store.events.length, store.mutationRevision])
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+    selectedAgent: state.selectedAgent,
+    terminalSession: state.view.kind === "terminal" ? state.view.sessionId : null,
+    terminalRevision: terminalKey ? state.terminalRevisions.get(terminalKey) ?? null : null,
+  });
+}
+
 async function requestHttpSync() {
   if (state.syncInFlight || state.pageClosing) return;
   const generation = state.syncGeneration;
   const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
     ? `${state.selectedAgent}:${state.view.sessionId}` : null;
+  const progressBefore = httpSyncProgressSignature();
   state.syncInFlight = true;
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   state.syncController = controller;
@@ -697,10 +725,11 @@ async function requestHttpSync() {
     } catch (error) {
       return failHttpSync("无法更新界面", error);
     }
+    const madeProgress = progressBefore !== httpSyncProgressSignature();
     const delay = state.connectionPhase === "stabilizing"
       || message.more_events || state.apiActivity.active || state.view.kind === "terminal"
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
-    scheduleHttpSync(message.more_events ? 0 : delay);
+    scheduleHttpSync(message.more_events && madeProgress ? 0 : delay);
   } catch (error) {
     if (generation !== state.syncGeneration || state.pageClosing) return;
     state.syncInFlight = false;
@@ -1793,6 +1822,7 @@ function renderAll() {
   renderTabs();
   renderAgentControls();
   renderTranscript(true, 0);
+  refreshRunningToolNodes();
   renderObjective();
   renderWorkMap();
   if (promptConfirmed) finishPendingPromptSubmission(state.selectedAgent);
@@ -1825,6 +1855,7 @@ function renderIncremental(request) {
     refreshWorkerActivityCards();
     transcriptChanged = true;
   }
+  if (transcriptChanged) refreshRunningToolNodes();
   if (changes.workmap) {
     renderObjective();
     if (state.view.kind === "workmap") renderWorkMap();
@@ -2340,6 +2371,7 @@ function bindToolCard(card) {
       message.kind === "tool" && String(message.tool.id) === card.dataset.toolCard);
     if (index >= 0) {
       updateToolCardNode(card, messages[index].tool);
+      refreshRunningToolNodes();
       card.meRenderRevision = messageRenderRevision(messages[index], false, card.classList.contains("follows-tool"));
     }
   };
@@ -2737,7 +2769,6 @@ function toggleObjectiveDisclosure(event) {
   if (event.type === "keydown") event.preventDefault();
   state.objectiveDisclosure.expanded = !state.objectiveDisclosure.expanded;
   renderObjective();
-  transcriptBottomFollower.layoutChanged();
 }
 
 function renderWorkMap() {
@@ -2826,8 +2857,9 @@ function renderStatus() {
   elements.statusEffortTrigger.disabled = !canChange || !model?.reasoning_efforts?.length;
   elements.statusContextTrigger.disabled = !agentMeta();
   elements.statusContext.textContent = `${formatTokens(projection.apiUsage?.total_tokens)}/${formatLimit(model?.context_window)}`;
-  const active = state.apiActivity.active || API_ACTIVE.has(projection.apiState);
-  elements.apiSpinner.textContent = active ? API_SPINNER_FRAMES[state.apiAnimationTick % API_SPINNER_FRAMES.length] : "";
+  const active = apiSpinnerIsActive();
+  setApiSpinner(active ? API_SPINNER_FRAMES[state.apiAnimationTick % API_SPINNER_FRAMES.length] : "");
+  syncUiAnimationScheduler();
   if (state.contextDrawerOpen) renderContextDrawer();
 }
 
@@ -3672,22 +3704,14 @@ function flushDraftBeforePageCloses() {
   }
 }
 
-function inputChangeCanShrink(event) {
-  const type = String(event?.inputType || "");
-  return type.startsWith("delete")
-    || ["historyUndo", "historyRedo", "insertFromDrop", "insertFromPaste", "insertReplacementText"].includes(type);
-}
-
-function autoSizeInput(allowShrink = false) {
-  state.inputResizeAllowShrink ||= allowShrink;
+function autoSizeInput() {
   if (state.inputResizeFrame !== null) return;
   state.inputResizeFrame = requestAnimationFrame(() => {
     state.inputResizeFrame = null;
-    const canShrink = state.inputResizeAllowShrink;
-    state.inputResizeAllowShrink = false;
-    if (canShrink) elements.input.style.height = "auto";
-    const target = Math.min(elements.input.scrollHeight, 180);
-    if (state.inputHeight !== target || canShrink) {
+    elements.inputMirror.value = elements.input.value;
+    elements.inputMirror.style.height = "0px";
+    const target = Math.min(Math.max(elements.inputMirror.scrollHeight, 29), 180);
+    if (state.inputHeight !== target) {
       const height = `${target}px`;
       if (elements.input.style.height !== height) elements.input.style.height = height;
       state.inputHeight = target;
@@ -3824,11 +3848,11 @@ elements.scrollToBottom.addEventListener("click", scrollTranscriptToBottomAfterL
 elements.statusModelTrigger.addEventListener("click", openModelDrawer);
 elements.statusEffortTrigger.addEventListener("click", openEffortDrawer);
 elements.statusContextTrigger.addEventListener("click", openContextDrawer);
-elements.input.addEventListener("input", (event) => {
+elements.input.addEventListener("input", () => {
   state.lastInputAt = performance.now();
   saveDraft();
   state.slashIndex = 0;
-  autoSizeInput(inputChangeCanShrink(event));
+  autoSizeInput();
   renderSlashMenu();
 });
 elements.input.addEventListener("compositionstart", beginInputComposition);
@@ -3895,13 +3919,18 @@ window.addEventListener("resize", () => {
 });
 window.addEventListener("pagehide", () => {
   state.pageClosing = true;
+  stopUiAnimation();
   deactivateSessionTerminalView();
   flushDraftBeforePageCloses();
 });
 window.addEventListener("pageshow", () => {
   state.pageClosing = false;
+  syncUiAnimationScheduler();
   if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
   if (state.view.kind === "session-terminal") renderTabs();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) stopUiAnimation(); else syncUiAnimationScheduler();
 });
 const transcriptBottomFollower = createTranscriptBottomFollower(
   elements.transcript,
@@ -3931,21 +3960,64 @@ elements.terminalView.addEventListener("scroll", () => {
     state.terminalFollowBottom = terminalIsNearBottom(elements.terminalView);
   }
 }, { passive: true });
-function refreshRunningToolElapsed() {
-  if (inputHasPriority()) return;
-  elements.transcriptContent.querySelectorAll("[data-running-started]").forEach((node) => {
-    const text = `Running ... ${formatDuration(Date.now() - Number(node.dataset.runningStarted))}`;
-    if (node.textContent !== text) node.textContent = text;
-  });
+function apiSpinnerIsActive() {
+  return state.apiActivity.active || API_ACTIVE.has(currentProjection().apiState);
 }
-setInterval(refreshRunningToolElapsed, 100);
-setInterval(() => {
-  if (performance.now() - state.lastInputAt < INPUT_ANIMATION_QUIET_MS) return;
-  state.apiAnimationTick += 1;
-  elements.apiSpinner.textContent = (state.apiActivity.active
-    || API_ACTIVE.has(currentProjection().apiState))
-    ? API_SPINNER_FRAMES[state.apiAnimationTick % API_SPINNER_FRAMES.length]
-    : "";
-}, 100);
+
+function setApiSpinner(text) {
+  if (elements.apiSpinner.textContent !== text) elements.apiSpinner.textContent = text;
+}
+
+function stopUiAnimation() {
+  clearTimeout(state.uiAnimationTimer);
+  state.uiAnimationTimer = null;
+}
+
+function uiAnimationNeeded() {
+  return !state.pageClosing && !document.hidden
+    && (apiSpinnerIsActive() || state.runningToolNodes.length > 0);
+}
+
+function syncUiAnimationScheduler() {
+  if (!apiSpinnerIsActive()) setApiSpinner("");
+  if (!uiAnimationNeeded()) {
+    stopUiAnimation();
+    return;
+  }
+  if (state.uiAnimationTimer === null) {
+    state.uiAnimationTimer = setTimeout(refreshUiAnimation, UI_ANIMATION_INTERVAL_MS);
+  }
+}
+
+function refreshRunningToolNodes() {
+  state.runningToolNodes = [
+    ...elements.transcriptContent.querySelectorAll("[data-running-started]"),
+  ];
+  syncUiAnimationScheduler();
+}
+
+function refreshUiAnimation() {
+  state.uiAnimationTimer = null;
+  if (!uiAnimationNeeded()) {
+    syncUiAnimationScheduler();
+    return;
+  }
+  if (!inputHasPriority()) {
+    if (apiSpinnerIsActive()) {
+      state.apiAnimationTick += 1;
+      setApiSpinner(API_SPINNER_FRAMES[state.apiAnimationTick % API_SPINNER_FRAMES.length]);
+    } else {
+      setApiSpinner("");
+    }
+    const now = Date.now();
+    state.runningToolNodes = state.runningToolNodes.filter((node) => {
+      if (node.isConnected === false || node.dataset.runningStarted == null) return false;
+      const text = `Running ... ${formatDuration(now - Number(node.dataset.runningStarted))}`;
+      if (node.textContent !== text) node.textContent = text;
+      return true;
+    });
+  }
+  syncUiAnimationScheduler();
+}
 
 initializeAuthentication();

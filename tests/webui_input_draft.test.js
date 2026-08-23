@@ -17,16 +17,32 @@ function loadDraftRuntime(options = {}) {
       projectChat, pendingPromptReachedProjection, promptSubmissionBoundary,
       commandResultIsUnknown, cancelPendingPromptSubmission, finishPendingPromptSubmission, sendCommand,
       restoreDraft, flushDraftBeforePageCloses, queueDraftUpdate, runDraftSync, pauseDraftSyncForSubmission,
-      inputChangeCanShrink, autoSizeInput,
+      autoSizeInput,
     };`);
   let inputHeight = "";
-  const heightWrites = [];
+  let mirrorHeight = "";
+  let inputScrollHeight = 0;
+  let mirrorScrollHeight = 0;
+  let realScrollHeightReads = 0;
+  let mirrorScrollHeightReads = 0;
+  const realHeightWrites = [];
+  const mirrorHeightWrites = [];
   const input = {
     value: "",
-    scrollHeight: 0,
+    get scrollHeight() { realScrollHeightReads += 1; return inputScrollHeight; },
+    set scrollHeight(value) { inputScrollHeight = Number(value); },
     style: {
       get height() { return inputHeight; },
-      set height(value) { inputHeight = String(value); heightWrites.push(inputHeight); },
+      set height(value) { inputHeight = String(value); realHeightWrites.push(inputHeight); },
+    },
+  };
+  const inputMirror = {
+    value: "",
+    get scrollHeight() { mirrorScrollHeightReads += 1; return mirrorScrollHeight; },
+    set scrollHeight(value) { mirrorScrollHeight = Number(value); },
+    style: {
+      get height() { return mirrorHeight; },
+      set height(value) { mirrorHeight = String(value); mirrorHeightWrites.push(mirrorHeight); },
     },
   };
   const pageCloseCalls = [];
@@ -53,7 +69,11 @@ function loadDraftRuntime(options = {}) {
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
   };
   const runtime = factory(
-    { querySelector: (selector) => selector === "#prompt-input" ? input : null, cookie: "" },
+    {
+      querySelector: (selector) => selector === "#prompt-input" ? input
+        : selector === "#prompt-input-mirror" ? inputMirror : null,
+      cookie: "",
+    },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
     { sendBeacon: (...args) => { pageCloseCalls.push(["beacon", ...args]); return true; } },
@@ -65,7 +85,10 @@ function loadDraftRuntime(options = {}) {
   );
   runtime.pageCloseCalls = pageCloseCalls;
   runtime.fetchCalls = fetchCalls;
-  runtime.heightWrites = heightWrites;
+  runtime.heightWrites = realHeightWrites;
+  runtime.mirrorHeightWrites = mirrorHeightWrites;
+  runtime.realScrollHeightReads = () => realScrollHeightReads;
+  runtime.mirrorScrollHeightReads = () => mirrorScrollHeightReads;
   runtime.pendingTimers = () => [...timers.values()];
   runtime.pendingAnimationFrames = () => animationFrames.size;
   runtime.runNextTimer = () => {
@@ -84,7 +107,10 @@ function loadDraftRuntime(options = {}) {
     callback();
     return true;
   };
-  runtime.clearHeightWrites = () => { heightWrites.length = 0; };
+  runtime.clearHeightWrites = () => {
+    realHeightWrites.length = 0;
+    mirrorHeightWrites.length = 0;
+  };
   return runtime;
 }
 
@@ -471,31 +497,41 @@ describe("WebUI authoritative input draft synchronization", () => {
     expect(runtime.state.draftSync.get("main").paused).toBe(true);
   });
 
-  test("avoids same-height writes while preserving one growth commit and explicit shrink measurement", () => {
+  test("measures only the isolated mirror and commits only real height changes", () => {
     const runtime = loadDraftRuntime();
-    runtime.elements.input.scrollHeight = 40;
-    runtime.autoSizeInput(true);
+    runtime.elements.input.value = "short";
+    runtime.elements.inputMirror.scrollHeight = 40;
+    runtime.autoSizeInput();
     expect(runtime.pendingAnimationFrames()).toBe(1);
     runtime.runNextAnimationFrame();
-    expect(runtime.heightWrites).toEqual(["auto", "40px"]);
+    expect(runtime.elements.inputMirror.value).toBe("short");
+    expect(runtime.realScrollHeightReads()).toBe(0);
+    expect(runtime.mirrorScrollHeightReads()).toBe(1);
+    expect(runtime.heightWrites).toEqual(["40px"]);
+    expect(runtime.mirrorHeightWrites).toEqual(["0px"]);
 
     runtime.clearHeightWrites();
-    runtime.autoSizeInput(false);
+    runtime.autoSizeInput();
     runtime.runNextAnimationFrame();
+    expect(runtime.realScrollHeightReads()).toBe(0);
+    expect(runtime.mirrorScrollHeightReads()).toBe(2);
     expect(runtime.heightWrites).toEqual([]);
+    expect(runtime.mirrorHeightWrites).toEqual(["0px"]);
 
-    runtime.elements.input.scrollHeight = 72;
-    runtime.autoSizeInput(false);
+    runtime.clearHeightWrites();
+    runtime.elements.input.value = "a growing line";
+    runtime.elements.inputMirror.scrollHeight = 72;
+    runtime.autoSizeInput();
     runtime.runNextAnimationFrame();
     expect(runtime.heightWrites).toEqual(["72px"]);
 
     runtime.clearHeightWrites();
-    runtime.elements.input.scrollHeight = 28;
-    runtime.autoSizeInput(true);
+    runtime.elements.input.value = "";
+    runtime.elements.inputMirror.scrollHeight = 28;
+    runtime.autoSizeInput();
     runtime.runNextAnimationFrame();
-    expect(runtime.heightWrites).toEqual(["auto", "28px"]);
-    expect(runtime.inputChangeCanShrink({ inputType: "insertText" })).toBe(false);
-    expect(runtime.inputChangeCanShrink({ inputType: "deleteContentBackward" })).toBe(true);
-    expect(runtime.inputChangeCanShrink({ inputType: "insertFromPaste" })).toBe(true);
+    expect(runtime.heightWrites).toEqual(["29px"]);
+    expect(runtime.elements.inputMirror.value).toBe("");
+    expect(runtime.realScrollHeightReads()).toBe(0);
   });
 });

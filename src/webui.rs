@@ -2331,7 +2331,13 @@ mod tests {
         assert!(APP_JS.contains("if (state.syncInFlight"));
         assert!(APP_JS.contains("HTTP_SYNC_TIMEOUT_MS"));
         assert!(APP_JS.contains("function failHttpSync(title, error)"));
-        assert!(APP_JS.contains("scheduleHttpSync(message.more_events ? 0"));
+        assert!(APP_JS.contains("function httpSyncProgressSignature()"));
+        assert!(
+            APP_JS.contains("const madeProgress = progressBefore !== httpSyncProgressSignature()")
+        );
+        assert!(
+            APP_JS.contains("scheduleHttpSync(message.more_events && madeProgress ? 0 : delay)")
+        );
         assert!(APP_JS.contains("HTTP_SYNC_ACTIVE_MS = 250"));
         assert!(APP_JS.contains("HTTP_SYNC_IDLE_MS = 1000"));
         assert!(APP_JS.contains("typeof PORTRAIT_LAYOUT.addListener === \"function\""));
@@ -2348,8 +2354,17 @@ mod tests {
         assert!(APP_JS.contains("const DRAFT_BATCH_MS = 80;"));
         assert!(APP_JS.contains("batchTimer: null"));
         assert!(APP_JS.contains("refresh: false"));
-        assert!(APP_JS.contains("function inputChangeCanShrink(event)"));
-        assert!(APP_JS.contains("if (state.inputHeight !== target || canShrink)"));
+        assert!(INDEX_HTML.contains("id=\"prompt-input-mirror\""));
+        assert!(APP_JS.contains("inputMirror: $(\"#prompt-input-mirror\")"));
+        assert!(APP_JS.contains("elements.inputMirror.scrollHeight"));
+        assert!(!APP_JS.contains("elements.input.scrollHeight"));
+        assert!(!APP_JS.contains("function inputChangeCanShrink"));
+        assert!(!APP_JS.contains("elements.input.style.height = \"auto\""));
+        assert!(APP_JS.contains("if (state.inputHeight !== target)"));
+        assert!(STYLE_CSS.contains(".prompt-input-mirror { position: absolute;"));
+        assert!(STYLE_CSS.contains("contain: layout paint style;"));
+        assert!(STYLE_CSS.contains(".objective-details { position: absolute;"));
+        assert!(STYLE_CSS.contains(".ios-webkit .transcript-content > .message-block"));
         assert!(APP_JS.contains("message.kind === \"notice\" || message.kind === \"session\""));
         assert!(APP_JS.contains("content.textContent = message.content;"));
         assert!(APP_JS.contains("const CONNECTION_DEGRADED_GRACE_MS = 2000;"));
@@ -2400,8 +2415,13 @@ mod tests {
         assert!(STYLE_CSS.contains("animation: tool-marker-breathe 900ms ease-in-out infinite"));
         assert!(STYLE_CSS.contains("@keyframes tool-marker-breathe"));
         assert!(STYLE_CSS.contains("will-change: opacity"));
-        assert!(APP_JS.contains("function refreshRunningToolElapsed()"));
-        assert!(APP_JS.contains("setInterval(refreshRunningToolElapsed, 100)"));
+        assert!(APP_JS.contains("function refreshRunningToolNodes()"));
+        assert!(APP_JS.contains("function refreshUiAnimation()"));
+        assert!(APP_JS.contains(
+            "state.uiAnimationTimer = setTimeout(refreshUiAnimation, UI_ANIMATION_INTERVAL_MS)"
+        ));
+        assert!(!APP_JS.contains("setInterval(refreshRunningToolElapsed"));
+        assert!(APP_JS.contains("if (document.hidden) stopUiAnimation()"));
         assert!(!APP_JS.contains("TOOL_MARKER_OPACITY"));
         assert!(!APP_JS.contains("toolAnimationTick"));
         assert!(!APP_JS.contains("node.style.opacity"));
@@ -2496,8 +2516,11 @@ mod tests {
         assert!(APP_JS.contains("return state.composing || performance.now() - state.lastInputAt"));
         assert!(APP_JS.contains("inputResizeFrame: null"));
         assert!(APP_JS.contains("state.inputResizeFrame = requestAnimationFrame"));
-        assert!(APP_JS.contains("function refreshRunningToolElapsed()"));
-        assert!(APP_JS.contains("if (inputHasPriority()) return"));
+        assert!(APP_JS.contains("function refreshRunningToolNodes()"));
+        assert!(APP_JS.contains("function refreshUiAnimation()"));
+        assert!(APP_JS.contains("uiAnimationTimer: null"));
+        assert!(!APP_JS.contains("setInterval(refreshRunningToolElapsed"));
+        assert!(APP_JS.contains("if (!inputHasPriority()) {"));
         assert!(APP_JS.contains("transcriptFrom: null"));
         assert!(APP_JS.contains(
             "renderTranscript(Boolean(changes.fullReplay), changes.transcriptFrom ?? 0)"

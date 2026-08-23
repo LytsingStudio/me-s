@@ -13,7 +13,7 @@ function loadRuntime(relative) {
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
       eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
-      eventRecoveryMatches, selectedEventRecoveryReady,
+      eventRecoveryMatches, selectedEventRecoveryReady, httpSyncProgressSignature, isIosWebKit,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
       blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
@@ -179,8 +179,21 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain("const DRAFT_BATCH_MS = 80;");
       expect(source).toContain("batchTimer: null");
       expect(source).toContain("refresh: false");
-      expect(source).toContain("function inputChangeCanShrink(event)");
-      expect(source).toContain("if (state.inputHeight !== target || canShrink)");
+      expect(source).toContain('inputMirror: $("#prompt-input-mirror")');
+      expect(source).toContain("elements.inputMirror.scrollHeight");
+      expect(source).not.toContain("elements.input.scrollHeight");
+      expect(source).not.toContain("function inputChangeCanShrink");
+      expect(source).not.toContain('elements.input.style.height = "auto"');
+      expect(source).toContain("if (state.inputHeight !== target)");
+      expect(source).toContain("function refreshRunningToolNodes()");
+      expect(source).toContain("state.uiAnimationTimer = setTimeout(refreshUiAnimation, UI_ANIMATION_INTERVAL_MS)");
+      expect(source).toContain('document.addEventListener("visibilitychange"');
+      expect(source).not.toContain("setInterval(refreshRunningToolElapsed");
+      expect(source).toContain("scheduleHttpSync(message.more_events && madeProgress ? 0 : delay)");
+      const objectiveToggleStart = source.indexOf("function toggleObjectiveDisclosure");
+      const objectiveToggleEnd = source.indexOf("\nfunction renderWorkMap", objectiveToggleStart);
+      expect(source.slice(objectiveToggleStart, objectiveToggleEnd))
+        .not.toContain("transcriptBottomFollower.layoutChanged");
       expect(source).toContain('message.kind === "notice" || message.kind === "session"');
       expect(source).toContain("content.textContent = message.content;");
       expect(source).toContain("const CONNECTION_DEGRADED_GRACE_MS = 2000;");
@@ -198,6 +211,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(style).toContain(".transcript-content > :nth-last-child(-n + 32) { content-visibility: visible; contain-intrinsic-size: none; }");
       expect(style).toContain(".message-block { contain: layout paint style; content-visibility: auto;");
       expect(style).toContain(".tool-card { contain: layout paint style; content-visibility: auto;");
+      expect(style).toContain(".prompt-input-mirror { position: absolute;");
+      expect(style).toContain("contain: layout paint style;");
+      expect(style).toContain(".objective-summary { position: relative;");
+      expect(style).toContain(".objective-details { position: absolute;");
+      expect(style).toContain("bottom: calc(100% + 6px)");
+      expect(style).toContain(".ios-webkit .transcript-content > .message-block");
     }
 
     const transcript = readFileSync(join(import.meta.dir, "../src/webui/transcript.js"), "utf8");
@@ -205,6 +224,42 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(transcript).toContain("scrollHeight !== committedScrollHeight");
     expect(transcript).toContain("const applyFollowNow = (force = forcing)");
     expect(transcript).toContain('style.setProperty("overflow", "hidden", "important")');
+  });
+
+  test("detects iOS and iPadOS WebKit without affecting Android or desktop macOS", () => {
+    const cases = [
+      [{ userAgent: "Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 CriOS/125", platform: "iPhone", maxTouchPoints: 5 }, true],
+      [{ userAgent: "Mozilla/5.0 (iPad) AppleWebKit/605.1.15 Safari/604.1", platform: "iPad", maxTouchPoints: 5 }, true],
+      [{ userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/605.1.15 Safari/604.1", platform: "MacIntel", maxTouchPoints: 5 }, true],
+      [{ userAgent: "Mozilla/5.0 (Macintosh) AppleWebKit/537.36 Chrome/125", platform: "MacIntel", maxTouchPoints: 0 }, false],
+      [{ userAgent: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125", platform: "Linux armv8l", maxTouchPoints: 5 }, false],
+      [{ userAgent: "Mozilla/5.0 (iPhone) Gecko/20100101 Firefox/125", platform: "iPhone", maxTouchPoints: 5 }, false],
+    ];
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      for (const [navigatorValue, expected] of cases) {
+        expect(runtime.isIosWebKit(navigatorValue)).toBe(expected);
+      }
+    }
+  });
+
+  test("keeps zero-delay event catch-up conditional on a changed sync cursor", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      runtime.state.snapshotInitialized = true;
+      runtime.state.snapshot.revision = 3;
+      runtime.state.selectedAgent = "main";
+      runtime.state.stores.set("main", { events: [], mutationRevision: 7 });
+      const initial = runtime.httpSyncProgressSignature();
+      expect(runtime.httpSyncProgressSignature()).toBe(initial);
+      runtime.state.stores.get("main").events.push({});
+      expect(runtime.httpSyncProgressSignature()).not.toBe(initial);
+
+      const source = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(source).toContain("const madeProgress = progressBefore !== httpSyncProgressSignature()");
+      expect(source).toContain("|| message.more_events || state.apiActivity.active");
+      expect(source).toContain("scheduleHttpSync(message.more_events && madeProgress ? 0 : delay)");
+    }
   });
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");

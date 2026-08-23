@@ -150,6 +150,7 @@ button { color: inherit; }
 .notice-content, .session-content { color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
 .tool-card { contain: layout paint style; content-visibility: auto; contain-intrinsic-size: auto 31px; margin: 0 0 20px 0; border-radius: 10px; cursor: pointer; outline: none; }
 .transcript-content > :nth-last-child(-n + 32) { content-visibility: visible; contain-intrinsic-size: none; }
+.ios-webkit .transcript-content > .message-block, .ios-webkit .transcript-content > .tool-card { content-visibility: visible; contain-intrinsic-size: none; }
 .tool-card.follows-tool { margin-top: -20px; }
 .tool-card:hover, .tool-card:focus-visible { background: var(--hover-fill-soft); }
 .tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr); align-items: center; gap: 8px; min-height: 31px; min-width: 0; border: 0; background: transparent; padding: 0; cursor: pointer; }
@@ -185,19 +186,23 @@ button { color: inherit; }
 .worker-activity-tool.failed .worker-tool-marker { color: var(--red); }
 @media (prefers-reduced-motion: reduce) { .worker-activity.running > .worker-activity-header .worker-activity-marker, .worker-activity-tool.running .worker-tool-marker { animation: none; } }
 
-.objective-summary { margin: 0 max(24px, calc((100% - 1200px) / 2)) 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; outline: none; background: var(--panel); cursor: pointer; transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
+.objective-summary { position: relative; z-index: 14; contain: layout style; overflow: visible; margin: 0 max(24px, calc((100% - 1200px) / 2)) 12px; padding: 14px 16px; border: 1px solid var(--border); border-radius: 12px; outline: none; background: var(--panel); cursor: pointer; transition: border-color .15s ease, background .15s ease, box-shadow .15s ease; }
 .objective-summary:hover { border-color: var(--border-bright); background: var(--panel-2); }
 .objective-summary:focus-visible { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring); }
 .objective-header { display: flex; align-items: center; gap: 12px; }
 .objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 400; }
 .objective-toggle { display: grid; width: 30px; height: 30px; flex: 0 0 auto; place-items: center; color: var(--muted); pointer-events: none; }
 .objective-toggle-icon { font-size: 16px; line-height: 1; }
-.objective-description { margin: 5px 0 10px 22px; color: var(--muted); font-size: 13px; }
+.objective-details { position: absolute; z-index: 1; right: -1px; bottom: calc(100% + 6px); left: -1px; max-height: min(50dvh, 420px); overflow: auto; overscroll-behavior: contain; padding: 14px 16px; border: 1px solid var(--border-bright); border-radius: 12px; background: var(--panel); box-shadow: var(--floating-shadow); }
+.objective-description { margin: 0 0 10px 22px; color: var(--muted); font-size: 13px; }
 .objective-plan { display: flex; gap: 8px; margin: 5px 0 0 22px; color: var(--muted); font-size: 13px; }
 .objective-plan.active { color: var(--text); }
 .composer-shell { position: relative; margin: 0 max(24px, calc((100% - 1200px) / 2)) 13px; padding: 11px 13px 9px; border: 1px solid var(--border-bright); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
 .composer-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow); }
-#prompt-input { display: block; width: 100%; min-height: 29px; max-height: 180px; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); line-height: 1.55; }
+.prompt-input-stack { position: relative; }
+#prompt-input, .prompt-input-mirror { display: block; width: 100%; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); line-height: 1.55; }
+#prompt-input { position: relative; z-index: 1; min-height: 29px; max-height: 180px; }
+.prompt-input-mirror { position: absolute; inset: 0; height: 0; min-height: 0; max-height: none; overflow: hidden; visibility: hidden; pointer-events: none; contain: layout paint style; }
 .composer-shell.sending { border-color: var(--accent); }
 #prompt-input:disabled { opacity: 1; color: var(--text); cursor: wait; -webkit-text-fill-color: var(--text); }
 #prompt-input::placeholder { color: var(--dim); }
@@ -476,18 +481,18 @@ button { color: inherit; }
   .tool-row { gap: 5px; }
 
   .objective-summary {
-    max-height: 30dvh;
-    overflow: auto;
     margin: 0 max(10px, env(safe-area-inset-right)) 9px max(10px, env(safe-area-inset-left));
     padding: 11px 12px;
   }
+  .objective-details { max-height: 30dvh; padding: 11px 12px; }
   .objective-description, .objective-plan { margin-left: 18px; }
   .composer-shell {
     margin: 0 max(10px, env(safe-area-inset-right)) 9px max(10px, env(safe-area-inset-left));
     padding: 9px 10px 8px;
     border-radius: 12px;
   }
-  #prompt-input { max-height: 30dvh; font-size: 16px; }
+  #prompt-input { max-height: 30dvh; }
+  #prompt-input, .prompt-input-mirror { font-size: 16px; }
   .composer-actions { margin-top: 5px; }
   #input-hint { display: none; }
   .composer-actions::before { content: ""; }
