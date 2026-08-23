@@ -63,6 +63,7 @@
         </button>
         <button data-view="chat" class="active">聊天</button>
         <button data-view="workmap">WorkMap</button>
+        <button data-view="files">文件</button>
         <button data-view="session-terminal">终端</button>
         <span id="terminal-tabs"></span>
       </nav>
@@ -98,6 +99,10 @@
           <div><strong>WorkMap</strong><span id="workmap-count"></span></div>
         </div>
         <div id="workmap-content" class="document-view"></div>
+      </section>
+
+      <section id="files-view" class="view file-manager-view" aria-label="文件">
+        <div id="file-manager" class="file-manager"></div>
       </section>
 
       <section id="session-terminal-view" class="view session-terminal-view" aria-label="终端">
@@ -213,6 +218,7 @@
   <script src="/xterm.js"></script>
   <script src="/xterm-addon-fit.js"></script>
   <script src="/xterm-addon-unicode11.js"></script>
+  <script src="/file-manager.js"></script>
   <script src="/session-terminal.js"></script>
   <script src="/app.js"></script>
 </body>

@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
     fs,
+    io::Read,
     path::{Component, Path, PathBuf},
     sync::{
         Arc, Mutex,
@@ -55,8 +56,12 @@ pub struct ProxyResponse {
     pub status: u16,
     pub content_type: Option<String>,
     pub content_encoding: Option<String>,
+    pub content_disposition: Option<String>,
+    pub accept_ranges: Option<String>,
+    pub content_range: Option<String>,
     pub vary: Option<String>,
-    pub body: Vec<u8>,
+    pub content_length: Option<usize>,
+    pub body: Box<dyn Read + Send>,
 }
 
 pub enum OpenWorkspaceOutcome {
@@ -94,6 +99,7 @@ pub struct Gateway {
     lifecycle: Mutex<()>,
     shutting_down: AtomicBool,
     proxy_client: reqwest::blocking::Client,
+    download_proxy_client: reqwest::blocking::Client,
 }
 
 impl Gateway {
@@ -123,6 +129,10 @@ impl Gateway {
                 .no_proxy()
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(60))
+                .build()?,
+            download_proxy_client: reqwest::blocking::Client::builder()
+                .no_proxy()
+                .connect_timeout(Duration::from_secs(2))
                 .build()?,
         });
 
@@ -420,13 +430,18 @@ impl Gateway {
         child_path: &str,
         content_type: Option<&str>,
         accept_encoding: Option<&str>,
+        range: Option<&str>,
         body: Vec<u8>,
     ) -> Result<ProxyResponse> {
         validate_proxy_path(child_path)?;
         let route = self.process_route(workspace_id)?;
         let url = format!("{}/api/{child_path}", route.address);
-        let mut request = self
-            .proxy_client
+        let client = if parse_file_download_content_path(child_path).is_some() {
+            &self.download_proxy_client
+        } else {
+            &self.proxy_client
+        };
+        let mut request = client
             .request(method, url)
             .header(
                 reqwest::header::AUTHORIZATION,
@@ -439,30 +454,37 @@ impl Gateway {
         if let Some(accept_encoding) = accept_encoding {
             request = request.header(reqwest::header::ACCEPT_ENCODING, accept_encoding);
         }
+        if let Some(range) = range {
+            request = request.header(reqwest::header::RANGE, range);
+        }
         let response = request.send().map_err(|_| "工作区请求未能完成")?;
         let status = response.status().as_u16();
-        let content_type = response
-            .headers()
-            .get(reqwest::header::CONTENT_TYPE)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let content_encoding = response
-            .headers()
-            .get(reqwest::header::CONTENT_ENCODING)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let vary = response
-            .headers()
-            .get(reqwest::header::VARY)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        let body = response.bytes().map_err(|_| "工作区响应未能完成")?.to_vec();
+        let header = |name: reqwest::header::HeaderName| {
+            response
+                .headers()
+                .get(name)
+                .and_then(|value| value.to_str().ok())
+                .map(str::to_owned)
+        };
+        let content_type = header(reqwest::header::CONTENT_TYPE);
+        let content_encoding = header(reqwest::header::CONTENT_ENCODING);
+        let content_disposition = header(reqwest::header::CONTENT_DISPOSITION);
+        let accept_ranges = header(reqwest::header::ACCEPT_RANGES);
+        let content_range = header(reqwest::header::CONTENT_RANGE);
+        let vary = header(reqwest::header::VARY);
+        let content_length = response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok());
         Ok(ProxyResponse {
             status,
             content_type,
             content_encoding,
+            content_disposition,
+            accept_ranges,
+            content_range,
             vary,
-            body,
+            content_length,
+            body: Box::new(response),
         })
     }
 
@@ -672,10 +694,45 @@ fn validate_proxy_path(path: &str) -> Result<()> {
         .is_some_and(|(agent, action)| {
             valid_agent(agent) && matches!(action, "read" | "input" | "resize")
         });
-    if !matches!(path, "sync" | "snapshot" | "command") && !deletion_blocker && !session_terminal {
+    let file_post = matches!(
+        path,
+        "files/list"
+            | "files/mkdir"
+            | "files/rename"
+            | "files/jobs/prepare"
+            | "files/jobs/confirm"
+            | "files/jobs/status"
+            | "files/jobs/cancel"
+            | "files/uploads/create"
+            | "files/uploads/chunk"
+            | "files/uploads/finish"
+            | "files/uploads/cancel"
+            | "files/downloads/create"
+            | "files/downloads/status"
+            | "files/downloads/cancel"
+    );
+    let file_download = parse_file_download_content_path(path).is_some();
+    if !matches!(path, "sync" | "snapshot" | "command")
+        && !deletion_blocker
+        && !session_terminal
+        && !file_post
+        && !file_download
+    {
         return Err("不支持的工作区接口".into());
     }
     Ok(())
+}
+
+fn parse_file_download_content_path(path: &str) -> Option<&str> {
+    let download_id = path
+        .strip_prefix("files/downloads/")?
+        .strip_suffix("/content")?;
+    (!download_id.is_empty()
+        && !download_id.contains('/')
+        && download_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then_some(download_id)
 }
 
 #[cfg(test)]
@@ -693,6 +750,21 @@ mod tests {
             "session-terminal/main/read",
             "session-terminal/main/input",
             "session-terminal/worker_1/resize",
+            "files/list",
+            "files/mkdir",
+            "files/rename",
+            "files/jobs/prepare",
+            "files/jobs/confirm",
+            "files/jobs/status",
+            "files/jobs/cancel",
+            "files/uploads/create",
+            "files/uploads/chunk",
+            "files/uploads/finish",
+            "files/uploads/cancel",
+            "files/downloads/create",
+            "files/downloads/status",
+            "files/downloads/cancel",
+            "files/downloads/download-ab12/content",
         ] {
             validate_proxy_path(path).unwrap();
         }
@@ -711,6 +783,13 @@ mod tests {
             "session-terminal/../read",
             "session-terminal/main/read?cursor=1",
             "sync?private=true",
+            "files",
+            "files/list/extra",
+            "files/jobs/run",
+            "files/downloads//content",
+            "files/downloads/../content",
+            "files/downloads/download-ab12/content?range=1",
+            "files/uploads/chunk/extra",
         ] {
             assert!(validate_proxy_path(path).is_err(), "{path}");
         }

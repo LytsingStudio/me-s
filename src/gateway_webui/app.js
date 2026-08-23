@@ -143,6 +143,8 @@ const elements = {
   terminalTabs: $("#terminal-tabs"),
   chatView: $("#chat-view"),
   workmapView: $("#workmap-view"),
+  filesView: $("#files-view"),
+  fileManager: $("#file-manager"),
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
   sessionTerminalControls: $("#session-terminal-controls"),
@@ -249,6 +251,31 @@ function getSessionTerminalController() {
     });
   }
   return sessionTerminalController;
+}
+
+let fileManagerController = null;
+
+function getFileManagerController() {
+  if (!fileManagerController) {
+    fileManagerController = globalThis.MeFileManager.create({
+      container: elements.fileManager,
+      request: (path, options, identity) => api(path, options, identity.workspaceId),
+      downloadUrl: (downloadId, identity) => scopedApiPath(`/api/files/downloads/${encodeURIComponent(downloadId)}/content`, identity.workspaceId),
+      onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+      notify: (message, kind) => toast(message, kind === "error"),
+    });
+  }
+  return fileManagerController;
+}
+
+function syncFileManagerView() {
+  if (state.view.kind !== "files" || !state.workspaceId || !state.selectedAgent || !state.snapshot.environment?.workspace) return;
+  getFileManagerController().attach({
+    key: `${state.workspaceId}:${state.selectedAgent}`,
+    workspaceId: state.workspaceId,
+    agentId: state.selectedAgent,
+    defaultPath: state.snapshot.environment.workspace,
+  });
 }
 
 function eventParts(event) {
@@ -403,7 +430,8 @@ function emptyProjection() {
 function scopedApiPath(path, workspaceId = state.workspaceId) {
   const childPath = path === "/api/sync" || path === "/api/snapshot" || path === "/api/command"
     || path.startsWith("/api/deletion-blocker/")
-    || path.startsWith("/api/session-terminal/");
+    || path.startsWith("/api/session-terminal/")
+    || path.startsWith("/api/files/");
   if (!childPath) return path;
   if (!workspaceId) throw new Error("尚未选择工作区");
   return `/api/workspaces/${encodeURIComponent(workspaceId)}/${path.slice(5)}`;
@@ -2421,8 +2449,10 @@ function renderTabs() {
   elements.chatView.classList.toggle("active", state.view.kind === "chat");
   elements.workmapView.classList.toggle("active", state.view.kind === "workmap");
   elements.sessionTerminalView.classList.toggle("active", state.view.kind === "session-terminal");
+  elements.filesView.classList.toggle("active", state.view.kind === "files");
   elements.terminalView.classList.toggle("active", state.view.kind === "terminal");
   syncSessionTerminalView();
+  syncFileManagerView();
 }
 
 function showView(view) {

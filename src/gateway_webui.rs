@@ -25,6 +25,7 @@ pub const GATEWAY_BIND_ADDRESS: &str = "0.0.0.0";
 const INDEX_HTML: &str = include_str!("gateway_webui/index.html");
 const APP_JS: &str = include_str!("gateway_webui/app.js");
 const STYLE_CSS: &str = include_str!("gateway_webui/style.css");
+const FILE_MANAGER_JS: &str = include_str!("webui/file-manager.js");
 const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
@@ -162,7 +163,7 @@ fn serve(mut request: Request, gateway: Arc<Gateway>, auth: Arc<WebSessionAuth>)
     let _ = request.respond(response);
 }
 
-type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
+type HttpResponse = Response<Box<dyn Read + Send>>;
 
 fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Result<HttpResponse> {
     let url = request.url();
@@ -185,6 +186,12 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
+        }
+        (&Method::Get, "/file-manager.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                FILE_MANAGER_JS,
+            ));
         }
         (&Method::Get, "/transcript.js") => {
             return Ok(text_response(
@@ -370,6 +377,11 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 .collect::<Vec<_>>()
                 .join(",");
             let accept_encoding = (!accept_encoding.is_empty()).then_some(accept_encoding);
+            let range = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Range"))
+                .map(|header| header.value.as_str().to_owned());
             let body = read_body(request, MAX_BODY_BYTES)?;
             match gateway.proxy(
                 workspace_id,
@@ -377,6 +389,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 child_path,
                 content_type.as_deref(),
                 accept_encoding.as_deref(),
+                range.as_deref(),
                 body,
             ) {
                 Ok(response) => Ok(proxy_response(response)),
@@ -526,43 +539,70 @@ fn session_cookie(token: &str) -> Header {
 }
 
 fn proxy_response(response: crate::gateway::ProxyResponse) -> HttpResponse {
-    let mut response_body =
-        Response::from_data(response.body).with_status_code(StatusCode(response.status));
+    let crate::gateway::ProxyResponse {
+        status,
+        content_type,
+        content_encoding,
+        content_disposition,
+        accept_ranges,
+        content_range,
+        vary,
+        content_length,
+        body,
+    } = response;
+    let mut headers = vec![no_store()];
     for (name, value) in [
-        ("Content-Type", response.content_type),
-        ("Content-Encoding", response.content_encoding),
-        ("Vary", response.vary),
+        ("Content-Type", content_type),
+        ("Content-Encoding", content_encoding),
+        ("Content-Disposition", content_disposition),
+        ("Accept-Ranges", accept_ranges),
+        ("Content-Range", content_range),
+        ("Vary", vary),
     ] {
         if let Some(value) = value
             && let Ok(header) = Header::from_bytes(name, value)
         {
-            response_body = response_body.with_header(header);
+            headers.push(header);
         }
     }
-    response_body.with_header(no_store())
+    Response::new(StatusCode(status), headers, body, content_length, None)
 }
 
 fn json_response(status: StatusCode, value: &impl Serialize) -> HttpResponse {
     let body = serde_json::to_vec(value)
         .unwrap_or_else(|_| r#"{"ok":false,"error":"请求未能完成"}"#.as_bytes().to_vec());
-    Response::from_data(body)
-        .with_status_code(status)
-        .with_header(content_type("application/json; charset=utf-8"))
-        .with_header(no_store())
+    data_response(
+        status,
+        body,
+        vec![content_type("application/json; charset=utf-8"), no_store()],
+    )
 }
 
 fn text_response(content_type_value: &'static str, content: &'static str) -> HttpResponse {
-    Response::from_data(content.as_bytes().to_vec())
-        .with_status_code(StatusCode(200))
-        .with_header(content_type(content_type_value))
-        .with_header(no_store())
+    data_response(
+        StatusCode(200),
+        content.as_bytes().to_vec(),
+        vec![content_type(content_type_value), no_store()],
+    )
 }
 
 fn bytes_response(content_type_value: &'static str, content: &'static [u8]) -> HttpResponse {
-    Response::from_data(content.to_vec())
-        .with_status_code(StatusCode(200))
-        .with_header(content_type(content_type_value))
-        .with_header(no_store())
+    data_response(
+        StatusCode(200),
+        content.to_vec(),
+        vec![content_type(content_type_value), no_store()],
+    )
+}
+
+fn data_response(status: StatusCode, body: Vec<u8>, headers: Vec<Header>) -> HttpResponse {
+    let length = body.len();
+    Response::new(
+        status,
+        headers,
+        Box::new(std::io::Cursor::new(body)),
+        Some(length),
+        None,
+    )
 }
 
 fn content_type(value: &'static str) -> Header {

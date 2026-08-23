@@ -13,6 +13,7 @@ pub mod gateway_process;
 pub mod gateway_settings;
 pub mod gateway_state;
 pub mod gateway_webui;
+mod host_files;
 pub mod image_toolbox;
 pub mod managed_child;
 pub mod managed_protocol;

@@ -18,6 +18,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 use crate::{
     Result,
     event::{Event, EventBase, EventId},
+    host_files::{DownloadStream, HostFileConflictPolicy, HostFileJobKind, HostFileManager},
     managed_protocol::{
         MANAGED_AUTH_HEADER, MANAGED_BIND_ADDRESS, MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH,
         MANAGED_SHUTDOWN_PATH, ManagedReadyResponse, bearer_token_matches,
@@ -55,6 +56,7 @@ const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
 const KATEX_CSS: &str = include_str!("webui/vendor/katex.min.css");
 const STYLE_CSS: &str = include_str!("webui/style.css");
 const SESSION_TERMINAL_JS: &str = include_str!("webui/session-terminal.js");
+const FILE_MANAGER_JS: &str = include_str!("webui/file-manager.js");
 const XTERM_JS: &str = include_str!("webui/vendor/xterm.js");
 const XTERM_ADDON_FIT_JS: &str = include_str!("webui/vendor/xterm-addon-fit.js");
 const XTERM_ADDON_UNICODE11_JS: &str = include_str!("webui/vendor/xterm-addon-unicode11.js");
@@ -163,6 +165,7 @@ const MAX_COMMAND_BYTES: usize = 1024 * 1024;
 const MAX_EVENT_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
 const MAX_SESSION_TERMINAL_BODY_BYTES: usize = 128 * 1024;
+const MAX_HOST_FILE_BODY_BYTES: usize = 1024 * 1024;
 const SESSION_COOKIE: &str = "me_webui_session";
 
 pub struct WebUiServer {
@@ -171,6 +174,7 @@ pub struct WebUiServer {
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
     _session_terminals: Arc<SessionTerminalRegistry>,
+    _host_files: Arc<HostFileManager>,
 }
 
 impl WebUiServer {
@@ -186,6 +190,7 @@ impl WebUiServer {
 impl Drop for WebUiServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self._host_files.shutdown();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
         }
@@ -264,6 +269,7 @@ fn start_with_server(
     };
     let backend: Arc<dyn UiBackend> = Arc::new(backend);
     let initial = backend.snapshot()?;
+    let host_files = Arc::new(HostFileManager::new(&initial.environment.workspace)?);
     let session_terminals = Arc::new(SessionTerminalRegistry::new(
         &initial.environment.workspace,
     )?);
@@ -274,6 +280,7 @@ fn start_with_server(
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let worker_session_terminals = Arc::clone(&session_terminals);
+    let worker_host_files = Arc::clone(&host_files);
     let worker = thread::Builder::new()
         .name("me-webui".into())
         .spawn(move || {
@@ -299,6 +306,7 @@ fn start_with_server(
                         let auth = Arc::clone(&auth);
                         let managed = Arc::clone(&managed);
                         let session_terminals = Arc::clone(&worker_session_terminals);
+                        let host_files = Arc::clone(&worker_host_files);
                         let _ = thread::Builder::new()
                             .name("me-webui-request".into())
                             .spawn(move || {
@@ -309,6 +317,7 @@ fn start_with_server(
                                     auth.as_ref(),
                                     managed.as_ref().as_ref(),
                                     session_terminals.as_ref(),
+                                    host_files.as_ref(),
                                 );
                             });
                     }
@@ -326,6 +335,7 @@ fn start_with_server(
         shutdown,
         worker: Some(worker),
         _session_terminals: session_terminals,
+        _host_files: host_files,
     })
 }
 
@@ -553,10 +563,25 @@ fn serve(
     auth: &WebSessionAuth,
     managed: Option<&ManagedWebAccess>,
     session_terminals: &SessionTerminalRegistry,
+    host_files: &HostFileManager,
 ) {
     let result = match managed {
-        Some(managed) => route_managed(&mut request, backend, commands, managed, session_terminals),
-        None => route(&mut request, backend, commands, auth, session_terminals),
+        Some(managed) => route_managed(
+            &mut request,
+            backend,
+            commands,
+            managed,
+            session_terminals,
+            host_files,
+        ),
+        None => route(
+            &mut request,
+            backend,
+            commands,
+            auth,
+            session_terminals,
+            host_files,
+        ),
     };
     let response = match result {
         Ok(response) => response,
@@ -568,7 +593,7 @@ fn serve(
     let _ = request.respond(response);
 }
 
-type HttpResponse = Response<std::io::Cursor<Vec<u8>>>;
+type HttpResponse = Response<Box<dyn Read + Send>>;
 
 fn route_managed(
     request: &mut Request,
@@ -576,6 +601,7 @@ fn route_managed(
     commands: &dyn UiCommandGateway,
     managed: &ManagedWebAccess,
     session_terminals: &SessionTerminalRegistry,
+    host_files: &HostFileManager,
 ) -> Result<HttpResponse> {
     let authorization = request
         .headers()
@@ -611,14 +637,49 @@ fn route_managed(
         }
         (&Method::Post, "/api/sync")
         | (&Method::Get, "/api/snapshot")
-        | (&Method::Post, "/api/command") => {
-            operational_route(request, backend, commands, session_terminals, path, query)
-        }
-        (&Method::Get, path) if path.starts_with("/api/deletion-blocker/") => {
-            operational_route(request, backend, commands, session_terminals, path, query)
-        }
+        | (&Method::Post, "/api/command") => operational_route(
+            request,
+            backend,
+            commands,
+            session_terminals,
+            host_files,
+            path,
+            query,
+        ),
+        (&Method::Get, path) if path.starts_with("/api/deletion-blocker/") => operational_route(
+            request,
+            backend,
+            commands,
+            session_terminals,
+            host_files,
+            path,
+            query,
+        ),
         (&Method::Post, path) if query.is_none() && path.starts_with("/api/session-terminal/") => {
-            operational_route(request, backend, commands, session_terminals, path, query)
+            operational_route(
+                request,
+                backend,
+                commands,
+                session_terminals,
+                host_files,
+                path,
+                query,
+            )
+        }
+        (method, path)
+            if query.is_none()
+                && ((*method == Method::Post && is_host_file_post_path(path))
+                    || (*method == Method::Get && parse_download_content_path(path).is_some())) =>
+        {
+            operational_route(
+                request,
+                backend,
+                commands,
+                session_terminals,
+                host_files,
+                path,
+                query,
+            )
         }
         _ => Ok(json_response(
             StatusCode(404),
@@ -633,6 +694,7 @@ fn route(
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
     session_terminals: &SessionTerminalRegistry,
+    host_files: &HostFileManager,
 ) -> Result<HttpResponse> {
     let url = request.url().to_owned();
     let (path, query) = split_url(&url);
@@ -655,6 +717,12 @@ fn route(
         }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
+        }
+        (&Method::Get, "/file-manager.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                FILE_MANAGER_JS,
+            ));
         }
         (&Method::Get, "/transcript.js") => {
             return Ok(text_response(
@@ -702,7 +770,15 @@ fn route(
     if !auth.authorized(request_cookie(request, SESSION_COOKIE)) {
         return Ok(unauthorized_response());
     }
-    operational_route(request, backend, commands, session_terminals, path, query)
+    operational_route(
+        request,
+        backend,
+        commands,
+        session_terminals,
+        host_files,
+        path,
+        query,
+    )
 }
 
 fn operational_route(
@@ -710,6 +786,7 @@ fn operational_route(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     session_terminals: &SessionTerminalRegistry,
+    host_files: &HostFileManager,
     path: &str,
     query: Option<&str>,
 ) -> Result<HttpResponse> {
@@ -763,12 +840,336 @@ fn operational_route(
         (&Method::Post, path) if query.is_none() && path.starts_with("/api/session-terminal/") => {
             session_terminal_response(request, session_terminals, path)
         }
+        (method, path)
+            if query.is_none()
+                && ((*method == Method::Post && is_host_file_post_path(path))
+                    || (*method == Method::Get && parse_download_content_path(path).is_some())) =>
+        {
+            host_file_response(request, host_files, path)
+        }
         (&Method::Post, "/api/command") => command_response(request, commands),
         _ => Ok(json_response(
             StatusCode(404),
             &json!({"ok": false, "error": "not found"}),
         )),
     }
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileListRequest {
+    path: Option<String>,
+    #[serde(default)]
+    roots: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileMkdirRequest {
+    parent: String,
+    name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileRenameRequest {
+    path: String,
+    new_name: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileJobPrepareRequest {
+    kind: HostFileJobKind,
+    sources: Vec<String>,
+    destination: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileJobConfirmRequest {
+    operation_id: String,
+    conflict_policy: HostFileConflictPolicy,
+    #[serde(default)]
+    replace_directories: bool,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileOperationRequest {
+    operation_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileJobStatusRequest {
+    operation_id: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileUploadCreateRequest {
+    destination: String,
+    name: String,
+    size_bytes: u64,
+    conflict_policy: Option<HostFileConflictPolicy>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileUploadChunkRequest {
+    upload_id: String,
+    offset: u64,
+    data: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileUploadRequest {
+    upload_id: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileDownloadCreateRequest {
+    sources: Vec<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HostFileDownloadRequest {
+    download_id: String,
+}
+
+fn is_host_file_post_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/api/files/list"
+            | "/api/files/mkdir"
+            | "/api/files/rename"
+            | "/api/files/jobs/prepare"
+            | "/api/files/jobs/confirm"
+            | "/api/files/jobs/status"
+            | "/api/files/jobs/cancel"
+            | "/api/files/uploads/create"
+            | "/api/files/uploads/chunk"
+            | "/api/files/uploads/finish"
+            | "/api/files/uploads/cancel"
+            | "/api/files/downloads/create"
+            | "/api/files/downloads/status"
+            | "/api/files/downloads/cancel"
+    )
+}
+
+fn parse_download_content_path(path: &str) -> Option<&str> {
+    let download_id = path
+        .strip_prefix("/api/files/downloads/")?
+        .strip_suffix("/content")?;
+    (!download_id.is_empty()
+        && !download_id.contains('/')
+        && download_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-'))
+    .then_some(download_id)
+}
+
+fn host_file_response(
+    request: &mut Request,
+    host_files: &HostFileManager,
+    path: &str,
+) -> Result<HttpResponse> {
+    Ok(match host_file_response_inner(request, host_files, path) {
+        Ok(response) => response,
+        Err(error) => json_response(
+            StatusCode(400),
+            &json!({"ok": false, "error": error.to_string()}),
+        ),
+    })
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(request: &mut Request, limit: usize) -> Result<T> {
+    let length = request.body_length().unwrap_or(0);
+    if length > limit {
+        return Err("Request body is too large".into());
+    }
+    let mut body = Vec::with_capacity(length.min(limit));
+    request
+        .as_reader()
+        .take((limit + 1) as u64)
+        .read_to_end(&mut body)?;
+    if body.len() > limit {
+        return Err("Request body is too large".into());
+    }
+    Ok(serde_json::from_slice(&body)?)
+}
+
+fn host_file_response_inner(
+    request: &mut Request,
+    host_files: &HostFileManager,
+    path: &str,
+) -> Result<HttpResponse> {
+    let response = match (request.method(), path) {
+        (&Method::Post, "/api/files/list") => {
+            let value: HostFileListRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.list(value.path.as_deref(), value.roots)?,
+            )
+        }
+        (&Method::Post, "/api/files/mkdir") => {
+            let value: HostFileMkdirRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &json!({"ok": true, "entry": host_files.mkdir(&value.parent, &value.name)?}),
+            )
+        }
+        (&Method::Post, "/api/files/rename") => {
+            let value: HostFileRenameRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &json!({"ok": true, "entry": host_files.rename(&value.path, &value.new_name)?}),
+            )
+        }
+        (&Method::Post, "/api/files/jobs/prepare") => {
+            let value: HostFileJobPrepareRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.prepare_job(value.kind, value.sources, value.destination)?,
+            )
+        }
+        (&Method::Post, "/api/files/jobs/confirm") => {
+            let value: HostFileJobConfirmRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.confirm_job(
+                    &value.operation_id,
+                    value.conflict_policy,
+                    value.replace_directories,
+                )?,
+            )
+        }
+        (&Method::Post, "/api/files/jobs/status") => {
+            let value: HostFileJobStatusRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &json!({
+                    "ok": true,
+                    "jobs": host_files.job_status(value.operation_id.as_deref())?,
+                }),
+            )
+        }
+        (&Method::Post, "/api/files/jobs/cancel") => {
+            let value: HostFileOperationRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.cancel_job(&value.operation_id)?,
+            )
+        }
+        (&Method::Post, "/api/files/uploads/create") => {
+            let value: HostFileUploadCreateRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.create_upload(
+                    &value.destination,
+                    &value.name,
+                    value.size_bytes,
+                    value.conflict_policy,
+                )?,
+            )
+        }
+        (&Method::Post, "/api/files/uploads/chunk") => {
+            let value: HostFileUploadChunkRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.upload_chunk(&value.upload_id, value.offset, &value.data)?,
+            )
+        }
+        (&Method::Post, "/api/files/uploads/finish") => {
+            let value: HostFileUploadRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.finish_upload(&value.upload_id)?,
+            )
+        }
+        (&Method::Post, "/api/files/uploads/cancel") => {
+            let value: HostFileUploadRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.cancel_upload(&value.upload_id)?,
+            )
+        }
+        (&Method::Post, "/api/files/downloads/create") => {
+            let value: HostFileDownloadCreateRequest =
+                read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(StatusCode(200), &host_files.create_download(value.sources)?)
+        }
+        (&Method::Post, "/api/files/downloads/status") => {
+            let value: HostFileDownloadRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.download_status(&value.download_id)?,
+            )
+        }
+        (&Method::Post, "/api/files/downloads/cancel") => {
+            let value: HostFileDownloadRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(
+                StatusCode(200),
+                &host_files.cancel_download(&value.download_id)?,
+            )
+        }
+        (&Method::Get, path) if parse_download_content_path(path).is_some() => {
+            let download_id = parse_download_content_path(path).expect("validated download path");
+            let range = request
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv("Range"))
+                .map(|header| header.value.as_str());
+            download_response(host_files.open_download(download_id, range)?)
+        }
+        _ => json_response(StatusCode(404), &json!({"ok": false, "error": "not found"})),
+    };
+    Ok(response)
+}
+
+fn download_response(stream: DownloadStream) -> HttpResponse {
+    let mut headers = vec![
+        Header::from_bytes("Content-Type", stream.content_type)
+            .expect("download Content-Type is valid"),
+        Header::from_bytes("Accept-Ranges", "bytes").expect("Accept-Ranges is valid"),
+        Header::from_bytes(
+            "Content-Disposition",
+            format!(
+                "attachment; filename=\"download\"; filename*=UTF-8''{}",
+                percent_encode_header(&stream.filename)
+            ),
+        )
+        .expect("download Content-Disposition is valid"),
+        no_store(),
+    ];
+    if let Some(content_range) = stream.content_range {
+        headers.push(
+            Header::from_bytes("Content-Range", content_range).expect("Content-Range is valid"),
+        );
+    }
+    Response::new(
+        StatusCode(stream.status),
+        headers,
+        stream.reader,
+        Some(stream.content_length),
+        None,
+    )
+}
+
+fn percent_encode_header(value: &str) -> String {
+    let mut encoded = String::new();
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.') {
+            encoded.push(byte as char);
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
 }
 
 #[derive(Deserialize)]
@@ -1559,13 +1960,15 @@ fn sync_json_response(
     } else {
         (body, false)
     };
-    let mut response = Response::from_data(body)
-        .with_status_code(status)
-        .with_header(content_type("application/json; charset=utf-8"))
-        .with_header(
+    let mut response = data_response(
+        status,
+        body,
+        vec![
+            content_type("application/json; charset=utf-8"),
             Header::from_bytes("Vary", "Accept-Encoding").expect("static Vary header is valid"),
-        )
-        .with_header(no_store());
+            no_store(),
+        ],
+    );
     if compressed {
         response = response.with_header(
             Header::from_bytes("Content-Encoding", "gzip")
@@ -1578,24 +1981,38 @@ fn sync_json_response(
 fn json_response(status: StatusCode, value: &impl Serialize) -> HttpResponse {
     let body = serde_json::to_vec(value)
         .unwrap_or_else(|error| format!(r#"{{"ok":false,"error":"{error}"}}"#).into_bytes());
-    Response::from_data(body)
-        .with_status_code(status)
-        .with_header(content_type("application/json; charset=utf-8"))
-        .with_header(no_store())
+    data_response(
+        status,
+        body,
+        vec![content_type("application/json; charset=utf-8"), no_store()],
+    )
 }
 
 fn text_response(content_type_value: &'static str, content: &'static str) -> HttpResponse {
-    Response::from_data(content.as_bytes().to_vec())
-        .with_status_code(StatusCode(200))
-        .with_header(content_type(content_type_value))
-        .with_header(no_store())
+    data_response(
+        StatusCode(200),
+        content.as_bytes().to_vec(),
+        vec![content_type(content_type_value), no_store()],
+    )
 }
 
 fn bytes_response(content_type_value: &'static str, content: &'static [u8]) -> HttpResponse {
-    Response::from_data(content.to_vec())
-        .with_status_code(StatusCode(200))
-        .with_header(content_type(content_type_value))
-        .with_header(no_store())
+    data_response(
+        StatusCode(200),
+        content.to_vec(),
+        vec![content_type(content_type_value), no_store()],
+    )
+}
+
+fn data_response(status: StatusCode, body: Vec<u8>, headers: Vec<Header>) -> HttpResponse {
+    let length = body.len();
+    Response::new(
+        status,
+        headers,
+        Box::new(std::io::Cursor::new(body)),
+        Some(length),
+        None,
+    )
 }
 
 fn content_type(value: &'static str) -> Header {
@@ -3193,6 +3610,15 @@ mod tests {
         );
         assert_eq!(
             client
+                .post(format!("{address}/api/files/list"))
+                .json(&json!({"path": null, "roots": false}))
+                .send()
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
                 .post(format!("{address}/api/auth/login"))
                 .json(&json!({"password": "wrong"}))
                 .send()
@@ -3235,6 +3661,18 @@ mod tests {
                 .status()
                 .is_success()
         );
+        let files: serde_json::Value = client
+            .post(format!("{address}/api/files/list"))
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&json!({"path": null, "roots": false}))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(files["ok"], true);
+        assert!(files["entries"].is_array());
         let native_terminal: serde_json::Value = client
             .post(format!(
                 "{address}/api/session-terminal/{session_agent}/read"

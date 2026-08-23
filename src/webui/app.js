@@ -131,6 +131,8 @@ const elements = {
   terminalTabs: $("#terminal-tabs"),
   chatView: $("#chat-view"),
   workmapView: $("#workmap-view"),
+  filesView: $("#files-view"),
+  fileManager: $("#file-manager"),
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
   sessionTerminalControls: $("#session-terminal-controls"),
@@ -235,6 +237,31 @@ function getSessionTerminalController() {
     });
   }
   return sessionTerminalController;
+}
+
+let fileManagerController = null;
+
+function getFileManagerController() {
+  if (!fileManagerController) {
+    fileManagerController = globalThis.MeFileManager.create({
+      container: elements.fileManager,
+      request: (path, options) => api(path, options),
+      downloadUrl: (downloadId) => `/api/files/downloads/${encodeURIComponent(downloadId)}/content`,
+      onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+      notify: (message, kind) => toast(message, kind === "error"),
+    });
+  }
+  return fileManagerController;
+}
+
+function syncFileManagerView() {
+  if (state.view.kind !== "files" || !state.selectedAgent || !state.snapshot.environment?.workspace) return;
+  getFileManagerController().attach({
+    key: `direct:${state.selectedAgent}`,
+    agentId: state.selectedAgent,
+    workspaceId: null,
+    defaultPath: state.snapshot.environment.workspace,
+  });
 }
 
 function eventParts(event) {
@@ -2127,8 +2154,10 @@ function renderTabs() {
   elements.chatView.classList.toggle("active", state.view.kind === "chat");
   elements.workmapView.classList.toggle("active", state.view.kind === "workmap");
   elements.sessionTerminalView.classList.toggle("active", state.view.kind === "session-terminal");
+  elements.filesView.classList.toggle("active", state.view.kind === "files");
   elements.terminalView.classList.toggle("active", state.view.kind === "terminal");
   syncSessionTerminalView();
+  syncFileManagerView();
 }
 
 function showView(view) {
