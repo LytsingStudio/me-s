@@ -203,10 +203,29 @@
     return typeof target.isEqualNode === "function" && target.isEqualNode(source);
   }
 
+  function reconcileKey(node) {
+    if (node?.nodeType !== 1 || typeof node.getAttribute !== "function") return null;
+    return node.getAttribute("data-reconcile-key");
+  }
+
+  function sameReconcileIdentity(target, source) {
+    const key = reconcileKey(target);
+    return key !== null && key === reconcileKey(source) && sameNodeKind(target, source);
+  }
+
+  function preservesRuntimeAttribute(target, source, name) {
+    return name === "open"
+      && target.tagName === "DETAILS"
+      && target.getAttribute("data-reconcile-preserve-open") !== null
+      && source.getAttribute("data-reconcile-preserve-open") !== null;
+  }
+
   function syncAttributes(target, source) {
     const desired = new Map([...source.attributes].map((attribute) => [attribute.name, attribute.value]));
     [...target.attributes].forEach((attribute) => {
-      if (!desired.has(attribute.name)) target.removeAttribute(attribute.name);
+      if (!desired.has(attribute.name) && !preservesRuntimeAttribute(target, source, attribute.name)) {
+        target.removeAttribute(attribute.name);
+      }
     });
     desired.forEach((value, name) => {
       if (target.getAttribute(name) !== value) target.setAttribute(name, value);
@@ -282,13 +301,17 @@
       }
       if (nodesEqual(current, sourceNode)) continue;
       const reusable = [...target.childNodes].slice(index + 1)
-        .find((candidate) => nodesEqual(candidate, sourceNode));
+        .find((candidate) => nodesEqual(candidate, sourceNode)
+          || sameReconcileIdentity(candidate, sourceNode));
       if (reusable) {
         target.insertBefore(reusable, current);
         continue;
       }
       const nextSource = incoming[index + 1];
-      if (nextSource && nodesEqual(current, nextSource)) {
+      if (
+        nextSource
+        && (nodesEqual(current, nextSource) || sameReconcileIdentity(current, nextSource))
+      ) {
         target.insertBefore(sourceNode, current);
         continue;
       }

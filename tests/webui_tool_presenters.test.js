@@ -1,0 +1,117 @@
+"use strict";
+
+const { describe, expect, test } = require("bun:test");
+const { readFileSync } = require("node:fs");
+const { join } = require("node:path");
+
+const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
+new Function(source)();
+const presenters = globalThis.MeToolPresenters;
+
+function succeeded(value, updates = []) {
+  return {
+    text: "",
+    updates,
+    result: { state: "Succeeded", exitCode: null, value, rawDetail: JSON.stringify(value) },
+  };
+}
+
+describe("shared WebUI tool presenters", () => {
+  test("explicitly covers every first-party and historical compatibility tool", () => {
+    expect(presenters.KNOWN_TOOLS).toHaveLength(55);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(55);
+    expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
+    for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
+  });
+
+  test("keeps every input summary on one stable line", () => {
+    for (const name of presenters.KNOWN_TOOLS) {
+      const first = presenters.summarize(name, {});
+      const second = presenters.summarize(name, {});
+      expect(first).toEqual(second);
+      expect(first.title).not.toBe("");
+      expect(first.summary).not.toMatch(/[\r\n]/);
+    }
+  });
+
+  test("omits output blocks until output actually exists", () => {
+    for (const name of presenters.KNOWN_TOOLS) {
+      const pending = presenters.describe(name, {}, undefined);
+      expect(pending.inputBlocks.length).toBeGreaterThan(0);
+      expect(pending.outputBlocks).toEqual([]);
+      expect(presenters.renderDetails(pending)).not.toContain("tool-output-section");
+
+      const completed = presenters.describe(name, {}, succeeded({}));
+      expect(completed.outputBlocks.length).toBeGreaterThan(0);
+      expect(presenters.renderDetails(completed)).toContain("tool-output-section");
+    }
+  });
+
+  test("renders File.Read as line-numbered content instead of result JSON", () => {
+    const input = { path: "src/app.js", start_line: 10, end_line: 11 };
+    const summary = presenters.summarize("File.Read", input);
+    expect(summary).toMatchObject({ title: "读取文件", summary: "src/app.js · 第 10–11 行" });
+    const details = presenters.describe("File.Read", input, succeeded({
+      path: "src/app.js", lines: { "10": "const a = 1;", "11": "const b = 2;" },
+      editable_ranges: [{ start_line: 10, end_line: 11 }], start_line: 10, end_line: 11,
+      total_lines: 30, eof: false, truncated: true, hash: "0123abcd", size: 300,
+      encoding: "utf-8", encoding_confidence: 1, bom: false,
+    }));
+    const html = presenters.renderDetails(details);
+    expect(html).toContain("文件内容");
+    expect(html).toContain("const a = 1;");
+    expect(html).toContain("已授权编辑范围");
+  });
+
+  test("renders Terminal updates as terminal text rather than patch JSON", () => {
+    const output = succeeded({ session_id: "pty-10", sequence: 2, state: "running", exit_code: null, truncated: false }, [
+      { kind: "terminal", value: { rows: [{ row: 2, runs: [{ col: 0, width: 5, text: "hello" }] }] } },
+    ]);
+    const details = presenters.describe("Terminal.Interact", {
+      session_id: "pty-10", input: [{ type: "text", text: "echo hello" }, { type: "key", key: "enter" }],
+    }, output);
+    const html = presenters.renderDetails(details);
+    const primary = html.slice(0, html.indexOf('<details class="tool-raw"'));
+    expect(html).toContain("echo hello");
+    expect(html).toContain("本次终端更新");
+    expect(html).toContain("hello");
+    expect(primary).not.toContain("&quot;runs&quot;");
+    expect(html).toContain("&quot;runs&quot;");
+  });
+
+  test("renders browser snapshot tree, screenshot path, and browser events", () => {
+    const details = presenters.describe("WebBrowser.Snapshot", { page_id: "p0000001", wait_ms: 1000, kind: "both" }, succeeded({
+      page_id: "p0000001", snapshot_id: 2, url: "https://example.com", title: "Example", state: "complete",
+      kind: "both", accessibility_tree: "- heading Example [ref=e1]", screen_path: ".me/example.png",
+      browser_events: [{ kind: "console", level: "warning", message: "warning" }], dropped_browser_events: 0,
+    }));
+    const html = presenters.renderDetails(details);
+    expect(html).toContain("Accessibility Tree");
+    expect(html).toContain("heading Example");
+    expect(html).toContain(".me/example.png");
+    expect(html).toContain("浏览器事件");
+  });
+
+  test("shows a clear failure block and keeps raw data collapsed", () => {
+    const output = {
+      text: "",
+      updates: [],
+      result: { state: "Failed", exitCode: null, value: { code: "not_found", message: "missing", tip: "check path" }, rawDetail: "{\"code\":\"not_found\",\"message\":\"missing\",\"tip\":\"check path\"}" },
+    };
+    const html = presenters.renderDetails(presenters.describe("File.Read", { path: "missing.txt" }, output));
+    expect(html).toContain("执行失败");
+    expect(html).toContain("missing");
+    expect(html).toContain("错误码：not_found");
+    expect(html).toContain("<details class=\"tool-raw\"");
+    expect(html).not.toMatch(/<details[^>]*\sopen(?:[=>\s])/);
+  });
+
+  test("uses a safe structured fallback for custom tools", () => {
+    const summary = presenters.summarize("Custom.Deploy", { path: "dist", force: true });
+    expect(summary).toMatchObject({ title: "Custom.Deploy", summary: "dist", known: false });
+    const html = presenters.renderDetails(presenters.describe("Custom.Deploy", { path: "<unsafe>", force: true }, succeeded({ ok: true })));
+    expect(html).toContain("Path");
+    expect(html).toContain("&lt;unsafe&gt;");
+    expect(html).not.toContain("<unsafe>");
+  });
+});

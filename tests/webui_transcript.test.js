@@ -199,6 +199,35 @@ describe("shared WebUI transcript reconciliation", () => {
     expect(target.childNodes[0]).toBe(second);
   });
 
+  test("keeps keyed disclosure identity and runtime state when output is inserted", () => {
+    const input = element("section", { "data-reconcile-key": "input" }, text("input"));
+    const rawInput = element("section", {}, text("raw input"));
+    rawInput.scrollLeft = 64;
+    const raw = element("details", {
+      "data-reconcile-key": "raw",
+      "data-reconcile-preserve-open": "true",
+      open: "",
+    }, rawInput);
+    const target = fragment(input, raw);
+    const source = fragment(
+      element("section", { "data-reconcile-key": "input" }, text("input")),
+      element("section", { "data-reconcile-key": "output" }, text("output")),
+      element("details", {
+        "data-reconcile-key": "raw",
+        "data-reconcile-preserve-open": "true",
+      }, element("section", {}, text("raw input")), element("section", {}, text("raw output"))),
+    );
+
+    reconcileChildren(target, source);
+    expect(target.childNodes[0]).toBe(input);
+    expect(target.childNodes[1].getAttribute("data-reconcile-key")).toBe("output");
+    expect(target.childNodes[2]).toBe(raw);
+    expect(raw.getAttribute("open")).toBe("");
+    expect(raw.childNodes[0]).toBe(rawInput);
+    expect(rawInput.scrollLeft).toBe(64);
+    expect(raw.childNodes[1].childNodes[0].data).toBe("raw output");
+  });
+
   test("updates attributes without replacing a compatible element", () => {
     const link = element("a", { href: "https://old.example", title: "old" }, text("link"));
     const target = fragment(link);

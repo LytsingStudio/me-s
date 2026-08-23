@@ -1620,7 +1620,7 @@ function consumeChatEvents(projection, events) {
         const tool = {
           id: value.id, apiCallId: value.api_call_id, name: value.name, arguments: value.arguments,
           args, started: value.timestamp_ms, queued, sessionId: args?.session_id || null,
-          output: "", result: null, revision: value.id,
+          output: "", updates: [], result: null, revision: value.id,
         };
         const message = appendProjectedMessage(projection, changes, {
           key: `tool:${value.id}`, revision: value.id,
@@ -1636,6 +1636,7 @@ function consumeChatEvents(projection, events) {
         if (projection._completedCompactTools.has(value.tool_call_id)) break;
         const tool = projection._activeTools.get(value.tool_call_id);
         if (tool) {
+          tool.updates.push(value.content);
           tool.output += toolInfoText(value.content);
           tool.revision = value.id;
           markProjectedToolChanged(projection, changes, tool);
@@ -2677,7 +2678,8 @@ function isToolLikeKind(kind) {
 }
 
 function bindToolCard(card) {
-  const toggle = () => {
+  const toggle = (event) => {
+    if (event?.target?.closest?.(".tool-details")) return;
     if (window.getSelection()?.toString()) return;
     const key = `${state.selectedAgent}:${card.dataset.toolCard}`;
     if (state.expandedTools.has(key)) state.expandedTools.delete(key); else state.expandedTools.add(key);
@@ -2692,32 +2694,46 @@ function bindToolCard(card) {
   };
   card.addEventListener("click", toggle);
   card.addEventListener("keydown", (event) => {
-    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(); }
+    if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(event); }
   });
+}
+
+function toolPresentationOutput(tool) {
+  if (!tool.result && !tool.output && !tool.updates?.length) return undefined;
+  return {
+    text: tool.output || "",
+    updates: tool.updates || [],
+    result: tool.result ? {
+      state: tool.result.state,
+      exitCode: tool.result.exitCode,
+      value: safeJson(tool.result.detail) ?? tool.result.detail,
+      rawDetail: tool.result.detail,
+    } : null,
+  };
 }
 
 function renderToolCard(tool, followsTool = false) {
   const view = toolCardView(tool);
-  const marker = "●";
   return `<div class="tool-card ${view.status} ${view.expanded ? "expanded" : ""} ${followsTool ? "follows-tool" : ""}" data-tool-card="${escapeAttr(tool.id)}" role="button" tabindex="0" aria-expanded="${view.expanded}">
-    <div class="tool-header"><span class="tool-marker">${marker}</span><span class="tool-name">${escapeHtml(tool.name)}</span><span class="tool-brief">${escapeHtml(view.brief)}</span></div>
-    ${view.expanded ? renderToolDetails(view.rows) : ""}
+    <div class="tool-header"><span class="tool-marker">●</span><span class="tool-name" title="${escapeAttr(tool.name)}">${escapeHtml(view.title)}</span><span class="tool-brief">${escapeHtml(view.brief)}</span><span class="tool-time"${view.runningStarted == null ? "" : ` data-running-started="${view.runningStarted}"`}>${escapeHtml(view.time)}</span></div>
+    ${view.details ? MeToolPresenters.renderDetails(view.details) : ""}
   </div>`;
 }
 
 function toolCardView(tool) {
   const resultState = normalize(tool.result?.state || "");
   const expanded = state.expandedTools.has(`${state.selectedAgent}:${tool.id}`);
+  const summary = MeToolPresenters.summarize(tool.name, tool.args || {});
+  const runningStarted = !tool.queued && !tool.result ? tool.started : null;
   return {
     expanded,
-    status: !tool.result ? "running" : resultState === "succeeded" ? "succeeded" : "failed",
-    brief: toolBrief(tool),
-    rows: expanded ? toolRows(tool, true) : [],
+    status: tool.queued ? "queued" : !tool.result ? "running" : resultState === "succeeded" ? "succeeded" : "failed",
+    title: summary.title,
+    brief: summary.summary,
+    time: tool.queued ? "排队中" : !tool.result ? formatDuration(Date.now() - tool.started) : formatDuration(Math.max(0, tool.result.finished - tool.started)),
+    runningStarted,
+    details: expanded ? MeToolPresenters.describe(tool.name, tool.args || {}, toolPresentationOutput(tool)) : null,
   };
-}
-
-function renderToolDetails(rows) {
-  return `<div class="tool-details">${rows.map((row, index) => `<div class="tool-row"><span class="tool-tree">${index + 1 === rows.length ? "└" : "├"}─</span><span class="tool-key">${escapeHtml(row.key)}</span><${row.pre ? "pre" : "span"} class="tool-value ${row.pre ? "tool-output" : ""}"${row.runningStarted == null ? "" : ` data-running-started="${row.runningStarted}"`}>${escapeHtml(row.value)}</${row.pre ? "pre" : "span"}></div>`).join("")}</div>`;
 }
 
 function updateToolCardNode(node, tool, followsTool = node.classList.contains("follows-tool")) {
@@ -2726,15 +2742,20 @@ function updateToolCardNode(node, tool, followsTool = node.classList.contains("f
   node.setAttribute("aria-expanded", String(view.expanded));
   const name = node.querySelector(":scope > .tool-header .tool-name");
   const brief = node.querySelector(":scope > .tool-header .tool-brief");
-  if (name.textContent !== tool.name) name.textContent = tool.name;
+  const time = node.querySelector(":scope > .tool-header .tool-time");
+  if (name.textContent !== view.title) name.textContent = view.title;
+  name.title = tool.name;
   if (brief.textContent !== view.brief) brief.textContent = view.brief;
+  if (time.textContent !== view.time) time.textContent = view.time;
+  if (view.runningStarted == null) delete time.dataset.runningStarted;
+  else time.dataset.runningStarted = String(view.runningStarted);
   const details = node.querySelector(":scope > .tool-details");
   if (!view.expanded) {
     details?.remove();
     return;
   }
   const template = document.createElement("template");
-  template.innerHTML = renderToolDetails(view.rows);
+  template.innerHTML = MeToolPresenters.renderDetails(view.details);
   const replacement = template.content.firstElementChild;
   if (details) MeTranscript.reconcileNode(details, replacement); else node.append(replacement);
 }
@@ -2927,89 +2948,9 @@ function workerWaitIsVisible(wait) {
 }
 
 function toolBrief(tool) {
-  if (tool.result && normalize(tool.result.state) !== "succeeded") {
-    const detail = String(tool.result.detail || "").trim().split(/\r?\n/, 1)[0];
-    return detail ? `失败: ${detail}` : "失败";
-  }
-  const parts = [];
-  if (tool.sessionId) parts.push(String(tool.sessionId));
-  const terminalInput = tool.name.startsWith("Terminal.") ? toolInput(tool) : "";
-  if (terminalInput) parts.push(toolPreview(terminalInput));
-  if (tool.args) {
-    for (const key of ["path", "url", "page_id", "element_id", "query", "command", "instruction", "name"]) {
-      const value = tool.args[key];
-      if (["string", "number", "boolean"].includes(typeof value) && String(value)
-          && !parts.includes(String(value))) parts.push(String(value));
-      if (parts.length >= 2) break;
-    }
-  }
-  if (!parts.length) {
-    const input = toolInput(tool);
-    if (input) parts.push(toolPreview(input));
-  }
-  return parts.join(" ");
+  return MeToolPresenters.summarize(tool.name, tool.args || {}).summary;
 }
 
-function toolRows(tool, expanded) {
-  const rows = [];
-  if (tool.sessionId) rows.push({ key: "Session", value: tool.sessionId });
-  const input = toolInput(tool);
-  if (input) rows.push({ key: "Input", value: expanded ? input : toolPreview(input), pre: expanded });
-  const output = tool.output || (!tool.result ? "" : tool.result.detail) || (tool.result?.state === "Succeeded" ? "(no output)" : "");
-  if (output) rows.push({ key: "Output", value: expanded ? output : toolPreview(output), pre: expanded });
-  if (tool.queued) rows.push({ key: "State", value: "Queued" });
-  else if (!tool.result) rows.push({ key: "State", value: `Running ... ${formatDuration(Date.now() - tool.started)}`, runningStarted: tool.started });
-  else rows.push({ key: "Time use", value: formatDuration(Math.max(0, tool.result.finished - tool.started)) });
-  return rows;
-}
-
-function toolPreview(value) {
-  const preview = String(value).trim().replace(/\s+/g, " ");
-  return preview.length > 240 ? `${preview.slice(0, 239)}…` : preview;
-}
-
-function toolInput(tool) {
-  const args = tool.args;
-  if (!args || Object.keys(args).length === 0) return "";
-  if (typeof args.content === "string") return args.content;
-  if (typeof args.input === "string") return args.input;
-  if (tool.name.startsWith("Terminal.") && Array.isArray(args.input)) {
-    return args.input.map(terminalInputActionLabel).join("");
-  }
-  if (Array.isArray(args.events)) return args.events.map((event) => event.text || event.key || JSON.stringify(event)).join("");
-  const copy = { ...args };
-  delete copy.session_id;
-  return Object.keys(copy).length ? JSON.stringify(copy, null, 2) : "";
-}
-
-function terminalInputActionLabel(action) {
-  if (action?.type === "text") {
-    return Array.from(String(action.text || ""), (character) => {
-      if (character === "\r" || character === "\n") return "↵";
-      if (character === "\t") return "⇥";
-      if (character === "\u001b") return "Esc";
-      if (character === "\u007f") return "Del";
-      const code = character.codePointAt(0);
-      return code < 32 ? `\\u{${code.toString(16).padStart(4, "0")}}` : character;
-    }).join("");
-  }
-  if (action?.type !== "key" || typeof action.key !== "string") return "";
-  const modifiers = new Set(Array.isArray(action.modifiers) ? action.modifiers : []);
-  const prefix = [["ctrl", "Ctrl"], ["alt", "Alt"], ["shift", "Shift"]]
-    .filter(([modifier]) => modifiers.has(modifier))
-    .map(([, label]) => `${label}+`).join("");
-  const plain = modifiers.size === 0;
-  const labels = plain ? {
-    enter: "↵", escape: "Esc", tab: "⇥", backspace: "⌫", delete: "Del",
-    up: "↑", down: "↓", left: "←", right: "→",
-  } : {};
-  let key = labels[action.key];
-  if (!key) key = action.key.length === 1
-    ? action.key.toUpperCase()
-    : action.key.replace(/(^|_)(.)/g, (_match, _separator, letter) => letter.toUpperCase());
-  const repeat = Number(action.repeat) > 1 ? `×${Number(action.repeat)}` : "";
-  return `${prefix}${key}${repeat}`;
-}
 
 function emptyObjectiveDisclosure() {
   return { scopeId: null, objectiveId: null, expanded: false };

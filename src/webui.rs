@@ -47,6 +47,7 @@ const APP_JS: &str = include_str!("webui/app.js");
 const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
+const TOOL_PRESENTERS_JS: &str = include_str!("webui/tool-presenters.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
@@ -597,6 +598,12 @@ fn route(
             return Ok(text_response(
                 "text/javascript; charset=utf-8",
                 TRANSCRIPT_JS,
+            ));
+        }
+        (&Method::Get, "/tool-presenters.js") => {
+            return Ok(text_response(
+                "text/javascript; charset=utf-8",
+                TOOL_PRESENTERS_JS,
             ));
         }
         (&Method::Get, "/markdown.js") => {
@@ -1952,8 +1959,11 @@ mod tests {
         assert!(!APP_JS.contains("Worker 已完成"));
         assert!(!APP_JS.contains("Worker 已中断"));
         assert!(!APP_JS.contains("Worker 未完成"));
-        assert!(APP_JS.contains("return parts.join(\" \");"));
-        assert!(!APP_JS.contains("return parts.join(\" · \");"));
+        assert!(APP_JS.contains("brief: toolBrief(tool),"));
+        assert!(
+            APP_JS
+                .contains("return MeToolPresenters.summarize(tool.name, tool.args || {}).summary;")
+        );
         assert!(APP_JS.contains("<span class=\"worker-tool-marker\">●</span>"));
         assert!(!APP_JS.contains("Worker 执行完成"));
         assert!(!APP_JS.contains("Worker 执行失败"));
@@ -1968,19 +1978,27 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_tool_cards_are_single_line_summaries_until_expanded() {
+    fn ordinary_tool_cards_use_shared_structured_presenters() {
+        assert!(INDEX_HTML.contains("/tool-presenters.js"));
+        assert!(TOOL_PRESENTERS_JS.contains("const KNOWN_TOOLS = ["));
+        assert!(TOOL_PRESENTERS_JS.contains("define(\"File.Read\""));
+        assert!(TOOL_PRESENTERS_JS.contains("define(\"WebBrowser.Snapshot\""));
+        assert!(TOOL_PRESENTERS_JS.contains("define(\"Worker.Wait\""));
+        assert!(TOOL_PRESENTERS_JS.contains("missing tool presenters"));
         assert!(APP_JS.contains("function toolCardView(tool)"));
-        assert!(APP_JS.contains("rows: expanded ? toolRows(tool, true) : []"));
-        assert!(APP_JS.contains("view.expanded ? renderToolDetails(view.rows) : \"\""));
+        assert!(APP_JS.contains("MeToolPresenters.summarize(tool.name, tool.args || {})"));
+        assert!(APP_JS.contains(
+            "MeToolPresenters.describe(tool.name, tool.args || {}, toolPresentationOutput(tool))"
+        ));
+        assert!(APP_JS.contains("MeToolPresenters.renderDetails(view.details)"));
         assert!(APP_JS.contains("function updateToolCardNode(node, tool, followsTool ="));
-        assert!(APP_JS.contains("if (message.kind === \"tool\")"));
-        assert!(APP_JS.contains("class=\"tool-name\""));
-        assert!(APP_JS.contains("class=\"tool-brief\""));
+        assert!(APP_JS.contains("tool.updates.push(value.content)"));
         assert!(STYLE_CSS.contains(
-            ".tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr)"
+            ".tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr) auto"
         ));
         assert!(STYLE_CSS.contains(".tool-brief { min-width: 0; overflow: hidden;"));
-        assert!(STYLE_CSS.contains("text-overflow: ellipsis; white-space: nowrap;"));
+        assert!(TOOL_PRESENTERS_JS.contains("tool-output-section"));
+        assert!(STYLE_CSS.contains(".tool-raw > summary"));
         assert!(STYLE_CSS.contains(".tool-card.follows-tool { margin-top: -20px; }"));
     }
 

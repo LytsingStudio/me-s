@@ -153,24 +153,44 @@ button { color: inherit; }
 .ios-webkit .transcript-content > .message-block, .ios-webkit .transcript-content > .tool-card { content-visibility: visible; contain-intrinsic-size: none; }
 .tool-card.follows-tool { margin-top: -20px; }
 .tool-card:hover, .tool-card:focus-visible { background: var(--hover-fill-soft); }
-.tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr); align-items: center; gap: 8px; min-height: 31px; min-width: 0; border: 0; background: transparent; padding: 0; cursor: pointer; }
+.tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr) auto; align-items: center; gap: 8px; min-height: 31px; min-width: 0; border: 0; background: transparent; padding: 0; cursor: pointer; }
 .tool-marker { width: 15px; color: var(--muted); font-size: 18px; line-height: 1; }
-.tool-name { color: var(--text); font-weight: 400; }
+.tool-name { color: var(--text); font-weight: 650; white-space: nowrap; }
 .tool-brief { min-width: 0; overflow: hidden; color: var(--muted); font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.tool-time { color: var(--dim); font: 12px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; white-space: nowrap; }
+.tool-card.queued .tool-marker { color: var(--dim); }
 .tool-card.running .tool-marker { color: var(--text); animation: tool-marker-breathe 900ms ease-in-out infinite; will-change: opacity; }
 .tool-card.succeeded .tool-marker { color: var(--green); }
 .tool-card.failed .tool-marker { color: var(--red); }
 @keyframes tool-marker-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .tool-card.running .tool-marker { animation: none; } }
-.tool-details { margin: 4px 0 0 22px; color: var(--muted); font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-.tool-row { contain: layout paint style; display: grid; grid-template-columns: auto auto minmax(0, 1fr); gap: 7px; min-width: 0; }
-.tool-tree { color: var(--dim); }
-.tool-key { color: var(--tool-key); }
-.tool-value { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.tool-card.expanded .tool-row { margin-bottom: 7px; align-items: start; }
-.tool-card.expanded .tool-value { overflow: visible; white-space: pre-wrap; overflow-wrap: anywhere; }
-.tool-card.expanded .tool-output { max-height: none; }
-.tool-output { margin: 0; font: inherit; }
+.tool-details { margin: 7px 0 2px 22px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--muted); cursor: default; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.tool-section + .tool-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
+.tool-section-title { margin-bottom: 8px; color: var(--text); font-family: var(--font-sans); font-size: 12px; font-weight: 750; letter-spacing: .08em; }
+.tool-block + .tool-block { margin-top: 10px; }
+.tool-block-title { margin-bottom: 4px; color: var(--tool-key); font-family: var(--font-sans); font-size: 12px; font-weight: 650; }
+.tool-field-grid { display: grid; grid-template-columns: minmax(100px, max-content) minmax(0, 1fr); gap: 4px 12px; }
+.tool-field { display: contents; }
+.tool-field-label { color: var(--dim); }
+.tool-field-value { min-width: 0; color: var(--muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-block pre, .tool-raw pre { max-height: min(46vh, 430px); margin: 0; overflow: auto; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2); padding: 9px 10px; color: var(--text); font: inherit; white-space: pre; tab-size: 2; overscroll-behavior: contain; }
+.tool-code pre, .tool-tree pre, .tool-terminal pre { user-select: text; }
+.tool-terminal pre { color: var(--text); background: var(--bg); }
+.tool-table-scroll { max-height: min(46vh, 430px); overflow: auto; border: 1px solid var(--border); border-radius: 7px; overscroll-behavior: contain; }
+.tool-table-block table { width: 100%; border-collapse: collapse; background: var(--panel-2); font: inherit; }
+.tool-table-block th, .tool-table-block td { padding: 6px 8px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-table-block th { position: sticky; top: 0; z-index: 1; background: var(--panel); color: var(--tool-key); font-family: var(--font-sans); font-size: 12px; }
+.tool-table-block tr:last-child td { border-bottom: 0; }
+.tool-list ul, .tool-list ol { margin: 0; padding-left: 21px; }
+.tool-list li + li { margin-top: 3px; }
+.tool-notice { border-left: 3px solid var(--border-bright); border-radius: 4px; background: var(--panel-2); padding: 7px 9px; white-space: pre-wrap; overflow-wrap: anywhere; }
+.tool-notice.success { border-left-color: var(--green); }
+.tool-notice.warning { border-left-color: var(--yellow); }
+.tool-notice.error { border-left-color: var(--red); color: var(--text); }
+.tool-notice.muted { color: var(--dim); }
+.tool-raw { margin-top: 12px; padding-top: 10px; border-top: 1px dashed var(--border); }
+.tool-raw > summary { width: fit-content; color: var(--dim); cursor: pointer; font-family: var(--font-sans); font-size: 12px; user-select: none; }
+.tool-raw-grid { display: grid; gap: 10px; margin-top: 8px; }
 .worker-activity { contain: layout paint style; margin: 0 0 20px; }
 .worker-activity-header { display: flex; align-items: center; gap: 9px; min-height: 31px; font-weight: 750; }
 .worker-activity-marker, .worker-tool-marker { flex: 0 0 15px; width: 15px; font-size: 18px; line-height: 1; }

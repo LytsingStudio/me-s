@@ -4,11 +4,17 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
+function loadToolPresenters() {
+  const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
+  new Function(source)();
+  return globalThis.MeToolPresenters;
+}
+
 function loadRuntime(relative) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
-  const factory = new Function("document", "performance", "matchMedia", "MeTranscript", `${source.slice(0, eventBindings)}
+  const factory = new Function("document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
@@ -40,6 +46,7 @@ function loadRuntime(relative) {
     { now: () => 0 },
     () => ({ matches: false, addEventListener() {} }),
     { reconcileHtmlChildren(container, html) { container.innerHTML = html; } },
+    loadToolPresenters(),
   );
   runtime.state.snapshot.tool_visibility = {
     hidden_names: ["SetTitle"], hidden_prefixes: ["WorkMap.", "Worker."], activity_names: ["Worker.Wait"],

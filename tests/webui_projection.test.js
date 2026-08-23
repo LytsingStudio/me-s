@@ -4,11 +4,17 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
+function loadToolPresenters() {
+  const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
+  new Function(source)();
+  return globalThis.MeToolPresenters;
+}
+
 function loadProjectionRuntime() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI projection runtime");
-  const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
+  const factory = new Function("document", "performance", "matchMedia", "MeToolPresenters", `${source.slice(0, eventBindings)}
     return {
       state,
       emptyProjection,
@@ -35,6 +41,7 @@ function loadProjectionRuntime() {
     { querySelector: () => null },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
+    loadToolPresenters(),
   );
   runtime.state.snapshot.tool_visibility = {
     hidden_names: ["SetTitle"],
@@ -80,19 +87,21 @@ describe("WebUI incremental event projections", () => {
       args: { path: ".", query: "needle" },
       started: 1_000,
       queued: false,
-      output: "a long result\nwith another line",
-      result: { state: "Succeeded", detail: "{}", finished: 2_000 },
+      output: "",
+      updates: [],
+      result: { state: "Succeeded", detail: JSON.stringify({ path: ".", matches: [], skipped_binary: 0, returned: 0, truncated: false }), finished: 2_000 }
     };
 
-    expect(runtime.toolBrief(tool)).toBe(". needle");
+    expect(runtime.toolBrief(tool)).toBe("“needle” · .");
     const collapsed = runtime.renderToolCard(tool);
-    expect(collapsed).toContain('class="tool-brief">. needle</span>');
+    expect(collapsed).toContain('class="tool-name" title="File.Search">搜索文本</span>');
+    expect(collapsed).toContain('class="tool-brief">“needle” · .</span>');
     expect(collapsed).not.toContain('class="tool-details"');
 
     runtime.state.expandedTools.add("main:7");
     const expanded = runtime.renderToolCard(tool);
     expect(expanded).toContain('class="tool-details"');
-    expect(expanded).toContain("a long result\nwith another line");
+    expect(expanded).toContain("没有找到匹配内容");
 
     const terminal = {
       id: 8,
@@ -105,9 +114,10 @@ describe("WebUI incremental event projections", () => {
       started: 1_000,
       queued: false,
       output: "",
+      updates: [],
       result: null,
     };
-    expect(runtime.toolBrief(terminal)).toBe("pty-8 pwd↵");
+    expect(runtime.toolBrief(terminal)).toBe("pty-8 · pwd Enter");
 
     const compact = runtime.renderMessageHtml({ kind: "tool", tool }, false, true);
     const separated = runtime.renderMessageHtml({ kind: "tool", tool }, false, false);
