@@ -50,10 +50,13 @@ function loadRuntime(relative) {
       objectiveDisclosureAttributes: typeof objectiveDisclosureAttributes === "function" ? objectiveDisclosureAttributes : null,
       objectiveEventActivates: typeof objectiveEventActivates === "function" ? objectiveEventActivates : null,
       bindSidebarScrollbar: typeof bindSidebarScrollbar === "function" ? bindSidebarScrollbar : null,
+      portScopedCookieName: typeof portScopedCookieName === "function" ? portScopedCookieName : null,
+      SEND_SHORTCUT_COOKIE: typeof SEND_SHORTCUT_COOKIE === "string" ? SEND_SHORTCUT_COOKIE : null,
+      readSendShortcutCookie: typeof readSendShortcutCookie === "function" ? readSendShortcutCookie : null,
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
-    { querySelector: () => null, cookie: "" },
+    { querySelector: () => null, cookie: "", location: { protocol: "http:", port: "38199" } },
     { now: () => 0 },
     () => ({ matches: false, addEventListener() {} }),
     { reconcileHtmlChildren(container, html) { container.innerHTML = html; } },
@@ -99,6 +102,21 @@ const fixture = [
 ];
 
 describe("ME Gateway WebUI semantic compatibility", () => {
+  test("scopes send shortcut cookies to each WebUI page port", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      expect(runtime.SEND_SHORTCUT_COOKIE).toBe("me_send_shortcut_p38199");
+      expect(runtime.portScopedCookieName("me_send_shortcut", { protocol: "http:", port: "38201" }))
+        .toBe("me_send_shortcut_p38201");
+      expect(runtime.portScopedCookieName("me_send_shortcut", { protocol: "https:", port: "" }))
+        .toBe("me_send_shortcut_p443");
+      expect(runtime.readSendShortcutCookie("me_send_shortcut_p38201=enter"))
+        .toBe("modified-enter");
+      const source = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(source).toContain("Max-Age=31536000; Path=/; SameSite=Lax");
+    }
+  });
+
   test("projects the same EDB fixture as the me-s WebUI", () => {
     const single = loadRuntime("../src/webui/app.js");
     const gateway = loadRuntime("../src/gateway_webui/app.js");

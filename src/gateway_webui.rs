@@ -17,7 +17,7 @@ use crate::{
     Result,
     gateway::{Gateway, OpenWorkspaceOutcome},
     gateway_settings::GatewaySettings,
-    web_auth::WebSessionAuth,
+    web_auth::{WebSessionAuth, port_scoped_cookie_name},
 };
 
 pub const DEFAULT_GATEWAY_PORT: u16 = 38200;
@@ -35,7 +35,7 @@ const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
 const KATEX_CSS: &str = include_str!("webui/vendor/katex.min.css");
-const SESSION_COOKIE: &str = "me_gateway_session";
+const SESSION_COOKIE_PREFIX: &str = "me_gateway_session";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
 
@@ -92,7 +92,10 @@ fn start_from(
 ) -> Result<GatewayWebUiServer> {
     let (server, port) = bind_first_available(first_port)?;
     let address = format!("http://{GATEWAY_BIND_ADDRESS}:{port}");
-    let auth = Arc::new(WebSessionAuth::new(passkey)?);
+    let auth = Arc::new(WebSessionAuth::new(
+        port_scoped_cookie_name(SESSION_COOKIE_PREFIX, port),
+        passkey,
+    )?);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let worker = thread::Builder::new()
@@ -236,7 +239,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         (&Method::Post, "/api/auth/login") => return login(request, auth),
         _ => {}
     }
-    if !auth.authorized(request_cookie(request, SESSION_COOKIE)) {
+    if !auth.authorized(request_cookie(request, auth.cookie_name())) {
         return Ok(json_response(
             StatusCode(401),
             &json!({"ok": false, "error": "需要登录"}),
@@ -452,7 +455,7 @@ fn auth_status(request: &Request, auth: &WebSessionAuth) -> Result<HttpResponse>
         &json!({
             "ok": true,
             "required": auth.required(),
-            "authenticated": auth.authorized(request_cookie(request, SESSION_COOKIE)),
+            "authenticated": auth.authorized(request_cookie(request, auth.cookie_name())),
         }),
     ))
 }
@@ -473,7 +476,7 @@ fn login(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpResponse> {
     };
     Ok(
         json_response(StatusCode(200), &json!({"ok": true, "authenticated": true}))
-            .with_header(session_cookie(&token)),
+            .with_header(session_cookie(auth.cookie_name(), &token)),
     )
 }
 
@@ -530,10 +533,10 @@ fn request_cookie<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
         })
 }
 
-fn session_cookie(token: &str) -> Header {
+fn session_cookie(name: &str, token: &str) -> Header {
     Header::from_bytes(
         "Set-Cookie",
-        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"),
+        format!("{name}={token}; Path=/; HttpOnly; SameSite=Strict"),
     )
     .expect("gateway session cookie is valid")
 }

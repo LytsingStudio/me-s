@@ -188,6 +188,43 @@ fn stop_gateway(child: &mut Child) {
 }
 
 #[test]
+fn same_host_gateways_keep_port_scoped_sessions_simultaneously() {
+    let (_first_temporary, first_root, first_config_home) = prepare(true);
+    let (_second_temporary, second_root, second_config_home) = prepare(true);
+    let (mut first_gateway, first_address) = spawn_gateway(&first_root, &first_config_home);
+    let (mut second_gateway, second_address) = spawn_gateway(&second_root, &second_config_home);
+    assert_ne!(first_address, second_address);
+
+    let first_cookie = login(&first_address);
+    let second_cookie = login(&second_address);
+    let first_port = first_address.rsplit(':').next().unwrap();
+    let second_port = second_address.rsplit(':').next().unwrap();
+    assert!(first_cookie.starts_with(&format!("me_gateway_session_p{first_port}=")));
+    assert!(second_cookie.starts_with(&format!("me_gateway_session_p{second_port}=")));
+    assert_ne!(
+        first_cookie.split_once('=').unwrap().0,
+        second_cookie.split_once('=').unwrap().0
+    );
+
+    let browser_cookies = format!("{first_cookie}; {second_cookie}");
+    for address in [&first_address, &second_address] {
+        let status: serde_json::Value = client()
+            .get(format!("{address}/api/auth/status"))
+            .header(reqwest::header::COOKIE, &browser_cookies)
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(status["authenticated"], true);
+    }
+
+    stop_gateway(&mut first_gateway);
+    stop_gateway(&mut second_gateway);
+}
+
+#[test]
 fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     let (_temporary, root, config_home) = prepare(true);
     let (mut gateway, address) = spawn_gateway(&root, &config_home);

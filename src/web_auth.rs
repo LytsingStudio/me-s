@@ -4,13 +4,18 @@ use argon2::{Argon2, PasswordHash, PasswordHasher, PasswordVerifier, password_ha
 
 use crate::Result;
 
+pub(crate) fn port_scoped_cookie_name(prefix: &str, port: u16) -> String {
+    format!("{prefix}_p{port}")
+}
+
 pub struct WebSessionAuth {
+    cookie_name: String,
     password_hash: Option<String>,
     sessions: Mutex<HashSet<String>>,
 }
 
 impl WebSessionAuth {
-    pub fn new(passkey: Option<&str>) -> Result<Self> {
+    pub fn new(cookie_name: impl Into<String>, passkey: Option<&str>) -> Result<Self> {
         let password_hash = passkey
             .map(|passkey| -> Result<String> {
                 let mut salt = [0_u8; 16];
@@ -25,9 +30,14 @@ impl WebSessionAuth {
             })
             .transpose()?;
         Ok(Self {
+            cookie_name: cookie_name.into(),
             password_hash,
             sessions: Mutex::new(HashSet::new()),
         })
+    }
+
+    pub fn cookie_name(&self) -> &str {
+        &self.cookie_name
     }
 
     pub fn required(&self) -> bool {
@@ -76,7 +86,7 @@ mod tests {
 
     #[test]
     fn passkey_sessions_are_process_local_and_secret_free() {
-        let auth = WebSessionAuth::new(Some("correct horse")).unwrap();
+        let auth = WebSessionAuth::new("test_session_p38199", Some("correct horse")).unwrap();
         assert!(auth.required());
         assert!(!auth.authorized(None));
         assert!(auth.login("wrong").unwrap().is_none());
@@ -84,7 +94,7 @@ mod tests {
         assert!(!token.contains("correct horse"));
         assert!(auth.authorized(Some(&token)));
         assert!(
-            !WebSessionAuth::new(Some("correct horse"))
+            !WebSessionAuth::new("test_session_p38201", Some("correct horse"))
                 .unwrap()
                 .authorized(Some(&token))
         );
@@ -92,8 +102,21 @@ mod tests {
 
     #[test]
     fn missing_passkey_keeps_the_service_open() {
-        let auth = WebSessionAuth::new(None).unwrap();
+        let auth = WebSessionAuth::new("test_session_p38199", None).unwrap();
         assert!(!auth.required());
         assert!(auth.authorized(None));
+    }
+
+    #[test]
+    fn cookie_names_are_scoped_to_service_and_actual_port() {
+        let direct = port_scoped_cookie_name("me_webui_session", 38199);
+        let gateway = port_scoped_cookie_name("me_gateway_session", 38199);
+        assert_eq!(direct, "me_webui_session_p38199");
+        assert_eq!(gateway, "me_gateway_session_p38199");
+        assert_ne!(direct, port_scoped_cookie_name("me_webui_session", 38201));
+        assert_ne!(direct, gateway);
+        assert!(direct.chars().all(|character| {
+            character.is_ascii_alphanumeric() || matches!(character, '_' | '-')
+        }));
     }
 }

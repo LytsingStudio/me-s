@@ -29,7 +29,7 @@ use crate::{
         CHAT_ACTIVITY_TOOL_NAMES, CHAT_HIDDEN_TOOL_NAMES, CHAT_HIDDEN_TOOL_PREFIXES, UiBackend,
         UiCommand, UiCommandGateway, UiCommandReceipt, UiModelOption, UiSnapshot,
     },
-    web_auth::WebSessionAuth,
+    web_auth::{WebSessionAuth, port_scoped_cookie_name},
     workspace::AgentId,
 };
 
@@ -166,7 +166,7 @@ const MAX_EVENT_BATCH_BYTES: usize = 1024 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
 const MAX_SESSION_TERMINAL_BODY_BYTES: usize = 128 * 1024;
 const MAX_HOST_FILE_BODY_BYTES: usize = 1024 * 1024;
-const SESSION_COOKIE: &str = "me_webui_session";
+const SESSION_COOKIE_PREFIX: &str = "me_webui_session";
 
 pub struct WebUiServer {
     address: String,
@@ -275,7 +275,10 @@ fn start_with_server(
     )?);
     session_terminals.reconcile(initial.agent_ids())?;
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
-    let auth = Arc::new(WebSessionAuth::new(passkey)?);
+    let auth = Arc::new(WebSessionAuth::new(
+        port_scoped_cookie_name(SESSION_COOKIE_PREFIX, port),
+        passkey,
+    )?);
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
@@ -767,7 +770,7 @@ fn route(
         (&Method::Post, "/api/auth/login") => return login_response(request, auth),
         _ => {}
     }
-    if !auth.authorized(request_cookie(request, SESSION_COOKIE)) {
+    if !auth.authorized(request_cookie(request, auth.cookie_name())) {
         return Ok(unauthorized_response());
     }
     operational_route(
@@ -1819,7 +1822,7 @@ fn auth_status_response(request: &Request, auth: &WebSessionAuth) -> Result<Http
         &json!({
             "ok": true,
             "required": auth.required(),
-            "authenticated": auth.authorized(request_cookie(request, SESSION_COOKIE)),
+            "authenticated": auth.authorized(request_cookie(request, auth.cookie_name())),
         }),
     ))
 }
@@ -1877,7 +1880,7 @@ fn login_response(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpRe
     };
     Ok(
         json_response(StatusCode(200), &json!({"ok": true, "authenticated": true}))
-            .with_header(session_cookie(&token)),
+            .with_header(session_cookie(auth.cookie_name(), &token)),
     )
 }
 
@@ -1893,10 +1896,10 @@ fn request_cookie<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
         })
 }
 
-fn session_cookie(token: &str) -> Header {
+fn session_cookie(name: &str, token: &str) -> Header {
     Header::from_bytes(
         "Set-Cookie",
-        format!("{SESSION_COOKIE}={token}; Path=/; HttpOnly; SameSite=Strict"),
+        format!("{name}={token}; Path=/; HttpOnly; SameSite=Strict"),
     )
     .expect("session cookie is generated from ASCII bytes")
 }
@@ -2704,7 +2707,12 @@ mod tests {
     #[test]
     fn embedded_webui_offers_a_cookie_backed_send_shortcut_preference() {
         assert!(INDEX_HTML.contains("Enter 换行 · Shift/Alt+Enter 发送"));
-        assert!(APP_JS.contains("const SEND_SHORTCUT_COOKIE = \"me_send_shortcut\""));
+        assert!(
+            APP_JS.contains(
+                "const SEND_SHORTCUT_COOKIE = portScopedCookieName(\"me_send_shortcut\")"
+            )
+        );
+        assert!(APP_JS.contains("protocol === \"https:\" ? \"443\" : \"80\""));
         assert!(APP_JS.contains("Max-Age=31536000; Path=/; SameSite=Lax"));
         assert!(APP_JS.contains("openChoiceDrawer(\"发送设置\""));
         assert!(
@@ -3719,6 +3727,80 @@ mod tests {
 
         drop(server);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn same_host_direct_webuis_keep_port_scoped_sessions_simultaneously() {
+        let start_instance = || {
+            let directory = workspace();
+            let workspace = Workspace::open(
+                &directory,
+                WorkspaceConfig {
+                    version: 2,
+                    model: "test".into(),
+                    effort: "unset".into(),
+                    orchestrator: "chatbot".into(),
+                },
+                vec![model()],
+            )
+            .unwrap();
+            let (backend, commands) = workspace_ui_ports(workspace);
+            let server = start_from(backend, commands, 0, Some("correct horse")).unwrap();
+            let address = server
+                .address()
+                .replace("http://0.0.0.0:", "http://127.0.0.1:");
+            (directory, server, address)
+        };
+        let (first_directory, first_server, first_address) = start_instance();
+        let (second_directory, second_server, second_address) = start_instance();
+        assert_ne!(first_server.port(), second_server.port());
+
+        let client = reqwest::blocking::Client::new();
+        let login = |address: &str| {
+            client
+                .post(format!("{address}/api/auth/login"))
+                .json(&json!({"password": "correct horse"}))
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .headers()
+                .get(reqwest::header::SET_COOKIE)
+                .unwrap()
+                .to_str()
+                .unwrap()
+                .split(';')
+                .next()
+                .unwrap()
+                .to_owned()
+        };
+        let first_cookie = login(&first_address);
+        let second_cookie = login(&second_address);
+        assert!(first_cookie.starts_with(&format!("me_webui_session_p{}=", first_server.port())));
+        assert!(second_cookie.starts_with(&format!("me_webui_session_p{}=", second_server.port())));
+        assert_ne!(
+            first_cookie.split_once('=').unwrap().0,
+            second_cookie.split_once('=').unwrap().0
+        );
+
+        let browser_cookies = format!("{first_cookie}; {second_cookie}");
+        for address in [&first_address, &second_address] {
+            let status: serde_json::Value = client
+                .get(format!("{address}/api/auth/status"))
+                .header(reqwest::header::COOKIE, &browser_cookies)
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap();
+            assert_eq!(status["authenticated"], true);
+        }
+
+        drop(first_server);
+        drop(second_server);
+        fs::remove_dir_all(first_directory).unwrap();
+        fs::remove_dir_all(second_directory).unwrap();
     }
 
     #[test]

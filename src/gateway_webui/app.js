@@ -14,7 +14,13 @@ const CONNECTION_STABILIZE_SUCCESSES = 2;
 const INPUT_ANIMATION_QUIET_MS = 250;
 const UI_ANIMATION_INTERVAL_MS = 100;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
-const SEND_SHORTCUT_COOKIE = "me_send_shortcut";
+function portScopedCookieName(prefix, locationValue = document.location) {
+  const explicitPort = String(locationValue?.port || "");
+  const protocol = String(locationValue?.protocol || "").toLowerCase();
+  const port = explicitPort || (protocol === "https:" ? "443" : "80");
+  return `${prefix}_p${port}`;
+}
+const SEND_SHORTCUT_COOKIE = portScopedCookieName("me_send_shortcut");
 const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
 const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";
@@ -966,6 +972,11 @@ async function initializeGateway() {
 }
 
 function showLogin(message = "") {
+  const alreadyVisible = !state.authenticated
+    && !elements.loginScreen.classList.contains("hidden");
+  elements.loginError.textContent = message;
+  if (alreadyVisible) return;
+
   deactivateSessionTerminalView();
   stopHttpPolling();
   cancelBackgroundWorkspaceSync();
@@ -976,7 +987,6 @@ function showLogin(message = "") {
   hideConnectionOverlay();
   elements.app.classList.add("hidden");
   elements.loginScreen.classList.remove("hidden");
-  elements.loginError.textContent = message;
   elements.loginPassword.focus();
 }
 
