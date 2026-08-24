@@ -2043,7 +2043,7 @@ function consumeChatEvents(projection, events) {
           const started = projection._turnStartedAt.get(value.prompt_id);
           if (assistant && started != null
               && projection.messages[projection.messages.length - 1] === assistant
-              && assistant.content.trim()) {
+              && assistantContentHasRenderableContent(assistant.content)) {
             appendProjectedMessage(projection, changes, {
               key: `turn-toolbar:${value.turn_id}`, revision: value.id, kind: "turn-toolbar",
               timestamp: value.timestamp_ms,
@@ -2911,8 +2911,14 @@ function previousVisibleRenderedKind(index) {
   return null;
 }
 
+const ASSISTANT_ONLY_NON_RENDERING_CHARACTERS = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cc}]*$/u;
+
+function assistantContentHasRenderableContent(content) {
+  return !ASSISTANT_ONLY_NON_RENDERING_CHARACTERS.test(String(content || ""));
+}
+
 function messageIsVisible(message) {
-  if (message.kind === "assistant") return Boolean(message.content.trim());
+  if (message.kind === "assistant") return assistantContentHasRenderableContent(message.content);
   if (message.kind === "worker-activity") return workerWaitIsVisible(message.tool);
   return true;
 }

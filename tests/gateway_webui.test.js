@@ -5,6 +5,7 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 require("../src/webui/edb-cache.js");
+globalThis.MeMarkdown = require("../src/webui/markdown.js");
 
 function loadToolPresenters() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
@@ -43,6 +44,9 @@ function loadRuntime(relative) {
       formatDirectoryModified: typeof formatDirectoryModified === "function" ? formatDirectoryModified : null,
       filterDirectoryEntries: typeof filterDirectoryEntries === "function" ? filterDirectoryEntries : null,
       sortDirectoryEntries: typeof sortDirectoryEntries === "function" ? sortDirectoryEntries : null,
+      assistantContentHasRenderableContent: typeof assistantContentHasRenderableContent === "function" ? assistantContentHasRenderableContent : null,
+      messageIsVisible: typeof messageIsVisible === "function" ? messageIsVisible : null,
+      renderMessageHtml: typeof renderMessageHtml === "function" ? renderMessageHtml : null,
       renderTranscript: typeof renderTranscript === "function" ? renderTranscript : null,
       emptyObjectiveDisclosure: typeof emptyObjectiveDisclosure === "function" ? emptyObjectiveDisclosure : null,
       syncObjectiveDisclosure: typeof syncObjectiveDisclosure === "function" ? syncObjectiveDisclosure : null,
@@ -126,6 +130,82 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const singleWorkMap = single.projectWorkMap(fixture);
     expect({ ...gatewayWorkMap, _records: undefined })
       .toEqual({ ...singleWorkMap, _records: undefined });
+  });
+
+  test("hides non-rendering Assistant-only content in both WebUIs without changing real content", () => {
+    const invisibleContents = [
+      "",
+      " \t\r\n",
+      "\u0000\u0008\u001f\u007f",
+      "\u200b",
+      "\u200b\u200b\u200b",
+      "\u034f\u200c\u200d\u200e\u202a\u2060\u2066\u2069\ufeff",
+      "\ufe0f\u{e0100}",
+    ];
+    const preservedContents = [
+      "\u200b正文",
+      "👩‍💻",
+      "❤️",
+      "می‌خواهم",
+    ];
+    const visualMarkdown = [
+      ["---", "<hr>"],
+      ["![](https://example.com/image.png)", "<img"],
+      ["$$x^2$$", 'class="math-display"'],
+    ];
+
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      for (const content of invisibleContents) {
+        const message = { kind: "assistant", content };
+        expect(runtime.assistantContentHasRenderableContent(content)).toBe(false);
+        expect(runtime.messageIsVisible(message)).toBe(false);
+        const html = runtime.renderMessageHtml(message, false, false);
+        expect(html).toContain('class="message-block projection-hidden hidden"');
+        expect(html).not.toContain("block-marker");
+      }
+
+      const css = readFileSync(join(import.meta.dir, relative.replace("app.js", "style.css")), "utf8");
+      expect(css).toContain(".hidden { display: none !important; }");
+
+      for (const content of preservedContents) {
+        const message = { kind: "assistant", content };
+        expect(runtime.assistantContentHasRenderableContent(content)).toBe(true);
+        expect(runtime.messageIsVisible(message)).toBe(true);
+        expect(runtime.renderMessageHtml(message, false, false)).toContain(content);
+        expect(message.content).toBe(content);
+      }
+
+      for (const [content, expectedHtml] of visualMarkdown) {
+        const message = { kind: "assistant", content };
+        expect(runtime.messageIsVisible(message)).toBe(true);
+        expect(runtime.renderMessageHtml(message, false, false)).toContain(expectedHtml);
+      }
+
+      const historicalFinal = runtime.projectChat([
+        event("UserPrompt", 1, { content: "old prompt" }),
+        event("AssistResponse", 2, { prompt_id: 1, content: "\u200b", finished: true }),
+        event("AgentTurn", 3, { turn_id: 1, prompt_id: 1, state: "Completed" }),
+      ]);
+      expect(historicalFinal.messages.map((message) => message.kind)).toEqual(["user", "assistant"]);
+      expect(historicalFinal.messages[1].content).toBe("\u200b");
+      expect(runtime.renderMessageHtml(historicalFinal.messages[1], false, false)).not.toContain("block-marker");
+
+      const toolLoopReplay = runtime.projectChat([
+        event("UserPrompt", 1, { content: "old tool loop" }),
+        event("AssistResponse", 2, { prompt_id: 1, content: "\u200b", finished: true }),
+        event("ToolCall", 3, { id: 3, api_call_id: "api-1", prompt_id: 1, name: "Terminal.Create", arguments: "{}" }),
+        event("ToolCallResult", 4, { tool_call_id: 3, state: "Succeeded", detail: "{}" }),
+        event("AssistResponse", 5, { prompt_id: 1, content: "\u200b正文", finished: true }),
+        event("AgentTurn", 6, { turn_id: 1, prompt_id: 1, state: "Completed" }),
+      ]);
+      expect(toolLoopReplay.messages.map((message) => message.kind))
+        .toEqual(["user", "assistant", "tool", "assistant", "turn-toolbar"]);
+      expect(toolLoopReplay.messages.filter(runtime.messageIsVisible).map((message) => message.kind))
+        .toEqual(["user", "tool", "assistant", "turn-toolbar"]);
+      expect(toolLoopReplay.messages[1].content).toBe("\u200b");
+      expect(toolLoopReplay.messages[3].content).toBe("\u200b正文");
+    }
   });
 
   test("keeps sidebar activity open across API loops until the Agent turn closes", () => {
