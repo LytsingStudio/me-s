@@ -1469,7 +1469,7 @@ impl TerminalManager {
             shell: self.shell.clone(),
             width: request.width,
             height: request.height,
-            cwd: cwd.to_string_lossy().into_owned(),
+            cwd: crate::host_path::public_host_path(&cwd),
         };
         self.observer
             .insert(tool_call_id, created.clone(), Arc::clone(&output))?;

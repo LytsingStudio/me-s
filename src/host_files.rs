@@ -1834,7 +1834,7 @@ fn download_snapshot_locked(record: &DownloadRecord) -> DownloadSnapshot {
 }
 
 fn path_string(path: impl AsRef<Path>) -> String {
-    path.as_ref().display().to_string()
+    crate::host_path::public_host_path(path)
 }
 
 fn now_ms() -> u64 {

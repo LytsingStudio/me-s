@@ -38,7 +38,6 @@ function loadRuntime(relative) {
       modelSettingsHtml: typeof modelSettingsHtml === "function" ? modelSettingsHtml : null,
       persistGatewaySelection: typeof persistGatewaySelection === "function" ? persistGatewaySelection : null,
       directoryParentRequest: typeof directoryParentRequest === "function" ? directoryParentRequest : null,
-      displayHostPath: typeof displayHostPath === "function" ? displayHostPath : null,
       directoryEntryType: typeof directoryEntryType === "function" ? directoryEntryType : null,
       formatDirectorySize: typeof formatDirectorySize === "function" ? formatDirectorySize : null,
       formatDirectoryModified: typeof formatDirectoryModified === "function" ? formatDirectoryModified : null,
@@ -647,9 +646,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       .toEqual({ path: null, roots: true });
     expect(gateway.directoryParentRequest({ parent: null, parent_is_root_selector: false }))
       .toBeNull();
-    expect(gateway.displayHostPath("\\\\?\\C:\\Users")).toBe("C:\\Users");
-    expect(gateway.displayHostPath("\\\\?\\UNC\\server\\share")).toBe("\\\\server\\share");
     const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(source).not.toContain("displayHostPath");
+    expect(source).toContain('String(listing.path || "")');
     expect(source).toContain('JSON.stringify({ path, roots })');
     expect(source).toContain('rootSelector ? "此电脑"');
   });

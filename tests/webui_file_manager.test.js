@@ -16,16 +16,8 @@ const directStyle = read("src/webui/style.css");
 const gatewayStyle = read("src/gateway_webui/style.css");
 const hostFiles = read("src/host_files.rs");
 const gateway = read("src/gateway.rs");
+const hostPath = read("src/host_path.rs");
 
-function extractedFunction(source, name, nextName) {
-  const start = source.indexOf(`  function ${name}(`);
-  const end = source.indexOf(`\n\n  function ${nextName}(`, start);
-  if (start < 0 || end < 0) throw new Error(`Unable to extract ${name}`);
-  const definition = source.slice(start, end).replace(/^  /gm, "");
-  return Function(`"use strict"; ${definition}; return ${name};`)();
-}
-
-const clipboardHostPath = extractedFunction(controller, "clipboardHostPath", "create");
 
 describe("per-session host file manager", () => {
   test("both WebUIs expose the fixed Files tab and load the shared controller before app.js", () => {
@@ -122,7 +114,7 @@ describe("per-session host file manager", () => {
     expect(controller).toContain('actionButton("copy-path", "复制绝对路径")');
     expect(controller).toContain('this.setDisabled("copy-path", selected === 0 || this.state.loading);');
     expect(controller).toContain('if (action === "copy-path") return this.copySelectedPaths();');
-    expect(controller).toContain("const paths = this.selectedPaths().map(clipboardHostPath);");
+    expect(controller).toContain("const paths = this.selectedPaths();");
     expect(controller).toContain('await this.writeClipboard(paths.join(";"));');
     expect(controller).toContain('paths.length === 1 ? "已复制绝对路径" : `已复制 ${paths.length} 个绝对路径`');
     for (const app of [directApp, gatewayApp]) {
@@ -140,12 +132,12 @@ describe("per-session host file manager", () => {
     expect(hostFiles).toContain("archive.follow_symlinks(false)");
   });
 
-  test("normalizes Windows verbatim paths only for the system clipboard", () => {
-    expect(clipboardHostPath("\\\\?\\C:\\Users\\xs\\file.txt")).toBe("C:\\Users\\xs\\file.txt");
-    expect(clipboardHostPath("\\\\?\\UNC\\server\\share\\folder")).toBe("\\\\server\\share\\folder");
-    expect(clipboardHostPath("C:\\Users\\xs\\file.txt")).toBe("C:\\Users\\xs\\file.txt");
-    expect(clipboardHostPath("/tmp/file.txt")).toBe("/tmp/file.txt");
-    expect(controller).toContain("const paths = this.selectedPaths().map(clipboardHostPath);");
+  test("uses server-normalized paths throughout file APIs and clipboard output", () => {
+    expect(controller).toContain("const paths = this.selectedPaths();");
+    expect(controller).not.toContain("clipboardHostPath");
+    expect(hostFiles).toContain("crate::host_path::public_host_path(path)");
+    expect(hostPath).toContain("windows_drive_and_unc_paths_use_public_forms");
+    expect(hostPath).toContain("special_windows_namespaces_remain_opaque");
     expect(controller).toContain('clipboard = { mode: action === "copy" ? "copy" : "move", sources: this.selectedPaths() }');
   });
 

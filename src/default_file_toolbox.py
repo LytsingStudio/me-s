@@ -1215,11 +1215,21 @@ def inspection_path(value: str) -> Path:
     return parent / candidate.name
 
 
+def public_absolute_path(path: Path) -> str:
+    value = path.as_posix()
+    if os.name == "nt":
+        if value.startswith("//?/UNC/"):
+            return f"//{value[8:]}"
+        if re.match(r"^//\?/[A-Za-z]:/", value):
+            return value[4:]
+    return value
+
+
 def relative_path(path: Path) -> str:
     try:
         relative = path.relative_to(ROOT)
     except ValueError:
-        return path.as_posix()
+        return public_absolute_path(path)
     return "." if not relative.parts else relative.as_posix()
 
 

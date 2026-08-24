@@ -4046,12 +4046,6 @@ function directoryParentRequest(listing) {
   return null;
 }
 
-function displayHostPath(path) {
-  const value = String(path || "");
-  if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
-  if (value.startsWith("\\\\?\\")) return value.slice(4);
-  return value;
-}
 
 function directoryEntryIcon(entry) {
   if (entry.kind === "drive") return `<svg class="directory-file-icon drive" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M3.5 14h17"/><circle cx="17" cy="16.5" r=".8"/></svg>`;
@@ -4116,7 +4110,7 @@ async function openDirectoryBrowser(mode) {
 function openWorkspaceInitializationConfirm(directoryModal, path) {
   openModal({
     title: "创建工作区？",
-    description: `所选目录“${displayHostPath(path)}”尚不是 ME 工作区。是否在此创建并打开？`,
+    description: `所选目录“${path}”尚不是 ME 工作区。是否在此创建并打开？`,
     choices: [], selected: null, confirmLabel: "创建并打开",
     onCancel: () => openModal(directoryModal),
     onConfirm: async () => {
@@ -4170,7 +4164,7 @@ function renderDirectoryBrowser() {
   const listing = directory.listing;
   const rootSelector = listing.root_selector === true;
   const parentRequest = directoryParentRequest(listing);
-  const currentLocation = rootSelector ? "此电脑" : displayHostPath(listing.path);
+  const currentLocation = rootSelector ? "此电脑" : String(listing.path || "");
   const locationIcon = directoryEntryIcon({ kind: rootSelector ? "drive" : "directory" });
   elements.modalContent.innerHTML = `<div class="directory-browser${rootSelector ? " root-selector" : ""}">
     <div class="directory-toolbar">

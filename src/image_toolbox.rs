@@ -281,10 +281,14 @@ fn normalized_source(source: &str, workspace: &Path) -> String {
     if source.starts_with("data:") {
         return "data:image".into();
     }
-    if source.contains("://") || Path::new(source).is_absolute() {
+    if source.contains("://") {
         return source.into();
     }
-    workspace.join(source).to_string_lossy().into_owned()
+    let path = Path::new(source);
+    if path.is_absolute() {
+        return crate::host_path::public_host_path(path);
+    }
+    crate::host_path::public_host_path(workspace.join(path))
 }
 
 fn format_name(format: ImageFormat) -> &'static str {

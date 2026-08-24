@@ -276,7 +276,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
             match gateway.create_directory(&PathBuf::from(input.parent), &input.name) {
                 Ok(path) => Ok(json_response(
                     StatusCode(200),
-                    &json!({"ok": true, "path": path.to_string_lossy()}),
+                    &json!({"ok": true, "path": crate::host_path::public_host_path(&path)}),
                 )),
                 Err(error) => {
                     eprintln!("warning: create host directory failed: {error}");

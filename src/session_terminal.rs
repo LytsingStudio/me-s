@@ -232,7 +232,7 @@ enum SessionTerminalSlot {
 
 impl SessionTerminalSlot {
     fn create(workspace: &Path, shell: std::result::Result<&ShellSpec, &String>) -> Self {
-        let cwd = workspace.to_string_lossy().into_owned();
+        let cwd = crate::host_path::public_host_path(workspace);
         let shell = match shell {
             Ok(shell) => shell,
             Err(error) => {
@@ -357,7 +357,7 @@ impl SessionTerminal {
         };
         Ok(Self {
             shell: shell.display.clone(),
-            cwd: workspace.to_string_lossy().into_owned(),
+            cwd: crate::host_path::public_host_path(workspace),
             writer,
             child,
             output,

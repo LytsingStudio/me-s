@@ -435,12 +435,9 @@ fn capture_process_environment() -> ProcessEnvironmentSnapshot {
 
 fn build_runtime_environment_prompt(workspace: &Path, agent_id: &str) -> String {
     let environment = process_environment();
-    let temporary_workspace = workspace
-        .join(WORKSPACE_TEMP_DIRECTORY)
-        .join(agent_id)
-        .display()
-        .to_string();
-    let workspace = workspace.display().to_string();
+    let temporary_workspace =
+        crate::host_path::public_host_path(workspace.join(WORKSPACE_TEMP_DIRECTORY).join(agent_id));
+    let workspace = crate::host_path::public_host_path(workspace);
 
     format!(
         "# Runtime environment\n\n\

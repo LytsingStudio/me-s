@@ -2158,12 +2158,14 @@ pub fn run(
                                 }
                                 SlashCommand::AgentDelete => {
                                     if let Some(id) = current_agent.clone() {
-                                        let path = snapshot
-                                            .agent(&id)
-                                            .ok_or_else(|| format!("Agent {id} does not exist"))?
-                                            .edb_path
-                                            .display()
-                                            .to_string();
+                                        let path = crate::host_path::public_host_path(
+                                            &snapshot
+                                                .agent(&id)
+                                                .ok_or_else(|| {
+                                                    format!("Agent {id} does not exist")
+                                                })?
+                                                .edb_path,
+                                        );
                                         let blocker = backend.deletion_blocker(&id)?;
                                         ui.overlay = Some(OverlayState::AgentDelete {
                                             id,

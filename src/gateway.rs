@@ -203,7 +203,7 @@ impl Gateway {
         let mut workspaces = vec![GatewayWorkspace {
             id: BUILTIN_WORKSPACE_ID.to_owned(),
             name: "聊天".into(),
-            path: self.root.to_string_lossy().into_owned(),
+            path: crate::host_path::public_host_path(&self.root),
             builtin: true,
         }];
         workspaces.extend(
@@ -213,7 +213,7 @@ impl Gateway {
                 .map(|record| GatewayWorkspace {
                     id: record.id.clone(),
                     name: workspace_name(&record.path),
-                    path: record.path.to_string_lossy().into_owned(),
+                    path: crate::host_path::public_host_path(&record.path),
                     builtin: false,
                 }),
         );
@@ -227,7 +227,7 @@ impl Gateway {
         Ok(GatewaySnapshot {
             ok: true,
             version: env!("CARGO_PKG_VERSION"),
-            gateway_root: self.root.to_string_lossy().into_owned(),
+            gateway_root: crate::host_path::public_host_path(&self.root),
             workspaces,
             selected_workspace_id: state.selected_workspace_id,
             selected_agent_id: state.selected_agent_id,
@@ -261,7 +261,7 @@ impl Gateway {
             WorkspaceBootstrap::Ready(_) => {}
             WorkspaceBootstrap::Missing if !initialize => {
                 return Ok(OpenWorkspaceOutcome::RequiresInitialization {
-                    path: path.to_string_lossy().into_owned(),
+                    path: crate::host_path::public_host_path(&path),
                 });
             }
             WorkspaceBootstrap::Missing => {
@@ -516,7 +516,7 @@ impl Gateway {
                 };
                 Some(DirectoryEntry {
                     name: entry.file_name().to_string_lossy().into_owned(),
-                    path: entry.path().to_string_lossy().into_owned(),
+                    path: crate::host_path::public_host_path(entry.path()),
                     kind,
                     modified_at_ms: metadata.as_ref().and_then(modified_at_ms),
                     size_bytes: if kind == "file" {
@@ -528,12 +528,10 @@ impl Gateway {
             })
             .collect::<Vec<_>>();
         entries.sort_by_key(|entry| (entry.kind == "file", entry.name.to_lowercase()));
-        let parent = path
-            .parent()
-            .map(|parent| parent.to_string_lossy().into_owned());
+        let parent = path.parent().map(crate::host_path::public_host_path);
         Ok(DirectoryListing {
             ok: true,
-            path: Some(path.to_string_lossy().into_owned()),
+            path: Some(crate::host_path::public_host_path(&path)),
             parent_is_root_selector: cfg!(windows) && parent.is_none(),
             parent,
             root_selector: false,
@@ -606,7 +604,7 @@ impl Drop for Gateway {
 fn canonical_directory(path: &Path) -> Result<PathBuf> {
     let path = fs::canonicalize(path)?;
     if !path.is_dir() {
-        return Err(format!("不是目录：{}", path.display()).into());
+        return Err(format!("不是目录：{}", crate::host_path::public_host_path(&path)).into());
     }
     fs::read_dir(&path)?;
     Ok(path)
@@ -664,7 +662,7 @@ fn workspace_name(path: &Path) -> String {
     path.file_name()
         .filter(|name| !name.is_empty())
         .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.to_string_lossy().into_owned())
+        .unwrap_or_else(|| crate::host_path::public_host_path(path))
 }
 
 fn validate_directory_name(name: &str) -> Result<()> {

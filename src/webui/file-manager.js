@@ -7,13 +7,6 @@
   const TOUCH_DOUBLE_TAP_MS = 450;
   const TOUCH_TAP_MOVE_PX = 12;
 
-  function clipboardHostPath(path) {
-    const value = String(path || "");
-    if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
-    if (value.startsWith("\\\\?\\")) return value.slice(4);
-    return value;
-  }
-
   function create(options) {
     return new FileManager(options);
   }
@@ -506,7 +499,7 @@
     }
 
     async copySelectedPaths() {
-      const paths = this.selectedPaths().map(clipboardHostPath);
+      const paths = this.selectedPaths();
       if (!paths.length) return;
       try {
         await this.writeClipboard(paths.join(";"));
@@ -515,7 +508,6 @@
         this.notify(error.message, "error");
       }
     }
-
 
     async mkdir() {
       const view = this.state;

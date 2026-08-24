@@ -1480,7 +1480,7 @@ fn snapshot_metadata(snapshot: UiSnapshot, include_event_hashes: bool) -> Snapsh
             kind: agent.kind.to_string(),
             parent_agent_id: agent.parent_agent_id.map(|id| id.to_string()),
             orchestrator: agent.orchestrator_name,
-            edb_path: agent.edb_path.display().to_string(),
+            edb_path: crate::host_path::public_host_path(&agent.edb_path),
             edb_size_bytes: agent.edb_size_bytes,
             event_count: agent.events.len(),
             last_event_id: agent.events.last().map(Event::id),
@@ -1498,7 +1498,7 @@ fn snapshot_metadata(snapshot: UiSnapshot, include_event_hashes: bool) -> Snapsh
         ok: true,
         revision,
         environment: EnvironmentMetadata {
-            workspace: environment.workspace.display().to_string(),
+            workspace: crate::host_path::public_host_path(&environment.workspace),
             system: format!("{}/{}", environment.os, environment.arch),
         },
         agents,
@@ -1722,7 +1722,7 @@ fn receipt_json(receipt: UiCommandReceipt) -> serde_json::Value {
         UiCommandReceipt::AgentCreated(draft) => json!({
             "kind": "agent_created",
             "agent_id": draft.id.to_string(),
-            "edb_path": draft.edb_path.display().to_string(),
+            "edb_path": crate::host_path::public_host_path(&draft.edb_path),
         }),
     }
 }
