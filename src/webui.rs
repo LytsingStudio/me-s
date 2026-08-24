@@ -2710,7 +2710,9 @@ mod tests {
         assert!(
             APP_JS.contains("elements.send.addEventListener(\"click\", submitOrOpenSendSettings)")
         );
-        assert!(APP_JS.contains("visible && enterSubmitsPrompt(event)"));
+        assert!(APP_JS.contains("if (enterSubmitsPrompt(event))"));
+        assert!(!APP_JS.contains("visible && enterSubmitsPrompt(event)"));
+        assert!(!APP_JS.contains("openSlashCommand"));
         assert!(APP_JS.contains("sendShortcutPressed(event, state.sendShortcut)"));
         assert!(APP_JS.contains("state.composing || event.isComposing || event.keyCode === 229"));
         assert!(!APP_JS.contains("enterSubmitsInCurrentLayout"));

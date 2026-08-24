@@ -239,10 +239,6 @@ button { color: inherit; }
 .stop-button { border: 1px solid var(--danger-border); background: var(--danger-bg); color: var(--on-accent); font-weight: 700; cursor: pointer; }
 .stop-button:hover:not(:disabled) { border-color: var(--danger-hover-border); background: var(--danger-hover-bg); }
 .stop-button:disabled { opacity: .35; cursor: default; }
-.slash-menu { position: absolute; left: 0; right: 0; bottom: calc(100% + 8px); max-height: 310px; overflow: auto; padding: 7px; border: 1px solid var(--border-bright); border-radius: 12px; background: var(--panel-2); box-shadow: var(--shadow); }
-.slash-item { display: grid; grid-template-columns: 120px 1fr; gap: 10px; width: 100%; padding: 9px 10px; border: 0; border-radius: 8px; background: transparent; color: var(--muted); text-align: left; cursor: pointer; }
-.slash-item.selected, .slash-item:hover { background: var(--panel-3); color: var(--text); }
-.slash-item strong { color: var(--text); }
 
 #workmap-view { flex-direction: column; overflow: hidden; }
 .view-toolbar { display: flex; justify-content: space-between; align-items: center; padding: 12px max(24px, calc((100% - 980px) / 2)); border-bottom: 1px solid var(--border); color: var(--muted); }
@@ -531,8 +527,6 @@ button { color: inherit; }
   #input-hint { display: none; }
   .composer-actions::before { content: ""; }
   .composer-actions .composer-button { min-width: 50px; min-height: 30px; }
-  .slash-menu { max-height: 38dvh; }
-  .slash-item { grid-template-columns: minmax(90px, auto) 1fr; min-height: 44px; }
 
   .view-toolbar { padding: 11px max(12px, env(safe-area-inset-right)) 11px max(12px, env(safe-area-inset-left)); }
   .view-toolbar span { display: block; margin: 3px 0 0; }

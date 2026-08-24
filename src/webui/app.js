@@ -17,15 +17,6 @@ const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
 const API_ACTIVE = new Set(["Requesting", "Streaming", "Retrying"]);
 const API_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-const COMMANDS = [
-  ["/agent-add", "新建会话"],
-  ["/agent-delete", "删除当前会话"],
-  ["/model", "切换当前模型"],
-  ["/effort", "选择推理强度"],
-  ["/clear", "清空当前上下文"],
-  ["/rewind", "撤回到较早的会话位置"],
-  ["/exit", "关闭当前页面"],
-];
 const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
 
 const edbCache = MeEdbCache.create();
@@ -68,7 +59,6 @@ const state = {
   lastInputAt: Number.NEGATIVE_INFINITY,
   composing: false,
   sendShortcut: readSendShortcutCookie(typeof document.cookie === "string" ? document.cookie : ""),
-  slashIndex: 0,
   userMenu: null,
   agentMenu: null,
   modal: null,
@@ -149,7 +139,6 @@ const elements = {
   sendSpinner: $("#send-prompt-spinner"),
   sendLabel: $("#send-prompt-label"),
   inputHint: $("#input-hint"),
-  slashMenu: $("#slash-menu"),
   userMessageMenu: $("#user-message-menu"),
   copyUserMessage: $("#copy-user-message"),
   rewindUserMessage: $("#rewind-user-message"),
@@ -1107,7 +1096,6 @@ function syncAgentEvents(meta, payload) {
     if (state.selectedAgent === meta.id && elements.input.value !== initialDraft) {
       elements.input.value = initialDraft;
       autoSizeInput(true);
-      renderSlashMenu();
     }
     changed = true;
   }
@@ -1195,9 +1183,7 @@ function adoptInputDraft(agentId, store, revision, content) {
   state.drafts.set(agentId, content);
   if (state.selectedAgent === agentId && elements.input.value !== content) {
     elements.input.value = content;
-    state.slashIndex = 0;
     autoSizeInput(true);
-    renderSlashMenu();
   }
   return true;
 }
@@ -2882,12 +2868,11 @@ function renderComposer() {
   elements.sendSpinner.classList.toggle("hidden", !sending);
   elements.sendLabel.textContent = pending?.status === "confirming" ? "正在确认" : sending ? "正在发送" : "发送";
   elements.stop.disabled = !canStop;
-  elements.input.placeholder = readOnly ? `${worker ? "Worker" : "子 Agent"} 对话只读 · ${childStateLabel(currentStore()?.events || [])}` : "发送消息，输入 / 查看命令";
+  elements.input.placeholder = readOnly ? `${worker ? "Worker" : "子 Agent"} 对话只读 · ${childStateLabel(currentStore()?.events || [])}` : "发送消息";
   elements.inputHint.textContent = sending
     ? "消息进入列表后即可继续输入"
     : worker ? "可调整模型、推理强度或停止当前任务"
       : readOnly ? "子 Agent 仅允许查看" : `${sendShortcutHint()} · Esc 中止/撤回/清空`;
-  renderSlashMenu();
 }
 
 function renderStatus() {
@@ -3179,53 +3164,6 @@ function colorCss(color) {
   return `rgb(${levels[Math.floor(n / 36)]},${levels[Math.floor(n / 6) % 6]},${levels[n % 6]})`;
 }
 
-function renderSlashMenu() {
-  if (currentStore()?.pendingPromptSubmission) {
-    elements.slashMenu.classList.add("hidden");
-    return;
-  }
-  if (!elements.input.value.startsWith("/")
-      && elements.slashMenu.classList.contains("hidden")) return;
-  const value = elements.input.value;
-  const matches = value.startsWith("/") && !value.includes(" ")
-    ? COMMANDS.filter(([name]) => name.startsWith(value)) : [];
-  if (!matches.length) { elements.slashMenu.classList.add("hidden"); return; }
-  state.slashIndex = Math.min(state.slashIndex, matches.length - 1);
-  elements.slashMenu.classList.remove("hidden");
-  elements.slashMenu.innerHTML = matches.map(([name, description], index) =>
-    `<button class="slash-item ${index === state.slashIndex ? "selected" : ""}" data-command="${name}"><strong>${name}</strong><span>${description}</span></button>`).join("");
-  elements.slashMenu.querySelectorAll("[data-command]").forEach((button) => button.addEventListener("click", () => openSlashCommand(button.dataset.command)));
-}
-
-async function openSlashCommand(name) {
-  elements.input.value = "";
-  saveDraft();
-  state.slashIndex = 0;
-  autoSizeInput(true);
-  renderSlashMenu();
-  if (!agentMeta() && name !== "/agent-add") return;
-  if (name === "/agent-add") return openAddAgent();
-  if (name === "/agent-delete") return openDeleteAgent();
-  if (name === "/model") return openModel();
-  if (name === "/effort") return openEffort();
-  if (name === "/clear") return openConfirm("清空上下文？", "当前会话将从空白上下文继续，已有消息记录不会被删除。", "清空上下文", () => sendCommand({ command: "clear_context", agent_id: state.selectedAgent }), true);
-  if (name === "/rewind") return openRewind();
-  if (name === "/exit") { window.close(); toast("浏览器不允许页面自行关闭时，请直接关闭标签页。"); }
-}
-
-function openModel() {
-  const projection = currentProjection();
-  openChoice("切换模型", "选择后将从下一次回复开始生效。", state.snapshot.models.map((model) => ({ value: model.name, label: model.name })), projection.model,
-    (model) => sendCommand({ command: "change_model", agent_id: state.selectedAgent, model }));
-}
-
-function openEffort() {
-  const projection = currentProjection();
-  const model = state.snapshot.models.find((candidate) => candidate.name === projection.model);
-  openChoice("切换推理强度", "选择后将从下一次回复开始生效。", (model?.reasoning_efforts || []).map((effort) => ({ value: effort, label: effort })), projection.effort,
-    (effort) => sendCommand({ command: "change_effort", agent_id: state.selectedAgent, effort }));
-}
-
 function openModelDrawer() {
   const agentId = state.selectedAgent;
   if (!agentId || !canControlRuntime()) return;
@@ -3246,22 +3184,6 @@ function openEffortDrawer() {
     value: effort,
     label: effort,
   })), projection.effort, (effort) => sendCommand({ command: "change_effort", agent_id: agentId, effort }));
-}
-
-function rewindChoices(events) {
-  return [...events].reverse().flatMap((event) => {
-    const [kind, value] = eventParts(event);
-    if (kind === "UserPrompt") return [{ value: value.id, label: collapse(value.content), detail: "用户消息" }];
-    if (kind === "ContextCleared") return [{ value: value.id, label: "上下文已清空", detail: "清理位置" }];
-    if (kind === "CompactStateUpdate" && value.state === "Completed") return [{ value: value.id, label: "上下文已压缩", detail: "压缩位置" }];
-    return [];
-  });
-}
-
-function openRewind() {
-  const choices = rewindChoices(currentStore()?.events || []);
-  openChoice("撤回", "所选位置及其后的内容将从当前会话中永久移除。", choices, choices[0]?.value,
-    (eventId) => sendCommand({ command: "rewind_context", agent_id: state.selectedAgent, event_id: Number(eventId) }));
 }
 
 function openAddAgent() {
@@ -3476,7 +3398,6 @@ function cancelPendingPromptSubmission(agentId, pending) {
   if (state.selectedAgent === agentId) {
     elements.input.value = pending.displayContent;
     autoSizeInput(true);
-    renderSlashMenu();
     requestAnimationFrame(() => elements.input.focus());
   }
   return true;
@@ -3510,7 +3431,6 @@ async function submitPrompt() {
   const displayContent = elements.input.value;
   const content = displayContent.trim();
   if (!content || !state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
-  if (content.startsWith("/") && COMMANDS.some(([name]) => name === content)) return openSlashCommand(content);
   const agentId = state.selectedAgent;
   const store = currentStore();
   if (!store || store.pendingPromptSubmission) return;
@@ -3588,7 +3508,7 @@ async function escapeAction() {
     if (turn?.state === "active") await sendCommand({ command: "abort_turn", agent_id: state.selectedAgent });
     else if (turn?.state === "aborting") toast("正在等待当前生成中止");
     else if (turn?.state === "aborted") await sendCommand({ command: "rewind_context", agent_id: state.selectedAgent, event_id: turn.promptId });
-    else { elements.input.value = ""; saveDraft(); autoSizeInput(true); renderSlashMenu(); }
+    else { elements.input.value = ""; saveDraft(); autoSizeInput(true); }
   } catch (error) { toast(error.message, true); }
 }
 
@@ -3934,9 +3854,7 @@ elements.statusContextTrigger.addEventListener("click", openContextDrawer);
 elements.input.addEventListener("input", () => {
   state.lastInputAt = performance.now();
   saveDraft();
-  state.slashIndex = 0;
   autoSizeInput();
-  renderSlashMenu();
 });
 elements.input.addEventListener("compositionstart", beginInputComposition);
 elements.input.addEventListener("compositionend", endInputComposition);
@@ -3945,15 +3863,7 @@ function enterSubmitsPrompt(event) {
 }
 elements.input.addEventListener("keydown", (event) => {
   if (state.composing || event.isComposing || event.keyCode === 229) return;
-  const visible = !elements.slashMenu.classList.contains("hidden");
-  const matches = COMMANDS.filter(([name]) => name.startsWith(elements.input.value));
-  if (visible && (event.key === "ArrowDown" || event.key === "ArrowUp")) {
-    event.preventDefault();
-    state.slashIndex = (state.slashIndex + (event.key === "ArrowDown" ? 1 : -1) + matches.length) % matches.length;
-    renderSlashMenu();
-  } else if (visible && enterSubmitsPrompt(event)) {
-    event.preventDefault(); openSlashCommand(matches[state.slashIndex]?.[0]);
-  } else if (enterSubmitsPrompt(event)) {
+  if (enterSubmitsPrompt(event)) {
     event.preventDefault(); submitPrompt();
   } else if (event.key === "Escape") {
     event.preventDefault(); escapeAction();
