@@ -13,6 +13,7 @@
     "File.Stat", "File.MakeDirectory", "File.Create", "File.Edit", "File.Append", "File.Replace",
     "File.Copy", "File.Move", "File.Delete",
     "Terminal.Create", "Terminal.Interact", "Terminal.Status", "Terminal.List", "Terminal.Kill",
+    "Desktop.Play",
     "WebBrowser.Create", "WebBrowser.Navigate", "WebBrowser.Click", "WebBrowser.Type",
     "WebBrowser.Press", "WebBrowser.Scroll", "WebBrowser.RequireHumanAction",
     "WebBrowser.Snapshot", "WebBrowser.Pages", "WebBrowser.Back", "WebBrowser.Close",
@@ -670,6 +671,76 @@
     summary: (input) => input.session_id || "",
     input: (input) => [fieldBlock("终端", [["Session", input.session_id], ["优雅等待", `${input.grace_ms ?? 1000} ms`]])],
     output: terminalStatusBlocks,
+  });
+
+  function desktopOperationLabel(operation, index) {
+    const prefix = `${index + 1}.`;
+    switch (operation?.kind) {
+      case "capture": {
+        const clip = operation.clip;
+        return clip ? `${prefix} 截图 · (${clip.x}, ${clip.y}) ${clip.width}×${clip.height}` : `${prefix} 全屏截图`;
+      }
+      case "delay": return `${prefix} 等待 ${operation.delay_ms ?? 0} ms`;
+      case "mouse_move": return `${prefix} 移动鼠标至 (${operation.x}, ${operation.y})`;
+      case "mouse_down": return `${prefix} 按下${operation.button || "left"}鼠标键`;
+      case "mouse_up": return `${prefix} 释放${operation.button || "left"}鼠标键`;
+      case "mouse_wheel": return `${prefix} 滚轮 x=${operation.delta_x ?? 0}, y=${operation.delta_y ?? 0}`;
+      case "key_click": return `${prefix} 按键 ${operation.key || ""}`;
+      case "key_down": return `${prefix} 按下键 ${operation.key || ""}`;
+      case "key_up": return `${prefix} 释放键 ${operation.key || ""}`;
+      case "text_input": return `${prefix} 输入 ${quotedPreview(operation.text, 60)}`;
+      default: return `${prefix} ${operation?.kind || "未知操作"}`;
+    }
+  }
+
+  function desktopClipLabel(clip) {
+    return clip ? `(${clip.x}, ${clip.y}) ${clip.width}×${clip.height}` : "全屏";
+  }
+
+  define("Desktop.Play", {
+    title: "操作桌面", icon: "pointer",
+    summary(input) {
+      const operations = Array.isArray(input.operations) ? input.operations : [];
+      return `${formatNumber(operations.length)} 个桌面操作${operations.some((operation) => operation?.kind === "capture") ? " · 操作后截图" : ""}`;
+    },
+    input(input) {
+      const operations = Array.isArray(input.operations) ? input.operations : [];
+      const counts = new Map();
+      let delay = 0;
+      for (const operation of operations) {
+        const kind = operation?.kind || "unknown";
+        counts.set(kind, (counts.get(kind) || 0) + 1);
+        if (kind === "delay") delay += Number(operation.delay_ms) || 0;
+      }
+      const capture = operations.find((operation) => operation?.kind === "capture");
+      const overview = [...counts.entries()].map(([kind, count]) => `${kind} ×${count}`).join(" · ");
+      return [
+        fieldBlock("桌面操作", [["操作数量", operations.length], ["操作构成", overview], ["总等待", delay ? `${formatNumber(delay)} ms` : ""], ["最终截图", capture ? desktopClipLabel(capture.clip) : "无"]]),
+        ...(operations.length ? [listBlock("执行顺序", operations.map(desktopOperationLabel))] : [noticeBlock("执行顺序", "没有操作", "muted")]),
+      ];
+    },
+    output(input, output) {
+      if (resultFailed(output)) return [];
+      const value = objectValue(resultValue(output));
+      const blocks = [fieldBlock("执行结果", [["状态", labelState(value.state)], ["操作总数", value.operation_count], ["已完成", value.completed_operations], ["失败位置", value.failed_operation_index != null ? `第 ${value.failed_operation_index + 1} 项` : ""]])];
+      const captures = (value.captures || []).map((capture) => ({
+        index: capture.operation_index != null ? capture.operation_index + 1 : "",
+        path: capture.path || "",
+        image_size: capture.width && capture.height ? `${capture.width}×${capture.height}` : "",
+        full_size: capture.full_width && capture.full_height ? `${capture.full_width}×${capture.full_height}` : "",
+        clip: desktopClipLabel(capture.clip),
+      }));
+      if (captures.length) blocks.push(tableBlock("桌面截图", [
+        { key: "index", label: "操作" }, { key: "path", label: "路径" }, { key: "image_size", label: "图片尺寸" }, { key: "full_size", label: "全屏尺寸" }, { key: "clip", label: "区域" },
+      ], captures));
+      if (value.auto_released?.length) blocks.push(listBlock("自动释放", value.auto_released));
+      if (value.cleanup_errors?.length) blocks.push(listBlock("释放失败", value.cleanup_errors.map((error) => `${error.code || "cleanup_failed"}: ${error.message || ""}`)));
+      if (value.error) {
+        const parts = [value.error.message || "桌面操作失败", value.error.code ? `错误码：${value.error.code}` : "", value.error.tip || ""].filter(Boolean);
+        blocks.push(noticeBlock("桌面操作失败", parts.join("\n"), "error"));
+      }
+      return blocks;
+    },
   });
 
   function browserInput(input, extras = []) {

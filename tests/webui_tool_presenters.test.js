@@ -18,8 +18,8 @@ function succeeded(value, updates = []) {
 
 describe("shared WebUI tool presenters", () => {
   test("explicitly covers every first-party and historical compatibility tool", () => {
-    expect(presenters.KNOWN_TOOLS).toHaveLength(55);
-    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(55);
+    expect(presenters.KNOWN_TOOLS).toHaveLength(56);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(56);
     expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
     for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
   });
@@ -77,6 +77,30 @@ describe("shared WebUI tool presenters", () => {
     expect(html).toContain("hello");
     expect(primary).not.toContain("&quot;runs&quot;");
     expect(html).toContain("&quot;runs&quot;");
+  });
+
+  test("renders Desktop.Play operations, capture geometry, failure, and cleanup", () => {
+    const input = { operations: [
+      { kind: "key_down", key: "shift" },
+      { kind: "delay", delay_ms: 250 },
+      { kind: "capture", clip: { x: 100, y: 200, width: 640, height: 480 } },
+    ] };
+    expect(presenters.summarize("Desktop.Play", input)).toMatchObject({
+      title: "操作桌面", summary: "3 个桌面操作 · 操作后截图",
+    });
+    const details = presenters.describe("Desktop.Play", input, succeeded({
+      state: "failed", operation_count: 3, completed_operations: 3, failed_operation_index: null,
+      captures: [{ operation_index: 2, path: ".me/tmp/desktop/capture-00ab12.png", width: 640, height: 480, full_width: 2560, full_height: 1440, clip: { x: 100, y: 200, width: 640, height: 480 } }],
+      auto_released: ["key:shift"], cleanup_errors: [],
+      error: { code: "desktop_input_failed", message: "release failed", retryable: false },
+    }));
+    const html = presenters.renderDetails(details);
+    expect(html).toContain("执行顺序");
+    expect(html).toContain(".me/tmp/desktop/capture-00ab12.png");
+    expect(html).toContain("2560×1440");
+    expect(html).toContain("(100, 200) 640×480");
+    expect(html).toContain("key:shift");
+    expect(html).toContain("desktop_input_failed");
   });
 
   test("renders browser snapshot tree, screenshot path, and browser events", () => {

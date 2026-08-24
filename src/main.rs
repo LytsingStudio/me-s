@@ -11,7 +11,7 @@ use me::{
         GlobalConfig, WorkspaceConfig, global_config_path, workspace_config_path,
         workspace_edb_path,
     },
-    diag,
+    desktop_toolbox, diag,
     event::{EventBase, EventDataBase},
     managed_child,
     model::{
@@ -55,6 +55,11 @@ fn run() -> Result<()> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         return toolbox::run_default_terminal_toolbox(stdin.lock(), stdout, &workspace);
+    }
+    if arguments.as_slice() == ["__toolbox-desktop-worker"] {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        return desktop_toolbox::run(stdin.lock(), stdout, &workspace);
     }
     if arguments.as_slice() == ["__gateway-child"] {
         return managed_child::run(&workspace);

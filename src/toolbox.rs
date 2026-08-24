@@ -41,6 +41,8 @@ const DEFAULT_FILE_FILE: &str = "File.py";
 const DEFAULT_FILE_SOURCE: &str = include_str!("default_file_toolbox.py");
 const DEFAULT_WEB_BROWSER_FILE: &str = "WebBrowser.py";
 const DEFAULT_WEB_BROWSER_SOURCE: &str = include_str!("default_web_browser_toolbox.py");
+const DEFAULT_DESKTOP_FILE: &str = "Desktop.py";
+const DEFAULT_DESKTOP_SOURCE: &str = include_str!("default_desktop_toolbox.py");
 #[cfg(target_os = "macos")]
 const DEFAULT_WEB_BROWSER_MACOS_WINDOW_CONTROL_FILE: &str =
     ".WebBrowser-window-control-macos.dylib";
@@ -1332,24 +1334,37 @@ pub fn ensure_default_toolboxes(workspace: &Path) -> Result<PathBuf> {
         let terminal = directory.join(DEFAULT_TERMINAL_FILE);
         let file = directory.join(DEFAULT_FILE_FILE);
         let web_browser = directory.join(DEFAULT_WEB_BROWSER_FILE);
+        let desktop = directory.join(DEFAULT_DESKTOP_FILE);
         if let Err(error) = fs::write(&terminal, DEFAULT_TERMINAL_SOURCE)
             .and_then(|()| fs::write(&file, DEFAULT_FILE_SOURCE))
             .and_then(|()| fs::write(&web_browser, DEFAULT_WEB_BROWSER_SOURCE))
+            .and_then(|()| fs::write(&desktop, DEFAULT_DESKTOP_SOURCE))
             .and_then(|()| ensure_web_browser_platform_assets(&directory))
         {
             let _ = fs::remove_file(&terminal);
             let _ = fs::remove_file(&file);
             let _ = fs::remove_file(&web_browser);
+            let _ = fs::remove_file(&desktop);
             let _ = remove_web_browser_platform_assets(&directory);
             return Err(error.into());
         }
         return Ok(terminal);
     }
-    for (name, source) in [
+    let defaults = [
         (DEFAULT_TERMINAL_FILE, DEFAULT_TERMINAL_SOURCE),
         (DEFAULT_FILE_FILE, DEFAULT_FILE_SOURCE),
         (DEFAULT_WEB_BROWSER_FILE, DEFAULT_WEB_BROWSER_SOURCE),
-    ] {
+        (DEFAULT_DESKTOP_FILE, DEFAULT_DESKTOP_SOURCE),
+    ];
+    let has_managed_default = defaults.iter().any(|(name, _)| {
+        fs::read_to_string(directory.join(name))
+            .is_ok_and(|source| is_managed_default_toolbox(&source))
+    });
+    let desktop = directory.join(DEFAULT_DESKTOP_FILE);
+    if has_managed_default && !desktop.exists() {
+        fs::write(&desktop, DEFAULT_DESKTOP_SOURCE)?;
+    }
+    for (name, source) in defaults {
         let path = directory.join(name);
         if !path.is_file() {
             continue;
@@ -2073,6 +2088,11 @@ mod tests {
         assert_eq!(fs::read_to_string(&path).unwrap(), DEFAULT_TERMINAL_SOURCE);
         let file = path.parent().unwrap().join(DEFAULT_FILE_FILE);
         assert_eq!(fs::read_to_string(&file).unwrap(), DEFAULT_FILE_SOURCE);
+        let desktop = path.parent().unwrap().join(DEFAULT_DESKTOP_FILE);
+        assert_eq!(
+            fs::read_to_string(&desktop).unwrap(),
+            DEFAULT_DESKTOP_SOURCE
+        );
         let web_browser = path.parent().unwrap().join(DEFAULT_WEB_BROWSER_FILE);
         assert_eq!(
             fs::read_to_string(&web_browser).unwrap(),
@@ -2091,7 +2111,7 @@ mod tests {
         ensure_default_toolboxes(&workspace).unwrap();
         assert_eq!(
             toolbox_paths(&workspace).unwrap(),
-            vec![file, path, web_browser]
+            vec![desktop, file, path, web_browser]
         );
         fs::remove_dir_all(workspace).unwrap();
     }
@@ -2111,6 +2131,7 @@ mod tests {
         assert!(!directory.join(DEFAULT_TERMINAL_FILE).exists());
         assert!(!directory.join(DEFAULT_FILE_FILE).exists());
         assert!(!directory.join(DEFAULT_WEB_BROWSER_FILE).exists());
+        assert!(!directory.join(DEFAULT_DESKTOP_FILE).exists());
         #[cfg(target_os = "macos")]
         assert!(
             !directory
@@ -2128,6 +2149,7 @@ mod tests {
         let terminal = directory.join(DEFAULT_TERMINAL_FILE);
         let file = directory.join(DEFAULT_FILE_FILE);
         let web_browser = directory.join(DEFAULT_WEB_BROWSER_FILE);
+        let desktop = directory.join(DEFAULT_DESKTOP_FILE);
         let custom = directory.join("Custom.py");
         fs::write(
             &terminal,
@@ -2158,6 +2180,7 @@ mod tests {
             fs::read_to_string(web_browser).unwrap(),
             DEFAULT_WEB_BROWSER_SOURCE
         );
+        assert_eq!(fs::read_to_string(desktop).unwrap(), DEFAULT_DESKTOP_SOURCE);
         assert_eq!(
             fs::read_to_string(file).unwrap(),
             "# custom replacement using the default filename\n"
@@ -2167,6 +2190,45 @@ mod tests {
         assert_eq!(
             fs::read(directory.join(DEFAULT_WEB_BROWSER_MACOS_WINDOW_CONTROL_FILE)).unwrap(),
             DEFAULT_WEB_BROWSER_MACOS_WINDOW_CONTROL
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn custom_desktop_filename_is_never_overwritten_or_used_to_backfill_defaults() {
+        let workspace = temporary_workspace("custom-desktop");
+        let directory = workspace.join(TOOLBOX_DIRECTORY);
+        fs::create_dir_all(&directory).unwrap();
+        let desktop = directory.join(DEFAULT_DESKTOP_FILE);
+        fs::write(&desktop, "# user-owned Desktop toolbox\n").unwrap();
+
+        ensure_default_toolboxes(&workspace).unwrap();
+
+        assert_eq!(toolbox_paths(&workspace).unwrap(), vec![desktop.clone()]);
+        assert_eq!(
+            fs::read_to_string(desktop).unwrap(),
+            "# user-owned Desktop toolbox\n"
+        );
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[test]
+    fn failed_initial_desktop_install_removes_every_partial_default_file() {
+        let workspace = temporary_workspace("desktop-install-failure");
+        let directory = workspace.join(TOOLBOX_DIRECTORY);
+        fs::create_dir_all(directory.join(DEFAULT_DESKTOP_FILE)).unwrap();
+
+        assert!(ensure_default_toolboxes(&workspace).is_err());
+
+        assert!(!directory.join(DEFAULT_TERMINAL_FILE).exists());
+        assert!(!directory.join(DEFAULT_FILE_FILE).exists());
+        assert!(!directory.join(DEFAULT_WEB_BROWSER_FILE).exists());
+        assert!(directory.join(DEFAULT_DESKTOP_FILE).is_dir());
+        #[cfg(target_os = "macos")]
+        assert!(
+            !directory
+                .join(DEFAULT_WEB_BROWSER_MACOS_WINDOW_CONTROL_FILE)
+                .exists()
         );
         fs::remove_dir_all(workspace).unwrap();
     }

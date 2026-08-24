@@ -518,6 +518,16 @@ fn me_loads_web_browser_as_an_independent_default_toolbox() {
     let web_browser = generated_web_browser_toolbox(&workspace);
     fs::remove_file(web_browser.parent().unwrap().join("Terminal.py")).unwrap();
     fs::remove_file(web_browser.parent().unwrap().join("File.py")).unwrap();
+    fs::write(
+        web_browser.parent().unwrap().join("Desktop.py"),
+        r#"import json, sys
+for line in sys.stdin:
+    request = json.loads(line)
+    output = [] if request["cmd"] == "getTools" else ""
+    print(json.dumps({"id": request["id"], "type": "result", "output": output}), flush=True)
+"#,
+    )
+    .unwrap();
     let runtime = me::toolbox::ToolboxRuntime::load(&workspace).unwrap();
     let names = runtime
         .catalog()
