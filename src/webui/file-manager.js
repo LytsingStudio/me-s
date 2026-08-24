@@ -3,6 +3,9 @@
 (function attachFileManager(global) {
   const TERMINAL_STATES = new Set(["completed", "failed", "cancelled"]);
   const UPLOAD_CHUNK_BYTES = 384 * 1024;
+  const NAVIGATION_HISTORY_LIMIT = 100;
+  const TOUCH_DOUBLE_TAP_MS = 450;
+  const TOUCH_TAP_MOVE_PX = 12;
 
   function create(options) {
     return new FileManager(options);
@@ -18,6 +21,10 @@
       this.states = new Map();
       this.identity = null;
       this.state = null;
+      this.touchPointer = null;
+      this.lastTouchTap = null;
+      this.suppressTouchClickPath = null;
+      this.ignoreDblClickUntil = 0;
       this.renderShell();
       this.bind();
     }
@@ -25,6 +32,7 @@
     attach(identity) {
       if (!identity?.key || !identity?.agentId) return;
       if (this.identity?.key && this.identity.key !== identity.key && this.dialogResolve) this.closeDialog(null);
+      if (this.identity?.key !== identity.key) this.resetTouchGesture();
       this.identity = { ...identity };
       let view = this.states.get(identity.key);
       if (!view) {
@@ -40,6 +48,7 @@
           sortKey: "name",
           sortDirection: "asc",
           clipboard: null,
+          history: [],
           loading: false,
           error: "",
           job: null,
@@ -52,6 +61,7 @@
       } else if (!view.path && !view.roots && identity.defaultPath) {
         view.path = identity.defaultPath;
       }
+      view.history ||= [];
       view.identity = { ...identity };
       this.state = view;
       this.render();
@@ -63,26 +73,26 @@
       this.container.innerHTML = `
         <div class="file-manager-shell">
           <div class="file-manager-toolbar file-manager-navigation">
-            <button type="button" data-file-action="roots" title="根目录">根目录</button>
-            <button type="button" data-file-action="up" title="上一级">上一级</button>
-            <button type="button" data-file-action="refresh" title="刷新">刷新</button>
+            ${actionButton("back", "后退")}
+            ${actionButton("up", "上一级")}
+            ${actionButton("refresh", "刷新")}
             <form class="file-manager-path-form">
               <input class="file-manager-path" type="text" aria-label="当前路径" autocomplete="off" spellcheck="false">
-              <button type="submit">前往</button>
+              <button type="submit" class="file-manager-icon-button" title="前往" aria-label="前往">${actionIcon("go")}</button>
             </form>
             <input class="file-manager-search" type="search" placeholder="搜索当前目录" aria-label="搜索当前目录">
           </div>
           <div class="file-manager-toolbar file-manager-actions" role="toolbar" aria-label="文件操作">
-            <button type="button" data-file-action="select-all">全选</button>
-            <button type="button" data-file-action="mkdir">新建文件夹</button>
-            <button type="button" data-file-action="rename">重命名</button>
-            <button type="button" data-file-action="copy">复制</button>
-            <button type="button" data-file-action="cut">剪切</button>
-            <button type="button" data-file-action="paste">粘贴</button>
-            <button type="button" data-file-action="move">移动</button>
-            <button type="button" data-file-action="upload">上传</button>
-            <button type="button" data-file-action="download">下载</button>
-            <button type="button" class="danger" data-file-action="delete">永久删除</button>
+            ${actionButton("select-all", "全选")}
+            ${actionButton("mkdir", "新建文件夹")}
+            ${actionButton("rename", "重命名")}
+            ${actionButton("copy", "复制")}
+            ${actionButton("cut", "剪切")}
+            ${actionButton("paste", "粘贴")}
+            ${actionButton("move", "移动")}
+            ${actionButton("upload", "上传")}
+            ${actionButton("download", "下载")}
+            ${actionButton("delete", "永久删除", true)}
             <input class="file-manager-upload-input" type="file" multiple hidden>
             <span class="file-manager-selection" aria-live="polite"></span>
           </div>
@@ -126,14 +136,22 @@
         const sort = event.target.closest("[data-file-sort]")?.dataset.fileSort;
         if (sort) this.changeSort(sort);
         const row = event.target.closest(".file-manager-entry");
-        if (row && !event.target.closest("button,input")) this.selectRow(row.dataset.path, event);
+        if (row && !event.target.closest("button,input")) {
+          if (this.suppressTouchClickPath === row.dataset.path) this.suppressTouchClickPath = null;
+          else this.selectRow(row.dataset.path, event);
+        }
         const dialogAction = event.target.closest("[data-dialog-action]")?.dataset.dialogAction;
         if (dialogAction) this.closeDialog(null);
       });
       this.container.addEventListener("dblclick", (event) => {
+        if (Date.now() < this.ignoreDblClickUntil) return;
         const row = event.target.closest(".file-manager-entry");
-        if (row?.dataset.navigable === "true") void this.load(row.dataset.path, false);
+        if (row?.dataset.navigable === "true") void this.navigate(row.dataset.path, false);
       });
+      this.container.addEventListener("pointerdown", (event) => this.handleTouchPointerDown(event));
+      this.container.addEventListener("pointermove", (event) => this.handleTouchPointerMove(event));
+      this.container.addEventListener("pointerup", (event) => this.handleTouchPointerUp(event));
+      this.container.addEventListener("pointercancel", (event) => this.cancelTouchPointer(event));
       this.container.addEventListener("change", (event) => {
         const checkbox = event.target.closest(".file-manager-entry input[type=checkbox]");
         if (checkbox) this.togglePath(checkbox.closest(".file-manager-entry").dataset.path, checkbox.checked);
@@ -141,7 +159,7 @@
       this.container.querySelector(".file-manager-path-form").addEventListener("submit", (event) => {
         event.preventDefault();
         const path = this.pathInput.value.trim();
-        if (path) void this.load(path, false);
+        if (path) void this.navigate(path, false);
       });
       this.searchInput.addEventListener("input", () => {
         if (!this.state) return;
@@ -160,6 +178,63 @@
       });
     }
 
+    resetTouchGesture() {
+      this.touchPointer = null;
+      this.lastTouchTap = null;
+      this.suppressTouchClickPath = null;
+      this.ignoreDblClickUntil = 0;
+    }
+
+    handleTouchPointerDown(event) {
+      if (event.pointerType !== "touch" || event.isPrimary === false || event.target.closest("button,input")) return;
+      const row = event.target.closest(".file-manager-entry");
+      if (!row) return;
+      this.touchPointer = {
+        pointerId: event.pointerId,
+        path: row.dataset.path,
+        navigable: row.dataset.navigable === "true",
+        x: event.clientX,
+        y: event.clientY,
+        moved: false,
+      };
+    }
+
+    handleTouchPointerMove(event) {
+      const gesture = this.touchPointer;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      if (Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > TOUCH_TAP_MOVE_PX) gesture.moved = true;
+    }
+
+    handleTouchPointerUp(event) {
+      const gesture = this.touchPointer;
+      if (!gesture || gesture.pointerId !== event.pointerId) return;
+      this.touchPointer = null;
+      if (gesture.moved || Math.hypot(event.clientX - gesture.x, event.clientY - gesture.y) > TOUCH_TAP_MOVE_PX) {
+        this.lastTouchTap = null;
+        return;
+      }
+      const now = Date.now();
+      const previous = this.lastTouchTap;
+      if (previous?.path === gesture.path && now - previous.at <= TOUCH_DOUBLE_TAP_MS) {
+        this.lastTouchTap = null;
+        if (!gesture.navigable || this.state?.loading) return;
+        this.suppressTouchClickPath = gesture.path;
+        this.ignoreDblClickUntil = now + TOUCH_DOUBLE_TAP_MS;
+        setTimeout(() => {
+          if (this.suppressTouchClickPath === gesture.path) this.suppressTouchClickPath = null;
+        }, 0);
+        void this.navigate(gesture.path, false);
+        return;
+      }
+      this.lastTouchTap = { path: gesture.path, at: now };
+    }
+
+    cancelTouchPointer(event) {
+      if (this.touchPointer?.pointerId !== event.pointerId) return;
+      this.touchPointer = null;
+      this.lastTouchTap = null;
+    }
+
     async call(path, body, identity = this.identity) {
       try {
         return await this.request(path, {
@@ -173,24 +248,45 @@
       }
     }
 
-    async load(path, roots, view = this.state) {
+    async navigate(path, roots, view = this.state) {
+      if (!view || view.loading) return false;
+      return this.load(path, roots, view, true);
+    }
+
+    async goBack() {
+      const view = this.state;
+      if (!view || view.loading || !view.history.length) return;
+      const target = view.history[view.history.length - 1];
+      if (await this.load(target.path, target.roots, view)) view.history.pop();
+      if (this.state === view) this.render();
+    }
+
+    async load(path, roots, view = this.state, recordHistory = false) {
       const identity = view?.identity;
-      if (!view || !identity?.key) return;
+      if (!view || !identity?.key) return false;
+      const previous = view.loaded ? { path: view.path, roots: view.roots } : null;
       view.loading = true;
       view.error = "";
       if (this.state === view) this.render();
       try {
         const listing = await this.call("/api/files/list", { path: roots ? null : path, roots }, identity);
-        view.path = listing.path;
+        const next = { path: listing.path, roots: Boolean(listing.root_selector) };
+        if (recordHistory && previous && !sameLocation(previous, next)) {
+          view.history.push(previous);
+          if (view.history.length > NAVIGATION_HISTORY_LIMIT) view.history.splice(0, view.history.length - NAVIGATION_HISTORY_LIMIT);
+        }
+        view.path = next.path;
         view.parent = listing.parent;
-        view.roots = listing.root_selector;
+        view.roots = next.roots;
         view.entries = listing.entries || [];
         view.selection.clear();
         view.anchor = null;
         view.loaded = true;
+        return true;
       } catch (error) {
         view.error = error.message;
         this.notify(error.message, "error");
+        return false;
       } finally {
         view.loading = false;
         if (this.state === view) this.render();
@@ -218,7 +314,7 @@
 
     render() {
       if (!this.state) return;
-      this.pathInput.value = this.state.roots ? "此电脑 / 根目录" : (this.state.path || "");
+      this.pathInput.value = this.state.roots ? "可用位置" : (this.state.path || "");
       this.pathInput.disabled = this.state.loading || this.state.roots;
       this.searchInput.value = this.state.search;
       const selected = this.state.selection.size;
@@ -228,8 +324,10 @@
         clipboard ? `${clipboard.mode === "copy" ? "复制" : "剪切"} ${clipboard.sources.length} 项` : "",
       ].filter(Boolean).join(" · ") || "未选择项目";
       const hasDirectory = Boolean(this.state.path) && !this.state.roots;
+      this.setDisabled("back", this.state.loading || !this.state.history.length);
       this.setDisabled("up", this.state.loading || (!this.state.parent && this.state.roots));
       this.setDisabled("refresh", this.state.loading);
+      this.setDisabled("select-all", !this.visibleEntries().length || this.state.loading);
       this.setDisabled("mkdir", !hasDirectory || this.state.loading);
       this.setDisabled("rename", selected !== 1 || this.state.loading);
       this.setDisabled("copy", selected === 0 || this.state.loading);
@@ -351,8 +449,8 @@
 
     async handleAction(action) {
       if (!this.state) return;
-      if (action === "roots") return this.load(null, true);
-      if (action === "up") return this.state.parent ? this.load(this.state.parent, false) : this.load(null, true);
+      if (action === "back") return this.goBack();
+      if (action === "up") return this.state.parent ? this.navigate(this.state.parent, false) : this.navigate(null, true);
       if (action === "refresh") return this.load(this.state.path, this.state.roots);
       if (action === "select-all") {
         const entries = this.visibleEntries();
@@ -626,10 +724,38 @@
     }
   }
 
+  function actionButton(action, label, danger = false) {
+    return `<button type="button" class="file-manager-icon-button${danger ? " danger" : ""}" data-file-action="${action}" title="${label}" aria-label="${label}">${actionIcon(action)}</button>`;
+  }
+
+  function actionIcon(action) {
+    const paths = {
+      back: '<path d="m15 18-6-6 6-6"/>',
+      up: '<path d="m6 11 6-6 6 6M12 5v14"/>',
+      refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 5v6h-6"/>',
+      go: '<path d="m9 18 6-6-6-6"/>',
+      "select-all": '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 2.5 2.5L16 9"/>',
+      mkdir: '<path d="M3 6.5h7l2 2h9v10H3zM15 12v5M12.5 14.5h5"/>',
+      rename: '<path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20ZM13.8 7.2l3 3"/>',
+      copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+      cut: '<circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.5 8.5 10 7M8.5 15.5l10-7"/>',
+      paste: '<path d="M9 5H6v16h12V5h-3M9 3h6v4H9z"/>',
+      move: '<path d="M3 7h7l2 2h9v10H3zM8 14h8M13 11l3 3-3 3"/>',
+      upload: '<path d="M12 16V4m-4 4 4-4 4 4M5 14v6h14v-6"/>',
+      download: '<path d="M12 4v12m-4-4 4 4 4-4M5 14v6h14v-6"/>',
+      delete: '<path d="M4 7h16M9 7V4h6v3m3 0-1 14H7L6 7m4 4v6m4-6v6"/>',
+    };
+    return `<svg viewBox="0 0 24 24" aria-hidden="true">${paths[action] || ""}</svg>`;
+  }
+
   function kindIcon(kind) {
     if (kind === "directory" || kind === "root" || kind === "drive") return '<svg viewBox="0 0 24 24"><path d="M3 6.5h7l2 2h9v10H3z"/></svg>';
     if (kind === "symlink") return '<svg viewBox="0 0 24 24"><path d="M10 13a4 4 0 0 0 5.7 0l2-2a4 4 0 0 0-5.7-5.7l-1 1M14 11a4 4 0 0 0-5.7 0l-2 2A4 4 0 0 0 12 18.7l1-1"/></svg>';
     return '<svg viewBox="0 0 24 24"><path d="M6 3h8l4 4v14H6zM14 3v5h5"/></svg>';
+  }
+
+  function sameLocation(left, right) {
+    return Boolean(left?.roots) === Boolean(right?.roots) && (left?.path || null) === (right?.path || null);
   }
 
   function kindLabel(kind) {

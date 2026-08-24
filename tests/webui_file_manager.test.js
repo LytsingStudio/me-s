@@ -12,6 +12,8 @@ const directHtml = read("src/webui/index.html");
 const gatewayHtml = read("src/gateway_webui/index.html");
 const directApp = read("src/webui/app.js");
 const gatewayApp = read("src/gateway_webui/app.js");
+const directStyle = read("src/webui/style.css");
+const gatewayStyle = read("src/gateway_webui/style.css");
 const hostFiles = read("src/host_files.rs");
 const gateway = read("src/gateway.rs");
 
@@ -23,6 +25,13 @@ describe("per-session host file manager", () => {
       expect(html).toContain('id="file-manager"');
       expect(html.indexOf('/file-manager.js')).toBeGreaterThan(0);
       expect(html.indexOf('/file-manager.js')).toBeLessThan(html.indexOf('/app.js'));
+    }
+  });
+
+  test("both WebUIs present WorkMap as 工作图", () => {
+    for (const html of [directHtml, gatewayHtml]) {
+      expect(html).toContain('data-view="workmap">工作图</button>');
+      expect(html).toContain('<strong>工作图</strong>');
     }
   });
 
@@ -46,6 +55,28 @@ describe("per-session host file manager", () => {
     expect(gateway).toContain('parse_file_download_content_path');
     expect(gateway).toContain("body: Box<dyn Read + Send>");
     expect(gateway).not.toContain('response.bytes().map_err(|_| "工作区响应未能完成")');
+  });
+
+  test("navigation uses per-session history, icon controls and guarded touch double-tap", () => {
+    expect(controller).toContain("history: []");
+    expect(controller).toContain("NAVIGATION_HISTORY_LIMIT = 100");
+    expect(controller).toContain('actionButton("back", "后退")');
+    expect(controller).not.toContain('data-file-action="roots"');
+    expect(controller).toContain('if (action === "back") return this.goBack()');
+    expect(controller).toContain("recordHistory && previous && !sameLocation(previous, next)");
+    expect(controller).toContain('event.pointerType !== "touch"');
+    expect(controller).toContain("TOUCH_DOUBLE_TAP_MS = 450");
+    expect(controller).toContain("TOUCH_TAP_MOVE_PX = 12");
+    expect(controller).toContain("gesture.moved || Math.hypot");
+    expect(controller).toContain("this.suppressTouchClickPath = gesture.path");
+    for (const action of ["select-all", "mkdir", "rename", "copy", "cut", "paste", "move", "upload", "download", "delete"]) {
+      expect(controller).toContain(`actionButton("${action}",`);
+    }
+    for (const style of [directStyle, gatewayStyle]) {
+      expect(style).toContain(".file-manager-icon-button svg");
+      expect(style).toContain("touch-action: manipulation");
+      expect(style).toContain("width: 40px; min-width: 40px; height: 40px");
+    }
   });
 
   test("copy, move and delete submit one top-level server job rather than browser recursion", () => {

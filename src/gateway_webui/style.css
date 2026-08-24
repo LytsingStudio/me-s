@@ -744,6 +744,8 @@ button { color: inherit; }
 .file-manager-shell { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1; flex-direction: column; overflow: hidden; }
 .file-manager-toolbar { display: flex; min-width: 0; flex: 0 0 auto; align-items: center; gap: 7px; padding: 8px 14px; border-bottom: 1px solid var(--border); background: var(--panel); }
 .file-manager-toolbar button, .file-manager-path-form button { min-height: 34px; padding: 5px 10px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); cursor: pointer; white-space: nowrap; }
+.file-manager-toolbar button.file-manager-icon-button, .file-manager-path-form button.file-manager-icon-button { display: grid; width: 34px; min-width: 34px; height: 34px; padding: 0; place-items: center; }
+.file-manager-icon-button svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
 .file-manager-toolbar button:hover:not(:disabled), .file-manager-path-form button:hover:not(:disabled) { border-color: var(--accent); background: var(--panel-3); }
 .file-manager-toolbar button:disabled { opacity: .4; cursor: default; }
 .file-manager-toolbar button.danger { color: var(--red); }
@@ -763,7 +765,7 @@ button { color: inherit; }
 .file-manager-header > button:hover, .file-manager-header > button.active { background: var(--hover-fill); color: var(--text); }
 .file-manager-header > button.active::after { content: attr(data-direction); margin-left: 5px; color: var(--accent); font-size: 9px; text-transform: uppercase; }
 .file-manager-list { min-height: 100%; }
-.file-manager-entry { min-height: 38px; border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); color: var(--muted); font-size: 12px; user-select: none; }
+.file-manager-entry { min-height: 38px; border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); color: var(--muted); font-size: 12px; user-select: none; touch-action: manipulation; }
 .file-manager-entry:hover { background: var(--hover-fill); }
 .file-manager-entry.selected { background: var(--selected-bg); color: var(--text); }
 .file-manager-entry > span { min-width: 0; padding: 6px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -809,6 +811,7 @@ button { color: inherit; }
 .file-manager-confirm-check input { margin-top: 3px; }
 @media (max-width: 760px) {
   .file-manager-navigation { flex-wrap: wrap; padding-inline: 8px; }
+  .file-manager-toolbar button.file-manager-icon-button, .file-manager-path-form button.file-manager-icon-button { width: 40px; min-width: 40px; height: 40px; }
   .file-manager-path-form { order: 3; flex-basis: 100%; }
   .file-manager-search { flex: 1; width: auto; }
   .file-manager-actions { padding-inline: 8px; }
