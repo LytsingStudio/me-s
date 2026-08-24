@@ -17,6 +17,16 @@ const gatewayStyle = read("src/gateway_webui/style.css");
 const hostFiles = read("src/host_files.rs");
 const gateway = read("src/gateway.rs");
 
+function extractedFunction(source, name, nextName) {
+  const start = source.indexOf(`  function ${name}(`);
+  const end = source.indexOf(`\n\n  function ${nextName}(`, start);
+  if (start < 0 || end < 0) throw new Error(`Unable to extract ${name}`);
+  const definition = source.slice(start, end).replace(/^  /gm, "");
+  return Function(`"use strict"; ${definition}; return ${name};`)();
+}
+
+const clipboardHostPath = extractedFunction(controller, "clipboardHostPath", "create");
+
 describe("per-session host file manager", () => {
   test("both WebUIs expose the fixed Files tab and load the shared controller before app.js", () => {
     for (const html of [directHtml, gatewayHtml]) {
@@ -112,6 +122,7 @@ describe("per-session host file manager", () => {
     expect(controller).toContain('actionButton("copy-path", "复制绝对路径")');
     expect(controller).toContain('this.setDisabled("copy-path", selected === 0 || this.state.loading);');
     expect(controller).toContain('if (action === "copy-path") return this.copySelectedPaths();');
+    expect(controller).toContain("const paths = this.selectedPaths().map(clipboardHostPath);");
     expect(controller).toContain('await this.writeClipboard(paths.join(";"));');
     expect(controller).toContain('paths.length === 1 ? "已复制绝对路径" : `已复制 ${paths.length} 个绝对路径`');
     for (const app of [directApp, gatewayApp]) {
@@ -128,6 +139,28 @@ describe("per-session host file manager", () => {
     expect(hostFiles).toContain("prepare_archive(worker_record, sources, temp_path, shutdown)");
     expect(hostFiles).toContain("archive.follow_symlinks(false)");
   });
+
+  test("normalizes Windows verbatim paths only for the system clipboard", () => {
+    expect(clipboardHostPath("\\\\?\\C:\\Users\\xs\\file.txt")).toBe("C:\\Users\\xs\\file.txt");
+    expect(clipboardHostPath("\\\\?\\UNC\\server\\share\\folder")).toBe("\\\\server\\share\\folder");
+    expect(clipboardHostPath("C:\\Users\\xs\\file.txt")).toBe("C:\\Users\\xs\\file.txt");
+    expect(clipboardHostPath("/tmp/file.txt")).toBe("/tmp/file.txt");
+    expect(controller).toContain("const paths = this.selectedPaths().map(clipboardHostPath);");
+    expect(controller).toContain('clipboard = { mode: action === "copy" ? "copy" : "move", sources: this.selectedPaths() }');
+  });
+
+  test("shows sort direction as accessible up and down arrow icons", () => {
+    expect(controller).toContain('button.dataset.direction = direction === "asc" ? "↑" : direction === "desc" ? "↓" : "";');
+    expect(controller).toContain('button.setAttribute("aria-label", description);');
+    expect(controller).toContain("button.title = description;");
+    for (const style of [directStyle, gatewayStyle]) {
+      const rule = style.match(/\.file-manager-header > button\.active::after \{[^}]+\}/)?.[0] || "";
+      expect(rule).toContain("content: attr(data-direction)");
+      expect(rule).toContain("font-size: 14px");
+      expect(rule).not.toContain("text-transform");
+    }
+  });
+
 
   test("me-s remains the authority for traversal, conflicts, progress and permanent deletion", () => {
     expect(hostFiles).toContain("fn collect_stats(path: &Path)");

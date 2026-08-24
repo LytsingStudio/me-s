@@ -7,6 +7,13 @@
   const TOUCH_DOUBLE_TAP_MS = 450;
   const TOUCH_TAP_MOVE_PX = 12;
 
+  function clipboardHostPath(path) {
+    const value = String(path || "");
+    if (value.startsWith("\\\\?\\UNC\\")) return `\\\\${value.slice(8)}`;
+    if (value.startsWith("\\\\?\\")) return value.slice(4);
+    return value;
+  }
+
   function create(options) {
     return new FileManager(options);
   }
@@ -383,8 +390,17 @@
       }).join("");
       this.container.querySelectorAll("[data-file-sort]").forEach((button) => {
         const active = button.dataset.fileSort === this.state.sortKey;
+        const direction = active ? this.state.sortDirection : "";
+        const label = button.textContent.trim();
+        const directionLabel = direction === "asc" ? "升序" : "降序";
+        const nextDirectionLabel = direction === "asc" ? "降序" : "升序";
+        const description = active
+          ? `${label}，当前${directionLabel}，点击切换为${nextDirectionLabel}`
+          : `${label}，点击按升序排列`;
         button.classList.toggle("active", active);
-        button.dataset.direction = active ? this.state.sortDirection : "";
+        button.dataset.direction = direction === "asc" ? "↑" : direction === "desc" ? "↓" : "";
+        button.setAttribute("aria-label", description);
+        button.title = description;
       });
     }
 
@@ -490,7 +506,7 @@
     }
 
     async copySelectedPaths() {
-      const paths = this.selectedPaths();
+      const paths = this.selectedPaths().map(clipboardHostPath);
       if (!paths.length) return;
       try {
         await this.writeClipboard(paths.join(";"));

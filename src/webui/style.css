@@ -621,7 +621,7 @@ button { color: inherit; }
 .file-manager-header { position: sticky; z-index: 4; top: 0; min-height: 34px; border-bottom: 1px solid var(--border); background: var(--panel-2); color: var(--muted); font-size: 11px; font-weight: 700; }
 .file-manager-header > span, .file-manager-header > button { min-width: 0; height: 34px; padding: 0 10px; border: 0; border-right: 1px solid var(--border); background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .file-manager-header > button:hover, .file-manager-header > button.active { background: var(--hover-fill); color: var(--text); }
-.file-manager-header > button.active::after { content: attr(data-direction); margin-left: 5px; color: var(--accent); font-size: 9px; text-transform: uppercase; }
+.file-manager-header > button.active::after { content: attr(data-direction); margin-left: 5px; color: var(--accent); font-size: 14px; font-weight: 800; line-height: 1; }
 .file-manager-list { min-height: 100%; }
 .file-manager-entry { min-height: 38px; border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); color: var(--muted); font-size: 12px; user-select: none; touch-action: manipulation; }
 .file-manager-entry:hover { background: var(--hover-fill); }
