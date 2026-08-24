@@ -29,7 +29,7 @@ use crate::{
         CHAT_ACTIVITY_TOOL_NAMES, CHAT_HIDDEN_TOOL_NAMES, CHAT_HIDDEN_TOOL_PREFIXES, UiBackend,
         UiCommand, UiCommandGateway, UiCommandReceipt, UiModelOption, UiSnapshot,
     },
-    web_auth::{WebSessionAuth, port_scoped_cookie_name},
+    web_auth::WebSessionAuth,
     workspace::AgentId,
 };
 
@@ -275,10 +275,7 @@ fn start_with_server(
     )?);
     session_terminals.reconcile(initial.agent_ids())?;
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
-    let auth = Arc::new(WebSessionAuth::new(
-        port_scoped_cookie_name(SESSION_COOKIE_PREFIX, port),
-        passkey,
-    )?);
+    let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
@@ -770,7 +767,7 @@ fn route(
         (&Method::Post, "/api/auth/login") => return login_response(request, auth),
         _ => {}
     }
-    if !auth.authorized(request_cookie(request, auth.cookie_name())) {
+    if !auth.authorized_any(request_session_tokens(request, auth.cookie_prefix())) {
         return Ok(unauthorized_response());
     }
     operational_route(
@@ -1814,6 +1811,8 @@ fn query_value<'a>(query: Option<&'a str>, key: &str) -> Option<&'a str> {
 #[derive(Deserialize)]
 struct LoginRequest {
     password: String,
+    #[serde(default)]
+    browser_port: Option<u16>,
 }
 
 fn auth_status_response(request: &Request, auth: &WebSessionAuth) -> Result<HttpResponse> {
@@ -1822,7 +1821,10 @@ fn auth_status_response(request: &Request, auth: &WebSessionAuth) -> Result<Http
         &json!({
             "ok": true,
             "required": auth.required(),
-            "authenticated": auth.authorized(request_cookie(request, auth.cookie_name())),
+            "authenticated": auth.authorized_any(request_session_tokens(
+                request,
+                auth.cookie_prefix(),
+            )),
         }),
     ))
 }
@@ -1872,6 +1874,16 @@ fn login_response(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpRe
             ));
         }
     };
+    let cookie_name = match login.browser_port {
+        Some(0) => {
+            return Ok(json_response(
+                StatusCode(400),
+                &json!({"ok": false, "error": "browser_port must be nonzero"}),
+            ));
+        }
+        Some(port) => auth.cookie_name_for_port(port),
+        None => auth.cookie_name().to_owned(),
+    };
     let Some(token) = auth.login(&login.password)? else {
         return Ok(json_response(
             StatusCode(401),
@@ -1880,19 +1892,26 @@ fn login_response(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpRe
     };
     Ok(
         json_response(StatusCode(200), &json!({"ok": true, "authenticated": true}))
-            .with_header(session_cookie(auth.cookie_name(), &token)),
+            .with_header(session_cookie(&cookie_name, &token)),
     )
 }
 
-fn request_cookie<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+fn request_session_tokens<'a>(
+    request: &'a Request,
+    prefix: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
     request
         .headers()
         .iter()
         .filter(|header| header.field.equiv("Cookie"))
         .flat_map(|header| header.value.as_str().split(';'))
-        .find_map(|cookie| {
+        .filter_map(move |cookie| {
             let (candidate, value) = cookie.trim().split_once('=')?;
-            (candidate == name).then_some(value)
+            let port = candidate.strip_prefix(prefix)?.strip_prefix("_p")?;
+            port.parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .map(|_| value)
         })
 }
 
@@ -3730,7 +3749,7 @@ mod tests {
     }
 
     #[test]
-    fn same_host_direct_webuis_keep_port_scoped_sessions_simultaneously() {
+    fn same_host_direct_webuis_use_browser_ports_and_keep_sessions_simultaneously() {
         let start_instance = || {
             let directory = workspace();
             let workspace = Workspace::open(
@@ -3756,10 +3775,13 @@ mod tests {
         assert_ne!(first_server.port(), second_server.port());
 
         let client = reqwest::blocking::Client::new();
-        let login = |address: &str| {
+        let login = |address: &str, browser_port: u16| {
             client
                 .post(format!("{address}/api/auth/login"))
-                .json(&json!({"password": "correct horse"}))
+                .json(&json!({
+                    "password": "correct horse",
+                    "browser_port": browser_port,
+                }))
                 .send()
                 .unwrap()
                 .error_for_status()
@@ -3774,14 +3796,36 @@ mod tests {
                 .unwrap()
                 .to_owned()
         };
-        let first_cookie = login(&first_address);
-        let second_cookie = login(&second_address);
-        assert!(first_cookie.starts_with(&format!("me_webui_session_p{}=", first_server.port())));
-        assert!(second_cookie.starts_with(&format!("me_webui_session_p{}=", second_server.port())));
+        let first_cookie = login(&first_address, 80);
+        let second_cookie = login(&second_address, 443);
+        assert!(first_cookie.starts_with("me_webui_session_p80="));
+        assert!(second_cookie.starts_with("me_webui_session_p443="));
         assert_ne!(
             first_cookie.split_once('=').unwrap().0,
             second_cookie.split_once('=').unwrap().0
         );
+
+        let first_token = first_cookie.split_once('=').unwrap().1;
+        for invalid_name in [
+            "me_webui_session",
+            "me_webui_session_p0",
+            "me_webui_session_p65536",
+            "me_gateway_session_p80",
+        ] {
+            let status: serde_json::Value = client
+                .get(format!("{first_address}/api/auth/status"))
+                .header(
+                    reqwest::header::COOKIE,
+                    format!("{invalid_name}={first_token}"),
+                )
+                .send()
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap();
+            assert_eq!(status["authenticated"], false);
+        }
 
         let browser_cookies = format!("{first_cookie}; {second_cookie}");
         for address in [&first_address, &second_address] {

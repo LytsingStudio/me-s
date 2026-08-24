@@ -12,12 +12,15 @@ const CONNECTION_STABILIZE_SUCCESSES = 2;
 const INPUT_ANIMATION_QUIET_MS = 250;
 const UI_ANIMATION_INTERVAL_MS = 100;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
-function portScopedCookieName(prefix, locationValue = document.location) {
+function browserPort(locationValue = document.location) {
   const explicitPort = String(locationValue?.port || "");
   const protocol = String(locationValue?.protocol || "").toLowerCase();
-  const port = explicitPort || (protocol === "https:" ? "443" : "80");
-  return `${prefix}_p${port}`;
+  return Number(explicitPort || (protocol === "https:" ? "443" : "80"));
 }
+function portScopedCookieName(prefix, locationValue = document.location) {
+  return `${prefix}_p${browserPort(locationValue)}`;
+}
+const BROWSER_PORT = browserPort();
 const SEND_SHORTCUT_COOKIE = portScopedCookieName("me_send_shortcut");
 const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
@@ -469,7 +472,10 @@ async function submitLogin(event) {
     await api("/api/auth/login", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ password: elements.loginPassword.value }),
+      body: JSON.stringify({
+        password: elements.loginPassword.value,
+        browser_port: BROWSER_PORT,
+      }),
     });
     elements.loginPassword.value = "";
     state.authenticated = true;

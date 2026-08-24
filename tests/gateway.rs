@@ -125,9 +125,17 @@ fn client() -> reqwest::blocking::Client {
 }
 
 fn login(address: &str) -> String {
+    let browser_port = address.rsplit(':').next().unwrap().parse().unwrap();
+    login_from_browser_port(address, browser_port)
+}
+
+fn login_from_browser_port(address: &str, browser_port: u16) -> String {
     let response = client()
         .post(format!("{address}/api/auth/login"))
-        .json(&serde_json::json!({"password": "secret"}))
+        .json(&serde_json::json!({
+            "password": "secret",
+            "browser_port": browser_port,
+        }))
         .send()
         .unwrap();
     assert!(response.status().is_success());
@@ -188,23 +196,43 @@ fn stop_gateway(child: &mut Child) {
 }
 
 #[test]
-fn same_host_gateways_keep_port_scoped_sessions_simultaneously() {
+fn same_host_gateways_use_browser_ports_and_keep_sessions_simultaneously() {
     let (_first_temporary, first_root, first_config_home) = prepare(true);
     let (_second_temporary, second_root, second_config_home) = prepare(true);
     let (mut first_gateway, first_address) = spawn_gateway(&first_root, &first_config_home);
     let (mut second_gateway, second_address) = spawn_gateway(&second_root, &second_config_home);
     assert_ne!(first_address, second_address);
 
-    let first_cookie = login(&first_address);
-    let second_cookie = login(&second_address);
-    let first_port = first_address.rsplit(':').next().unwrap();
-    let second_port = second_address.rsplit(':').next().unwrap();
-    assert!(first_cookie.starts_with(&format!("me_gateway_session_p{first_port}=")));
-    assert!(second_cookie.starts_with(&format!("me_gateway_session_p{second_port}=")));
+    let first_cookie = login_from_browser_port(&first_address, 80);
+    let second_cookie = login_from_browser_port(&second_address, 443);
+    assert!(first_cookie.starts_with("me_gateway_session_p80="));
+    assert!(second_cookie.starts_with("me_gateway_session_p443="));
     assert_ne!(
         first_cookie.split_once('=').unwrap().0,
         second_cookie.split_once('=').unwrap().0
     );
+
+    let first_token = first_cookie.split_once('=').unwrap().1;
+    for invalid_name in [
+        "me_gateway_session",
+        "me_gateway_session_p0",
+        "me_gateway_session_p65536",
+        "me_webui_session_p80",
+    ] {
+        let status: serde_json::Value = client()
+            .get(format!("{first_address}/api/auth/status"))
+            .header(
+                reqwest::header::COOKIE,
+                format!("{invalid_name}={first_token}"),
+            )
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(status["authenticated"], false);
+    }
 
     let browser_cookies = format!("{first_cookie}; {second_cookie}");
     for address in [&first_address, &second_address] {

@@ -51,6 +51,36 @@ function loadShowLogin(relative) {
   return { showLogin, state, elements, counters };
 }
 
+function loadSubmitLogin(relative, browserPort = 45182) {
+  const source = readFileSync(join(import.meta.dir, relative), "utf8");
+  const start = source.indexOf("async function submitLogin(event)");
+  const end = source.indexOf("\nfunction setConnectionPhase", start);
+  if (start < 0 || end < 0) throw new Error(`could not isolate submitLogin from ${relative}`);
+
+  const calls = [];
+  const elements = {
+    loginSubmit: { disabled: false },
+    loginError: { textContent: "" },
+    loginPassword: { value: "correct horse", select() {} },
+  };
+  const factory = new Function(
+    "BROWSER_PORT", "elements", "api", "showApplication", "restoreDraft",
+    "startHttpPolling", "initializeGateway", "showLogin",
+    `${source.slice(start, end)}\nreturn submitLogin;`,
+  );
+  const submitLogin = factory(
+    browserPort,
+    elements,
+    async (path, options) => { calls.push({ path, options }); return {}; },
+    () => {},
+    () => {},
+    () => {},
+    async () => {},
+    () => {},
+  );
+  return { submitLogin, elements, calls };
+}
+
 describe("WebUI login transition", () => {
   for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
     test(`${relative} makes repeated 401 login transitions idempotent`, () => {
@@ -77,6 +107,21 @@ describe("WebUI login transition", () => {
       expect(runtime.counters.phase).toBe(1);
       expect(runtime.counters.overlay).toBe(1);
       expect(runtime.counters.focus).toBe(1);
+    });
+  }
+
+  for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    test(`${relative} submits the browser-visible port with the passkey`, async () => {
+      const runtime = loadSubmitLogin(relative);
+      await runtime.submitLogin({ preventDefault() {} });
+      expect(runtime.calls).toHaveLength(1);
+      expect(runtime.calls[0].path).toBe("/api/auth/login");
+      expect(JSON.parse(runtime.calls[0].options.body)).toEqual({
+        password: "correct horse",
+        browser_port: 45182,
+      });
+      expect(runtime.elements.loginPassword.value).toBe("");
+      expect(runtime.elements.loginSubmit.disabled).toBe(false);
     });
   }
 });

@@ -10,8 +10,8 @@ function loadSendShortcutRuntime(cookie = "", location = { protocol: "http:", po
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI send shortcut runtime");
   const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
-    return { state, portScopedCookieName, SEND_SHORTCUT_COOKIE, readSendShortcutCookie,
-      sendShortcutHint, sendShortcutPressed };`);
+    return { state, browserPort, BROWSER_PORT, portScopedCookieName, SEND_SHORTCUT_COOKIE,
+      readSendShortcutCookie, sendShortcutHint, sendShortcutPressed };`);
   const input = { value: "", style: {}, scrollHeight: 0 };
   return factory(
     { cookie, location, querySelector: (selector) => selector === "#prompt-input" ? input : null },
@@ -54,6 +54,9 @@ describe("WebUI port-local send shortcut preference", () => {
       .toBe("me_send_shortcut_p80");
     expect(runtime.portScopedCookieName("me_send_shortcut", { protocol: "https:", port: "" }))
       .toBe("me_send_shortcut_p443");
+    expect(runtime.BROWSER_PORT).toBe(38199);
+    expect(runtime.browserPort({ protocol: "http:", port: "" })).toBe(80);
+    expect(runtime.browserPort({ protocol: "https:", port: "" })).toBe(443);
   });
 
   test("the cookie can make plain Enter submit and modifiers multiline", () => {

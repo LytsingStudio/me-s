@@ -17,7 +17,7 @@ use crate::{
     Result,
     gateway::{Gateway, OpenWorkspaceOutcome},
     gateway_settings::GatewaySettings,
-    web_auth::{WebSessionAuth, port_scoped_cookie_name},
+    web_auth::WebSessionAuth,
 };
 
 pub const DEFAULT_GATEWAY_PORT: u16 = 38200;
@@ -92,10 +92,7 @@ fn start_from(
 ) -> Result<GatewayWebUiServer> {
     let (server, port) = bind_first_available(first_port)?;
     let address = format!("http://{GATEWAY_BIND_ADDRESS}:{port}");
-    let auth = Arc::new(WebSessionAuth::new(
-        port_scoped_cookie_name(SESSION_COOKIE_PREFIX, port),
-        passkey,
-    )?);
+    let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let worker = thread::Builder::new()
@@ -239,7 +236,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         (&Method::Post, "/api/auth/login") => return login(request, auth),
         _ => {}
     }
-    if !auth.authorized(request_cookie(request, auth.cookie_name())) {
+    if !auth.authorized_any(request_session_tokens(request, auth.cookie_prefix())) {
         return Ok(json_response(
             StatusCode(401),
             &json!({"ok": false, "error": "需要登录"}),
@@ -415,6 +412,8 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
 #[derive(Deserialize)]
 struct LoginRequest {
     password: String,
+    #[serde(default)]
+    browser_port: Option<u16>,
 }
 
 #[derive(Deserialize)]
@@ -455,7 +454,10 @@ fn auth_status(request: &Request, auth: &WebSessionAuth) -> Result<HttpResponse>
         &json!({
             "ok": true,
             "required": auth.required(),
-            "authenticated": auth.authorized(request_cookie(request, auth.cookie_name())),
+            "authenticated": auth.authorized_any(request_session_tokens(
+                request,
+                auth.cookie_prefix(),
+            )),
         }),
     ))
 }
@@ -468,6 +470,16 @@ fn login(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpResponse> {
         ));
     }
     let login: LoginRequest = read_json(request, MAX_LOGIN_BYTES)?;
+    let cookie_name = match login.browser_port {
+        Some(0) => {
+            return Ok(json_response(
+                StatusCode(400),
+                &json!({"ok": false, "error": "browser_port must be nonzero"}),
+            ));
+        }
+        Some(port) => auth.cookie_name_for_port(port),
+        None => auth.cookie_name().to_owned(),
+    };
     let Some(token) = auth.login(&login.password)? else {
         return Ok(json_response(
             StatusCode(401),
@@ -476,7 +488,7 @@ fn login(request: &mut Request, auth: &WebSessionAuth) -> Result<HttpResponse> {
     };
     Ok(
         json_response(StatusCode(200), &json!({"ok": true, "authenticated": true}))
-            .with_header(session_cookie(auth.cookie_name(), &token)),
+            .with_header(session_cookie(&cookie_name, &token)),
     )
 }
 
@@ -521,15 +533,22 @@ fn workspace_proxy_path(path: &str) -> Option<(&str, &str)> {
     (!workspace_id.is_empty() && !child_path.is_empty()).then_some((workspace_id, child_path))
 }
 
-fn request_cookie<'a>(request: &'a Request, name: &str) -> Option<&'a str> {
+fn request_session_tokens<'a>(
+    request: &'a Request,
+    prefix: &'a str,
+) -> impl Iterator<Item = &'a str> + 'a {
     request
         .headers()
         .iter()
         .filter(|header| header.field.equiv("Cookie"))
         .flat_map(|header| header.value.as_str().split(';'))
-        .find_map(|cookie| {
+        .filter_map(move |cookie| {
             let (candidate, value) = cookie.trim().split_once('=')?;
-            (candidate == name).then_some(value)
+            let port = candidate.strip_prefix(prefix)?.strip_prefix("_p")?;
+            port.parse::<u16>()
+                .ok()
+                .filter(|port| *port != 0)
+                .map(|_| value)
         })
 }
 
