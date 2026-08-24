@@ -69,7 +69,21 @@ describe("per-session host file manager", () => {
     expect(controller).toContain("TOUCH_TAP_MOVE_PX = 12");
     expect(controller).toContain("gesture.moved || Math.hypot");
     expect(controller).toContain("this.suppressTouchClickPath = gesture.path");
-    for (const action of ["select-all", "mkdir", "rename", "copy", "cut", "paste", "move", "upload", "download", "delete"]) {
+    expect(controller).toContain('this.container.addEventListener("dblclick"');
+    expect(controller).toContain('if (row?.dataset.navigable === "true") void this.navigate(row.dataset.path, false);');
+    const selectStart = controller.indexOf("    selectRow(path, event) {");
+    const selectEnd = controller.indexOf("\n    togglePath(path, checked)", selectStart);
+    const selectionPath = controller.slice(selectStart, selectEnd);
+    expect(selectionPath).toContain("this.renderSelection();");
+    expect(selectionPath).not.toContain("this.render();");
+    expect(controller).toContain('this.list.querySelectorAll(".file-manager-entry").forEach((row) => {');
+    expect(controller).toContain('row.classList.toggle("selected", rowSelected);');
+    const directoryClickStart = gatewayApp.indexOf('row.addEventListener("click", () => {');
+    const directoryClickEnd = gatewayApp.indexOf('\n    row.addEventListener("dblclick"', directoryClickStart);
+    const directoryClick = gatewayApp.slice(directoryClickStart, directoryClickEnd);
+    expect(directoryClick).toContain("updateDirectorySelection(directory, list, allEntries);");
+    expect(directoryClick).not.toContain("renderDirectoryRows();");
+    for (const action of ["select-all", "mkdir", "rename", "copy-path", "copy", "cut", "paste", "move", "upload", "download", "delete"]) {
       expect(controller).toContain(`actionButton("${action}",`);
     }
     for (const style of [directStyle, gatewayStyle]) {
@@ -95,6 +109,14 @@ describe("per-session host file manager", () => {
     expect(controller).toContain("event.shiftKey");
     expect(controller).toContain("event.metaKey || event.ctrlKey");
     expect(controller).toContain('clipboard = { mode: action === "copy" ? "copy" : "move", sources: this.selectedPaths() }');
+    expect(controller).toContain('actionButton("copy-path", "复制绝对路径")');
+    expect(controller).toContain('this.setDisabled("copy-path", selected === 0 || this.state.loading);');
+    expect(controller).toContain('if (action === "copy-path") return this.copySelectedPaths();');
+    expect(controller).toContain('await this.writeClipboard(paths.join(";"));');
+    expect(controller).toContain('paths.length === 1 ? "已复制绝对路径" : `已复制 ${paths.length} 个绝对路径`');
+    for (const app of [directApp, gatewayApp]) {
+      expect(app).toContain("writeClipboard: copyTextToClipboard");
+    }
     expect(controller).toContain("const UPLOAD_CHUNK_BYTES = 384 * 1024");
     expect(controller).toContain('this.call("/api/files/uploads/create"');
     expect(controller).toContain('this.call("/api/files/uploads/chunk"');

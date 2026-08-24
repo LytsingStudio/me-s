@@ -16,6 +16,7 @@
       this.container = options.container;
       this.request = options.request;
       this.downloadUrl = options.downloadUrl;
+      this.writeClipboard = options.writeClipboard;
       this.onUnauthorized = options.onUnauthorized || (() => {});
       this.notify = options.notify || (() => {});
       this.states = new Map();
@@ -86,6 +87,7 @@
             ${actionButton("select-all", "全选")}
             ${actionButton("mkdir", "新建文件夹")}
             ${actionButton("rename", "重命名")}
+            ${actionButton("copy-path", "复制绝对路径")}
             ${actionButton("copy", "复制")}
             ${actionButton("cut", "剪切")}
             ${actionButton("paste", "粘贴")}
@@ -317,6 +319,13 @@
       this.pathInput.value = this.state.roots ? "可用位置" : (this.state.path || "");
       this.pathInput.disabled = this.state.loading || this.state.roots;
       this.searchInput.value = this.state.search;
+      this.renderList();
+      this.renderSelection();
+      this.renderTask();
+    }
+
+    renderSelection() {
+      if (!this.state) return;
       const selected = this.state.selection.size;
       const clipboard = this.state.clipboard;
       this.selectionLabel.textContent = [
@@ -330,6 +339,7 @@
       this.setDisabled("select-all", !this.visibleEntries().length || this.state.loading);
       this.setDisabled("mkdir", !hasDirectory || this.state.loading);
       this.setDisabled("rename", selected !== 1 || this.state.loading);
+      this.setDisabled("copy-path", selected === 0 || this.state.loading);
       this.setDisabled("copy", selected === 0 || this.state.loading);
       this.setDisabled("cut", selected === 0 || this.state.loading);
       this.setDisabled("paste", !hasDirectory || !clipboard || this.state.loading);
@@ -337,8 +347,13 @@
       this.setDisabled("upload", !hasDirectory || this.state.loading);
       this.setDisabled("download", selected === 0 || this.state.loading);
       this.setDisabled("delete", selected === 0 || this.state.loading);
-      this.renderList();
-      this.renderTask();
+      this.list.querySelectorAll(".file-manager-entry").forEach((row) => {
+        const rowSelected = this.state.selection.has(row.dataset.path);
+        row.classList.toggle("selected", rowSelected);
+        row.setAttribute("aria-selected", String(rowSelected));
+        const checkbox = row.querySelector('input[type="checkbox"]');
+        if (checkbox) checkbox.checked = rowSelected;
+      });
     }
 
     renderList() {
@@ -424,14 +439,14 @@
         this.state.selection.add(path);
         this.state.anchor = path;
       }
-      this.render();
+      this.renderSelection();
     }
 
     togglePath(path, checked) {
       if (checked) this.state.selection.add(path);
       else this.state.selection.delete(path);
       this.state.anchor = path;
-      this.render();
+      this.renderSelection();
     }
 
     changeSort(key) {
@@ -456,14 +471,15 @@
         const entries = this.visibleEntries();
         const allSelected = entries.length && entries.every((entry) => this.state.selection.has(entry.path));
         entries.forEach((entry) => allSelected ? this.state.selection.delete(entry.path) : this.state.selection.add(entry.path));
-        return this.render();
+        return this.renderSelection();
       }
       if (action === "mkdir") return this.mkdir();
       if (action === "rename") return this.rename();
+      if (action === "copy-path") return this.copySelectedPaths();
       if (action === "copy" || action === "cut") {
         this.state.clipboard = { mode: action === "copy" ? "copy" : "move", sources: this.selectedPaths() };
         this.notify(action === "copy" ? "已复制到文件剪贴板" : "已剪切到文件剪贴板");
-        return this.render();
+        return this.renderSelection();
       }
       if (action === "paste") return this.startJob(this.state.clipboard.mode, this.state.clipboard.sources, this.state.path);
       if (action === "move") return this.moveSelected();
@@ -472,6 +488,18 @@
       if (action === "download") return this.downloadSelected();
       if (action === "cancel-task") return this.cancelTask();
     }
+
+    async copySelectedPaths() {
+      const paths = this.selectedPaths();
+      if (!paths.length) return;
+      try {
+        await this.writeClipboard(paths.join(";"));
+        this.notify(paths.length === 1 ? "已复制绝对路径" : `已复制 ${paths.length} 个绝对路径`);
+      } catch (error) {
+        this.notify(error.message, "error");
+      }
+    }
+
 
     async mkdir() {
       const view = this.state;
@@ -738,6 +766,7 @@
       mkdir: '<path d="M3 6.5h7l2 2h9v10H3zM15 12v5M12.5 14.5h5"/>',
       rename: '<path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20ZM13.8 7.2l3 3"/>',
       copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
+      "copy-path": '<path d="M10 13a4 4 0 0 0 5.7 0l2-2a4 4 0 0 0-5.7-5.7l-1 1M14 11a4 4 0 0 0-5.7 0l-2 2A4 4 0 0 0 12 18.7l1-1"/>',
       cut: '<circle cx="6" cy="7" r="3"/><circle cx="6" cy="17" r="3"/><path d="m8.5 8.5 10 7M8.5 15.5l10-7"/>',
       paste: '<path d="M9 5H6v16h12V5h-3M9 3h6v4H9z"/>',
       move: '<path d="M3 7h7l2 2h9v10H3zM8 14h8M13 11l3 3-3 3"/>',

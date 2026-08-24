@@ -3,6 +3,8 @@
 const HTTP_SYNC_ACTIVE_MS = 250;
 const HTTP_SYNC_IDLE_MS = 1000;
 const HTTP_SYNC_TIMEOUT_MS = 15000;
+const BACKGROUND_SYNC_IDLE_MS = 5000;
+const BACKGROUND_SYNC_RETRY_MAX_MS = 30000;
 const EVENT_RECOVERY_THRESHOLD = 100;
 const RECONNECT_MAX_MS = 5000;
 const DRAFT_BATCH_MS = 80;
@@ -15,6 +17,7 @@ const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
 const SEND_SHORTCUT_COOKIE = "me_send_shortcut";
 const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
+const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";
 const API_ACTIVE = new Set(["Requesting", "Streaming", "Retrying"]);
 const API_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
@@ -37,7 +40,12 @@ const state = {
   gatewayRefreshInFlight: false,
   lastNoticeId: 0,
   workspaceMenu: null,
-  expandedWorkspaces: new Set(),
+  workspaceDisclosure: readWorkspaceDisclosure(),
+  backgroundSyncTimer: null,
+  backgroundSyncDueAt: null,
+  backgroundSyncOperation: null,
+  backgroundSyncCursor: 0,
+  activeCatchUpPending: true,
   snapshot: {
     revision: 0, environment: null, agents: [], models: [], orchestrators: [], default_orchestrator: null,
     tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] },
@@ -251,6 +259,7 @@ function getFileManagerController() {
       request: (path, options, identity) => api(path, options, identity.workspaceId),
       downloadUrl: (downloadId, identity) => scopedApiPath(`/api/files/downloads/${encodeURIComponent(downloadId)}/content`, identity.workspaceId),
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+      writeClipboard: copyTextToClipboard,
       notify: (message, kind) => toast(message, kind === "error"),
     });
   }
@@ -311,6 +320,66 @@ function sendShortcutPressed(event, mode) {
     ? !event.shiftKey && !event.altKey
     : event.shiftKey || event.altKey;
 }
+
+function browserLocalStorage() {
+  try { return globalThis.localStorage || null; } catch (_) { return null; }
+}
+
+function readWorkspaceDisclosure(storage = browserLocalStorage()) {
+  try {
+    const raw = storage?.getItem(WORKSPACE_DISCLOSURE_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(Object.entries(parsed).filter(([workspaceId, expanded]) =>
+      workspaceId && typeof expanded === "boolean"));
+  } catch (_) {
+    return new Map();
+  }
+}
+
+function persistWorkspaceDisclosure(disclosure, storage = browserLocalStorage()) {
+  try {
+    if (!storage) return false;
+    const entries = [...disclosure]
+      .filter(([workspaceId, expanded]) => workspaceId && typeof expanded === "boolean")
+      .sort(([left], [right]) => String(left).localeCompare(String(right)));
+    if (!entries.length) {
+      storage.removeItem(WORKSPACE_DISCLOSURE_STORAGE_KEY);
+      return true;
+    }
+    const serialized = {};
+    for (const [workspaceId, expanded] of entries) serialized[workspaceId] = expanded;
+    storage.setItem(WORKSPACE_DISCLOSURE_STORAGE_KEY, JSON.stringify(serialized));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function workspaceExpanded(workspaceId, disclosure = state.workspaceDisclosure) {
+  return disclosure.get(String(workspaceId)) !== false;
+}
+
+function setWorkspaceExpanded(workspaceId, expanded, disclosure = state.workspaceDisclosure, storage = browserLocalStorage()) {
+  const normalized = String(workspaceId || "");
+  if (!normalized) return false;
+  disclosure.set(normalized, Boolean(expanded));
+  persistWorkspaceDisclosure(disclosure, storage);
+  return true;
+}
+
+function pruneWorkspaceDisclosure(validWorkspaceIds, disclosure = state.workspaceDisclosure, storage = browserLocalStorage()) {
+  let changed = false;
+  for (const workspaceId of disclosure.keys()) {
+    if (validWorkspaceIds.has(workspaceId)) continue;
+    disclosure.delete(workspaceId);
+    changed = true;
+  }
+  if (changed) persistWorkspaceDisclosure(disclosure, storage);
+  return changed;
+}
+
 
 function agentMeta() {
   return state.snapshot.agents.find((agent) => agent.id === state.selectedAgent) || null;
@@ -377,8 +446,8 @@ async function hydrateEdbCache(snapshot) {
   renderConnectionOverlayForPhase();
 }
 
-function persistAgentEdb(meta, store, replace = false) {
-  const scope = edbCacheScope();
+function persistWorkspaceAgentEdb(snapshot, meta, store, replace = false) {
+  const scope = edbCacheScope(snapshot);
   if (!scope || !store) return;
   edbCache.saveSession({
     scope,
@@ -388,6 +457,10 @@ function persistAgentEdb(meta, store, replace = false) {
     events: store.events,
     replace,
   });
+}
+
+function persistAgentEdb(meta, store, replace = false) {
+  persistWorkspaceAgentEdb(state.snapshot, meta, store, replace);
 }
 
 function currentStore() {
@@ -465,7 +538,8 @@ function emptyGatewayWorkspaceState() {
     terminalRevisions: new Map(), terminalFollowBottom: true, expandedTools: new Set(),
     expandedHistoryObjectives: new Set(), workerActivityIndexes: new Map(),
     terminalFrames: new Map(), terminalFramesUnavailable: new Set(), snapshotInitialized: false,
-    edbCacheInitialized: false,
+    edbCacheInitialized: false, cacheValidated: false, catchUpPending: true,
+    backgroundNextSyncAt: 0, backgroundFailures: 0,
     scrollTop: 0, followBottom: true,
   };
 }
@@ -490,7 +564,8 @@ function captureActiveWorkspace() {
     expandedTools: state.expandedTools, expandedHistoryObjectives: state.expandedHistoryObjectives,
     workerActivityIndexes: state.workerActivityIndexes, terminalFrames: state.terminalFrames,
     terminalFramesUnavailable: state.terminalFramesUnavailable, snapshotInitialized: state.snapshotInitialized,
-    edbCacheInitialized: state.edbCacheInitialized,
+    edbCacheInitialized: state.edbCacheInitialized, catchUpPending: state.activeCatchUpPending,
+    backgroundNextSyncAt: 0,
     scrollTop: elements.transcript.scrollTop, followBottom: transcriptBottomFollower.isFollowing(),
   });
   for (const sync of workspace.draftSync.values()) {
@@ -505,6 +580,7 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
     if (preferredAgent) selectAgent(preferredAgent);
     return;
   }
+  cancelBackgroundWorkspaceSync();
   deactivateSessionTerminalView();
   stopHttpPolling();
   saveDraft();
@@ -537,6 +613,7 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   state.terminalFramesUnavailable = workspace.terminalFramesUnavailable;
   state.snapshotInitialized = workspace.snapshotInitialized;
   state.edbCacheInitialized = workspace.edbCacheInitialized;
+  state.activeCatchUpPending = !workspace.edbCacheInitialized || workspace.catchUpPending;
   const selectedMeta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
   prepareSelectedEventRecovery(selectedMeta, null, true);
   resetConnectionForInitialSync();
@@ -552,29 +629,316 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   });
   persistGatewaySelection(workspaceId, state.selectedAgent);
   if (beginPolling) startHttpPolling();
+  scheduleBackgroundWorkspaceSync(0);
 }
 
-async function refreshWorkspaceSummaries() {
-  await Promise.all((state.gateway.workspaces || []).map(async (workspace) => {
-    if (workspace.id === state.workspaceId && state.snapshotInitialized) return;
-    try {
-      const payload = await api(`/api/workspaces/${encodeURIComponent(workspace.id)}/snapshot`);
-      const summary = { ...payload };
-      delete summary.ok;
-      gatewayWorkspaceState(workspace.id).snapshot = summary;
-    } catch (_) {}
-  }));
+function backgroundSyncProgressSignature(workspace) {
+  return JSON.stringify({
+    snapshotRevision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
+    agents: [...workspace.stores]
+      .map(([id, store]) => [id, store.events.length, store.mutationRevision])
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+  });
+}
+
+function backgroundSyncRequestBody(workspace) {
+  return {
+    snapshot_revision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
+    agents: [...workspace.stores].map(([id, store]) => ({
+      id,
+      event_count: store.events.length,
+      mutation_revision: store.mutationRevision,
+      cursor_event_hash: workspace.cacheValidated ? null : store.lastEventHash ?? null,
+    })),
+    cache_metadata_only: !workspace.edbCacheInitialized,
+    selected_agent: null,
+    terminal_session: null,
+    terminal_revision: null,
+  };
+}
+
+function backgroundSyncCanRun() {
+  return !state.pageClosing
+    && (!state.authRequired || state.authenticated)
+    && state.connectionPhase === "connected"
+    && !state.activeCatchUpPending;
+}
+
+function backgroundSyncOperationCurrent(operation) {
+  return state.backgroundSyncOperation === operation
+    && !state.pageClosing
+    && state.workspaceId !== operation.workspaceId
+    && state.workspaceStates.get(operation.workspaceId) === operation.workspace;
+}
+
+function cancelBackgroundWorkspaceSync(workspaceId = null) {
+  if (workspaceId === null) {
+    clearTimeout(state.backgroundSyncTimer);
+    state.backgroundSyncTimer = null;
+    state.backgroundSyncDueAt = null;
+  }
+  const operation = state.backgroundSyncOperation;
+  if (!operation || (workspaceId !== null && operation.workspaceId !== workspaceId)) return;
+  state.backgroundSyncOperation = null;
+  operation.controller?.abort();
+}
+
+function scheduleBackgroundWorkspaceSync(delay = 0) {
+  if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
+  const dueAt = Date.now() + Math.max(0, Number(delay) || 0);
+  if (state.backgroundSyncTimer !== null && state.backgroundSyncDueAt <= dueAt) return;
+  clearTimeout(state.backgroundSyncTimer);
+  state.backgroundSyncDueAt = dueAt;
+  state.backgroundSyncTimer = setTimeout(() => {
+    state.backgroundSyncTimer = null;
+    state.backgroundSyncDueAt = null;
+    void requestBackgroundWorkspaceSync();
+  }, Math.max(0, dueAt - Date.now()));
+}
+
+function nextBackgroundWorkspace(now = Date.now()) {
+  const ids = (state.gateway.workspaces || [])
+    .map((workspace) => workspace.id)
+    .filter((workspaceId) => workspaceId !== state.workspaceId);
+  if (!ids.length) return { workspaceId: null, workspace: null, wait: BACKGROUND_SYNC_IDLE_MS };
+  const start = state.backgroundSyncCursor % ids.length;
+  let earliest = Number.POSITIVE_INFINITY;
+  for (let offset = 0; offset < ids.length; offset += 1) {
+    const index = (start + offset) % ids.length;
+    const workspaceId = ids[index];
+    const workspace = gatewayWorkspaceState(workspaceId);
+    const nextAt = Math.max(0, Number(workspace.backgroundNextSyncAt) || 0);
+    earliest = Math.min(earliest, nextAt);
+    if (nextAt <= now) {
+      state.backgroundSyncCursor = (index + 1) % ids.length;
+      return { workspaceId, workspace, wait: 0 };
+    }
+  }
+  return {
+    workspaceId: null,
+    workspace: null,
+    wait: Math.max(0, Number.isFinite(earliest) ? earliest - now : BACKGROUND_SYNC_IDLE_MS),
+  };
+}
+
+function observeBackgroundInputDraft(workspace, meta, store) {
+  if (store.pendingPromptSubmission) return false;
+  const revision = Number(meta.input_draft_revision || 0);
+  if (revision <= store.inputDraftRevision) return false;
+  const content = String(meta.input_draft || "");
+  const sync = workspace.draftSync.get(meta.id);
+  store.inputDraftRevision = revision;
+  if (sync && (sync.inFlight || sync.desired !== sync.sent)) {
+    sync.sent = content;
+    return false;
+  }
+  workspace.drafts.set(meta.id, content);
+  if (sync) {
+    sync.desired = content;
+    sync.sent = content;
+    sync.pendingRemote = null;
+  }
+  return true;
+}
+
+function reconcileBackgroundAgents(workspace, snapshot) {
+  const ids = new Set((snapshot.agents || []).map((agent) => agent.id));
+  const scope = edbCacheScope(snapshot);
+  let changed = false;
+  for (const id of workspace.stores.keys()) {
+    if (ids.has(id)) continue;
+    if (scope) void edbCache.discardSession(MeEdbCache.sessionKey(scope, id));
+    workspace.stores.delete(id);
+    workspace.drafts.delete(id);
+    clearDraftBatch(workspace.draftSync.get(id));
+    workspace.draftSync.delete(id);
+    workspace.workerActivityIndexes.delete(id);
+    changed = true;
+  }
+  for (const meta of snapshot.agents || []) {
+    let store = workspace.stores.get(meta.id);
+    if (!store) {
+      store = createAgentStore(meta);
+      workspace.stores.set(meta.id, store);
+      workspace.drafts.set(meta.id, String(meta.input_draft || ""));
+      changed = true;
+    } else {
+      observeBackgroundInputDraft(workspace, meta, store);
+      store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
+    }
+  }
+  if (workspace.pendingAgentSelection && ids.has(workspace.pendingAgentSelection)) {
+    workspace.selectedAgent = workspace.pendingAgentSelection;
+    workspace.pendingAgentSelection = null;
+  }
+  if (!workspace.selectedAgent || !ids.has(workspace.selectedAgent)) {
+    workspace.selectedAgent = (snapshot.agents || []).find((agent) => agent.id === "main")?.id
+      || snapshot.agents?.[0]?.id || null;
+  }
+  return changed;
+}
+
+async function hydrateBackgroundEdbCache(operation, snapshot) {
+  if (!snapshot) throw new Error("同步响应未提供缓存元数据");
+  const scope = edbCacheScope(snapshot);
+  const entries = scope ? await edbCache.loadScope(scope) : [];
+  if (!backgroundSyncOperationCurrent(operation)) return false;
+  const workspace = operation.workspace;
+  const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
+  for (const entry of entries) {
+    if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key);
+  }
+  const cachedByAgent = new Map(entries.map((entry) => [entry.agentId, entry]));
+  workspace.snapshot = snapshot;
+  workspace.snapshotInitialized = true;
+  workspace.stores.clear();
+  for (const meta of snapshot.agents || []) {
+    const cached = cachedByAgent.get(meta.id);
+    const valid = Boolean(cached)
+      && cached.mutationRevision === Number(meta.mutation_revision || 0)
+      && cached.events.length <= Number(meta.event_count || 0)
+      && (cached.events.length === 0 || typeof cached.lastEventHash === "string")
+      && (cached.events.length !== Number(meta.event_count || 0)
+        || cached.lastEventHash === (meta.last_event_hash ?? null));
+    if (cached && !valid) void edbCache.discardSession(cached.key);
+    workspace.stores.set(meta.id, createAgentStore(meta, valid ? cached : null));
+    workspace.drafts.set(meta.id, String(meta.input_draft || ""));
+  }
+  workspace.edbCacheInitialized = true;
+  workspace.cacheValidated = false;
+  workspace.catchUpPending = true;
+  reconcileBackgroundAgents(workspace, snapshot);
+  return true;
+}
+
+function syncBackgroundAgentEvents(workspace, meta, payload) {
+  let store = workspace.stores.get(meta.id);
+  let changed = false;
+  if (!store) {
+    store = createAgentStore(meta);
+    workspace.stores.set(meta.id, store);
+    workspace.drafts.set(meta.id, String(meta.input_draft || ""));
+    changed = true;
+  }
+  observeBackgroundInputDraft(workspace, meta, store);
+  store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
+  if (!payload && store.events.length === meta.event_count
+      && store.mutationRevision === meta.mutation_revision) {
+    return { changed, summaryChanged: false };
+  }
+  if (!payload) return { changed, summaryChanged: false };
+  const previousSummary = JSON.stringify(store.summary);
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  if (payload.reset) {
+    store.events = events;
+    store.summary = projectAgentSummary(store.events);
+    store.projectedOrder = 0;
+    store.needsReplay = true;
+    workspace.workerActivityIndexes.delete(meta.id);
+  } else {
+    store.events.push(...events);
+    updateAgentSummary(store.summary, events);
+  }
+  store.mutationRevision = payload.mutation_revision;
+  store.lastEventHash = payload.cursor_event_hash ?? null;
+  if (payload.reset || events.length > 0) {
+    persistWorkspaceAgentEdb(workspace.snapshot, meta, store, Boolean(payload.reset));
+  }
+  return { changed: true, summaryChanged: previousSummary !== JSON.stringify(store.summary) };
+}
+
+function applyBackgroundSyncState(workspace, payload) {
+  const previousSnapshot = workspace.snapshot;
+  if (payload.snapshot) {
+    workspace.snapshot = payload.snapshot;
+    workspace.snapshotInitialized = true;
+  }
+  if (!workspace.snapshotInitialized) throw new Error("同步响应未提供初始状态");
+  const presentationChanged = snapshotPresentationSignature(previousSnapshot)
+    !== snapshotPresentationSignature(workspace.snapshot);
+  const structureChanged = reconcileBackgroundAgents(workspace, workspace.snapshot);
+  const updates = new Map((payload.event_updates || []).map((update) => [update.agent_id, update]));
+  const eventChanges = workspace.snapshot.agents.map((meta) =>
+    syncBackgroundAgentEvents(workspace, meta, updates.get(meta.id)));
+  workspace.cacheValidated = true;
+  return presentationChanged || structureChanged
+    || eventChanges.some((change) => change.changed || change.summaryChanged);
+}
+
+async function requestBackgroundWorkspaceSync() {
+  if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
+  const candidate = nextBackgroundWorkspace();
+  if (!candidate.workspaceId) {
+    scheduleBackgroundWorkspaceSync(candidate.wait);
+    return;
+  }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const operation = {
+    workspaceId: candidate.workspaceId, workspace: candidate.workspace, controller,
+  };
+  state.backgroundSyncOperation = operation;
+  const progressBefore = backgroundSyncProgressSignature(candidate.workspace);
+  const timeout = setTimeout(() => controller?.abort(), HTTP_SYNC_TIMEOUT_MS);
+  let sidebarChanged = false;
+  try {
+    const message = await api("/api/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller?.signal,
+      body: JSON.stringify(backgroundSyncRequestBody(candidate.workspace)),
+    }, candidate.workspaceId);
+    if (!backgroundSyncOperationCurrent(operation)) return;
+    if (message.cache_metadata_only) {
+      if (!await hydrateBackgroundEdbCache(operation, message.snapshot)) return;
+      sidebarChanged = true;
+      candidate.workspace.backgroundFailures = 0;
+      candidate.workspace.backgroundNextSyncAt = 0;
+      candidate.workspace.catchUpPending = true;
+    } else {
+      sidebarChanged = applyBackgroundSyncState(candidate.workspace, message);
+      if (!backgroundSyncOperationCurrent(operation)) return;
+      const madeProgress = progressBefore !== backgroundSyncProgressSignature(candidate.workspace);
+      candidate.workspace.backgroundFailures = 0;
+      candidate.workspace.catchUpPending = Boolean(message.more_events);
+      candidate.workspace.backgroundNextSyncAt = message.more_events && madeProgress
+        ? 0 : Date.now() + (message.more_events ? HTTP_SYNC_ACTIVE_MS : BACKGROUND_SYNC_IDLE_MS);
+    }
+    if (sidebarChanged) renderAgents();
+  } catch (error) {
+    if (!backgroundSyncOperationCurrent(operation)) return;
+    if (error.status === 401) {
+      showLogin("登录已失效，请重新登录");
+      return;
+    }
+    candidate.workspace.backgroundFailures += 1;
+    const retry = Math.min(
+      BACKGROUND_SYNC_RETRY_MAX_MS,
+      HTTP_SYNC_IDLE_MS * (2 ** Math.min(candidate.workspace.backgroundFailures - 1, 5)),
+    );
+    candidate.workspace.backgroundNextSyncAt = Date.now() + retry;
+  } finally {
+    clearTimeout(timeout);
+    if (state.backgroundSyncOperation === operation) {
+      state.backgroundSyncOperation = null;
+      scheduleBackgroundWorkspaceSync(0);
+    }
+  }
 }
 
 function applyGatewaySnapshot(snapshot) {
   state.gateway = snapshot;
   const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
+  for (const workspace of snapshot.workspaces || []) gatewayWorkspaceState(workspace.id);
   for (const notice of snapshot.notices || []) {
     if (Number(notice.id) > state.lastNoticeId) toast(notice.message, true);
     state.lastNoticeId = Math.max(state.lastNoticeId, Number(notice.id) || 0);
   }
   if (state.workspaceId && !ids.has(state.workspaceId)) activateWorkspace("chat");
-  for (const id of state.workspaceStates.keys()) if (!ids.has(id)) state.workspaceStates.delete(id);
+  for (const id of state.workspaceStates.keys()) {
+    if (ids.has(id)) continue;
+    cancelBackgroundWorkspaceSync(id);
+    state.workspaceStates.delete(id);
+  }
   renderAgents();
 }
 
@@ -584,8 +948,7 @@ async function refreshGatewayState() {
   try {
     const snapshot = await api("/api/gateway/state");
     applyGatewaySnapshot(snapshot);
-    await refreshWorkspaceSummaries();
-    renderAgents();
+    scheduleBackgroundWorkspaceSync(0);
   } catch (error) {
     if (error.status === 401) showLogin("登录已失效，请重新登录");
   } finally {
@@ -596,15 +959,16 @@ async function refreshGatewayState() {
 async function initializeGateway() {
   const snapshot = await api("/api/gateway/state");
   applyGatewaySnapshot(snapshot);
-  await refreshWorkspaceSummaries();
   const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
   const workspaceId = ids.has(snapshot.selected_workspace_id) ? snapshot.selected_workspace_id : "chat";
   activateWorkspace(workspaceId, snapshot.selected_agent_id, false);
+  scheduleBackgroundWorkspaceSync(0);
 }
 
 function showLogin(message = "") {
   deactivateSessionTerminalView();
   stopHttpPolling();
+  cancelBackgroundWorkspaceSync();
   state.authenticated = false;
   state.connectionHadSuccess = false;
   state.reconnectAttempt = 0;
@@ -698,6 +1062,7 @@ function cancelActiveHttpSync() {
 
 function resetConnectionForInitialSync() {
   cancelActiveHttpSync();
+  state.activeCatchUpPending = true;
   clearDegradedTimer();
   state.connectionHadSuccess = false;
   state.connectionFailureDetail = "";
@@ -809,6 +1174,9 @@ function enterDegraded(error) {
 function handlePollingFailure(error, { timedOut = false } = {}) {
   const phase = state.connectionPhase;
   cancelActiveHttpSync();
+  if (typeof cancelBackgroundWorkspaceSync === "function") {
+    cancelBackgroundWorkspaceSync();
+  }
   if (state.pageClosing || (state.authRequired && !state.authenticated) || phase === "failed") return;
   if (!timedOut && state.connectionHadSuccess
       && (phase === "connected" || phase === "degraded")) {
@@ -822,6 +1190,9 @@ function failHttpSync(title, error) {
   const detail = error instanceof Error ? error.message : String(error || "未知错误");
   console.error(title, error);
   cancelActiveHttpSync();
+  if (typeof cancelBackgroundWorkspaceSync === "function") {
+    cancelBackgroundWorkspaceSync();
+  }
   clearDegradedTimer();
   state.connectionFailureDetail = detail;
   state.stabilizingSince = null;
@@ -1013,12 +1384,16 @@ async function requestHttpSync() {
     } catch (error) {
       return failHttpSync("无法更新界面", error);
     }
+    state.activeCatchUpPending = Boolean(message.more_events)
+      || (message.selected_agent ?? null) !== state.selectedAgent;
+    if (!state.activeCatchUpPending) scheduleBackgroundWorkspaceSync(0);
     const madeProgress = progressBefore !== httpSyncProgressSignature();
     const delay = state.connectionPhase === "stabilizing"
       || message.more_events || state.apiActivity.active || state.view.kind === "terminal"
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
     scheduleHttpSync(message.more_events && madeProgress ? 0 : delay);
   } catch (error) {
+    state.activeCatchUpPending = true;
     if (generation !== state.syncGeneration || state.pageClosing) return;
     state.syncInFlight = false;
     state.syncController = null;
@@ -2232,9 +2607,7 @@ function renderAgents() {
   const chat = workspaces.find((workspace) => workspace.builtin);
   const external = workspaces.filter((workspace) => !workspace.builtin);
   const externalIds = new Set(external.map((workspace) => workspace.id));
-  for (const workspaceId of state.expandedWorkspaces) {
-    if (!externalIds.has(workspaceId)) state.expandedWorkspaces.delete(workspaceId);
-  }
+  pruneWorkspaceDisclosure(externalIds);
   if (!external.length) {
     if (!elements.workspaceList.querySelector(":scope > .empty-state")) {
       elements.workspaceList.innerHTML = `<div class="empty-state">暂无工作区</div>`;
@@ -2269,7 +2642,7 @@ function createWorkspaceGroup(workspace) {
   const template = document.createElement("template");
   template.innerHTML = `<section class="workspace-group" data-workspace-group="${escapeAttr(workspace.id)}">
     <header class="workspace-row">
-      <button class="workspace-select" type="button" data-workspace-select="${escapeAttr(workspace.id)}" aria-expanded="false">
+      <button class="workspace-select" type="button" data-workspace-select="${escapeAttr(workspace.id)}" aria-expanded="${workspaceExpanded(workspace.id)}">
         <svg class="workspace-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
         <svg class="workspace-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.8 2h9.2l-1.6 8.5H4.4L3.5 7.5Z"/><path d="M4 7.5V5.5h5.2l1.8 2"/></svg>
         <span class="workspace-name"></span>
@@ -2284,8 +2657,7 @@ function createWorkspaceGroup(workspace) {
   group.querySelector("[data-workspace-select]").setAttribute("aria-controls", panelId);
   group.querySelector("[data-workspace-agents]").id = panelId;
   group.querySelector("[data-workspace-select]").addEventListener("click", () => {
-    if (state.expandedWorkspaces.has(workspace.id)) state.expandedWorkspaces.delete(workspace.id);
-    else state.expandedWorkspaces.add(workspace.id);
+    setWorkspaceExpanded(workspace.id, !workspaceExpanded(workspace.id));
     updateWorkspaceGroup(group, workspace);
   });
   group.querySelector("[data-workspace-add]").addEventListener("click", () => {
@@ -2300,7 +2672,7 @@ function createWorkspaceGroup(workspace) {
 }
 
 function updateWorkspaceGroup(group, workspace) {
-  const expanded = state.expandedWorkspaces.has(workspace.id);
+  const expanded = workspaceExpanded(workspace.id);
   group.classList.toggle("expanded", expanded);
   const select = group.querySelector("[data-workspace-select]");
   const add = group.querySelector("[data-workspace-add]");
@@ -3888,6 +4260,20 @@ function renderDirectoryBrowser() {
   else if (directory.mode === "create") workspaceName?.focus();
 }
 
+function updateDirectorySelection(directory, list, allEntries = directory.listing.entries || []) {
+  list.querySelectorAll("[data-directory-entry]").forEach((row) => {
+    const selected = row.dataset.directoryEntry === directory.selectedPath;
+    row.classList.toggle("selected", selected);
+    row.setAttribute("aria-selected", String(selected));
+  });
+  const selectedEntry = allEntries.find((entry) => entry.path === directory.selectedPath);
+  const selectedItem = elements.modalContent.querySelector(".directory-selected-item");
+  if (selectedItem) selectedItem.textContent = selectedEntry
+    ? selectedEntry.kind === "file" ? `已选择“${selectedEntry.name}”（文件仅供查看）` : `已选择“${selectedEntry.name}”（双击进入）`
+    : "双击文件夹进入；文件仅供查看。";
+}
+
+
 function renderDirectoryRows() {
   const directory = state.modal?.directory;
   const list = elements.modalContent.querySelector(".directory-list");
@@ -3918,16 +4304,12 @@ function renderDirectoryRows() {
   }
   const count = elements.modalContent.querySelector(".directory-count");
   if (count) count.textContent = queryActive ? `${entries.length} / ${allEntries.length} 项` : `${allEntries.length} 项`;
-  const selectedEntry = allEntries.find((entry) => entry.path === directory.selectedPath);
-  const selectedItem = elements.modalContent.querySelector(".directory-selected-item");
-  if (selectedItem) selectedItem.textContent = selectedEntry
-    ? selectedEntry.kind === "file" ? `已选择“${selectedEntry.name}”（文件仅供查看）` : `已选择“${selectedEntry.name}”（双击进入）`
-    : "双击文件夹进入；文件仅供查看。";
+  updateDirectorySelection(directory, list, allEntries);
   list.querySelectorAll("[data-directory-entry]").forEach((row) => {
     row.addEventListener("click", () => {
       directory.selectedPath = row.dataset.directoryEntry;
-      renderDirectoryRows();
-      list.querySelector(`[data-directory-entry="${CSS.escape(directory.selectedPath)}"]`)?.focus();
+      updateDirectorySelection(directory, list, allEntries);
+      row.focus();
     });
     row.addEventListener("dblclick", () => {
       if (row.dataset.entryKind !== "file") void loadDirectoryListing(row.dataset.directoryEntry);
@@ -3939,7 +4321,7 @@ function renderDirectoryRows() {
       } else if (event.key === " ") {
         event.preventDefault();
         directory.selectedPath = row.dataset.directoryEntry;
-        renderDirectoryRows();
+        updateDirectorySelection(directory, list, allEntries);
       }
     });
   });
@@ -4780,6 +5162,7 @@ window.addEventListener("resize", () => {
 });
 window.addEventListener("pagehide", () => {
   state.pageClosing = true;
+  cancelBackgroundWorkspaceSync();
   stopUiAnimation();
   deactivateSessionTerminalView();
   flushDraftBeforePageCloses();
@@ -4788,6 +5171,7 @@ window.addEventListener("pageshow", () => {
   state.pageClosing = false;
   syncUiAnimationScheduler();
   if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
+  scheduleBackgroundWorkspaceSync(0);
   if (state.view.kind === "session-terminal") renderTabs();
 });
 document.addEventListener("visibilitychange", () => {

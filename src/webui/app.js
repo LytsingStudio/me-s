@@ -237,6 +237,7 @@ function getFileManagerController() {
       request: (path, options) => api(path, options),
       downloadUrl: (downloadId) => `/api/files/downloads/${encodeURIComponent(downloadId)}/content`,
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+      writeClipboard: copyTextToClipboard,
       notify: (message, kind) => toast(message, kind === "error"),
     });
   }

@@ -23,6 +23,16 @@ function loadRuntime(relative) {
       eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
       eventRecoveryMatches, selectedEventRecoveryReady, httpSyncProgressSignature, isIosWebKit,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
+      gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
+      backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
+      backgroundSyncCanRun: typeof backgroundSyncCanRun === "function" ? backgroundSyncCanRun : null,
+      nextBackgroundWorkspace: typeof nextBackgroundWorkspace === "function" ? nextBackgroundWorkspace : null,
+      applyBackgroundSyncState: typeof applyBackgroundSyncState === "function" ? applyBackgroundSyncState : null,
+      readWorkspaceDisclosure: typeof readWorkspaceDisclosure === "function" ? readWorkspaceDisclosure : null,
+      persistWorkspaceDisclosure: typeof persistWorkspaceDisclosure === "function" ? persistWorkspaceDisclosure : null,
+      workspaceExpanded: typeof workspaceExpanded === "function" ? workspaceExpanded : null,
+      setWorkspaceExpanded: typeof setWorkspaceExpanded === "function" ? setWorkspaceExpanded : null,
+      pruneWorkspaceDisclosure: typeof pruneWorkspaceDisclosure === "function" ? pruneWorkspaceDisclosure : null,
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
       blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
       modelSettingsHtml: typeof modelSettingsHtml === "function" ? modelSettingsHtml : null,
@@ -390,6 +400,108 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(first.workerActivityIndexes).not.toBe(second.workerActivityIndexes);
   });
 
+  test("background-syncs every inactive Workspace as raw EDB without visible projection work", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    gateway.state.connectionPhase = "connected";
+    gateway.state.activeCatchUpPending = false;
+    expect(gateway.backgroundSyncCanRun()).toBe(true);
+    gateway.state.activeCatchUpPending = true;
+    expect(gateway.backgroundSyncCanRun()).toBe(false);
+    gateway.state.activeCatchUpPending = false;
+
+    const meta = {
+      id: "main", title: "Main", kind: "primary", parent_agent_id: null, orchestrator: "main-agent",
+      event_count: 1, mutation_revision: 0, prompt_submission_revision: 2,
+      input_draft: "remote draft", input_draft_revision: 3,
+    };
+    const snapshot = {
+      revision: 4, environment: { workspace: "/workspace-one" }, agents: [meta],
+      models: [], orchestrators: [], default_orchestrator: null,
+      tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] },
+    };
+    const requestWorkspace = gateway.emptyGatewayWorkspaceState();
+    requestWorkspace.snapshot = snapshot;
+    requestWorkspace.snapshotInitialized = true;
+    requestWorkspace.edbCacheInitialized = true;
+    requestWorkspace.stores.set("main", {
+      events: [], mutationRevision: 0, lastEventHash: "prefix-hash",
+    });
+    const validating = gateway.backgroundSyncRequestBody(requestWorkspace);
+    expect(validating.agents).toEqual([{
+      id: "main", event_count: 0, mutation_revision: 0, cursor_event_hash: "prefix-hash",
+    }]);
+    expect(validating.selected_agent).toBeNull();
+    expect(validating.terminal_session).toBeNull();
+    expect(validating.terminal_revision).toBeNull();
+    requestWorkspace.cacheValidated = true;
+    expect(gateway.backgroundSyncRequestBody(requestWorkspace).agents[0].cursor_event_hash).toBeNull();
+
+    const workspace = gateway.emptyGatewayWorkspaceState();
+    const changed = gateway.applyBackgroundSyncState(workspace, {
+      snapshot,
+      event_updates: [{
+        agent_id: "main", reset: false, mutation_revision: 0, cursor_event_hash: "event-hash",
+        events: [event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" })],
+      }],
+    });
+    expect(changed).toBe(true);
+    expect(workspace.stores.get("main").events).toHaveLength(1);
+    expect(workspace.stores.get("main").summary).toEqual({ turnState: "Started" });
+    expect(workspace.stores.get("main").projection.messages).toEqual([]);
+    expect(workspace.stores.get("main").turnHistory).toBeNull();
+    expect(workspace.drafts.get("main")).toBe("remote draft");
+
+    gateway.state.gateway.workspaces = [{ id: "chat" }, { id: "w-one" }, { id: "w-two" }];
+    gateway.state.workspaceId = "chat";
+    expect(gateway.nextBackgroundWorkspace(10).workspaceId).toBe("w-one");
+    expect(gateway.nextBackgroundWorkspace(10).workspaceId).toBe("w-two");
+
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const applyStart = gatewaySource.indexOf("function applyBackgroundSyncState");
+    const applyEnd = gatewaySource.indexOf("\nasync function requestBackgroundWorkspaceSync", applyStart);
+    const backgroundApply = gatewaySource.slice(applyStart, applyEnd);
+    expect(backgroundApply).not.toContain("renderAll(");
+    expect(backgroundApply).not.toContain("applySyncState(");
+    expect(backgroundApply).not.toContain("renderConnectionOverlayForPhase(");
+    expect(gatewaySource).not.toContain("refreshWorkspaceSummaries");
+    expect(gatewaySource).toContain("if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;");
+    expect(gatewaySource).toContain("state.connectionPhase === \"connected\"");
+
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const source = readFileSync(join(import.meta.dir, relative), "utf8");
+      expect(source).toContain("agents: [...state.stores].map(([id, store]) => ({");
+      expect(source).toContain("const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));");
+    }
+  });
+
+  test("keeps Gateway Workspace disclosure as an origin-local browser preference", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const values = new Map();
+    const storage = {
+      getItem(key) { return values.has(key) ? values.get(key) : null; },
+      setItem(key, value) { values.set(key, value); },
+      removeItem(key) { values.delete(key); },
+    };
+    const disclosure = gateway.readWorkspaceDisclosure(storage);
+    expect(gateway.workspaceExpanded("w-one", disclosure)).toBe(true);
+    expect(gateway.setWorkspaceExpanded("w-one", false, disclosure, storage)).toBe(true);
+    expect(gateway.workspaceExpanded("w-one", disclosure)).toBe(false);
+    const restored = gateway.readWorkspaceDisclosure(storage);
+    expect(gateway.workspaceExpanded("w-one", restored)).toBe(false);
+    gateway.setWorkspaceExpanded("w-two", true, restored, storage);
+    expect(gateway.pruneWorkspaceDisclosure(new Set(["w-two"]), restored, storage)).toBe(true);
+    expect([...restored]).toEqual([["w-two", true]]);
+    expect(gateway.readWorkspaceDisclosure({ getItem() { return "not-json"; } })).toEqual(new Map());
+
+    const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(source).toContain('const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";');
+    expect(source).toContain("workspaceDisclosure: readWorkspaceDisclosure()");
+    expect(source).toContain("setWorkspaceExpanded(workspace.id, !workspaceExpanded(workspace.id));");
+    expect(source).not.toContain("expandedWorkspaces");
+    expect(source).not.toContain("/api/gateway/workspaces/${encodeURIComponent(workspace.id)}/expanded");
+  });
+
+
   test("refreshes empty transcript metadata when switching Workspaces", () => {
     const gateway = loadRuntime("../src/gateway_webui/app.js");
     const transcriptContent = {
@@ -625,11 +737,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(themeStyles).toContain("--activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));");
     expect(themeStyles).toContain("--agent-selected-bg: color-mix(in srgb, var(--accent) 22%, var(--panel));");
     expect(gatewayIndex).toContain('class="sidebar-divider" aria-hidden="true"');
-    expect(gatewaySource).toContain("expandedWorkspaces: new Set()");
+    expect(gatewaySource).toContain("workspaceDisclosure: readWorkspaceDisclosure()");
     expect(gatewaySource).toContain('class="workspace-disclosure-icon"');
     expect(gatewaySource).toContain('class="workspace-folder-icon"');
     expect(gatewaySource).toContain('class="workspace-name"></span>');
-    expect(gatewaySource).toContain('aria-expanded="false"');
+    expect(gatewaySource).toContain('aria-expanded="${workspaceExpanded(workspace.id)}"');
     expect(gatewaySource).toContain("agents.hidden = !expanded");
     expect(gatewaySource).not.toContain("if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);");
     expect(gatewaySource).not.toContain('group.classList.toggle("active", active);');

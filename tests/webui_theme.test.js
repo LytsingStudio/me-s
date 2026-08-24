@@ -183,8 +183,8 @@ describe("shared WebUI themes", () => {
     expect(gatewayIndex.indexOf('class="sidebar-heading chat-heading"')).toBeLessThan(gatewayIndex.indexOf('<footer class="sidebar-footer">'));
     expect(gatewayStyles).toContain(".sidebar-scroll { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto;");
     expect(gatewayStyles).toContain(".workspace-list { display: grid; grid-auto-rows: max-content;");
-    expect(gatewayStyles).not.toContain("max-height: 50%");
-    expect(gatewayStyles).not.toContain("max-height: 34%");
+    expect(gatewayStyles).not.toMatch(/\.workspace-list\s*\{[^}]*max-height:/s);
+    expect(gatewayStyles).not.toMatch(/\.chat-agent-list\s*\{[^}]*max-height:/s);
     expect(gatewayStyles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%; flex: 0 0 auto;");
   });
 
