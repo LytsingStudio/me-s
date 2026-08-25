@@ -305,12 +305,26 @@ def object_schema(
     return schema
 
 
-PATH_SCHEMA = {
+INPUT_PATH_SCHEMA = {
     "type": "string",
     "minLength": 1,
-    "description": "A relative path resolves from the workspace. Absolute paths and relative paths that resolve outside the workspace are supported. Results use workspace-relative paths inside the workspace and normalized absolute paths outside it.",
+    "description": "Relative paths resolve from the workspace; absolute paths are accepted.",
 }
-HASH_SCHEMA = {"type": "string", "pattern": r"^[0-9a-f]{8}$"}
+OUTPUT_PATH_SCHEMA = {
+    "type": "string",
+    "minLength": 1,
+    "description": "Paths inside the workspace are returned relative to it; paths outside are returned as normalized absolute paths.",
+}
+HASH_SCHEMA = {
+    "type": "string",
+    "pattern": r"^[0-9a-f]{8}$",
+    "description": "An 8-character content hash used for concurrency checks.",
+}
+EXPECTED_HASH_SCHEMA = {
+    "type": "string",
+    "pattern": r"^[0-9a-f]{8}$",
+    "description": "A content hash from a recent File inspection; the mutation fails if the file has changed.",
+}
 STRING_ARRAY = {
     "type": "array",
     "items": {"type": "string", "minLength": 1},
@@ -320,7 +334,7 @@ STRING_ARRAY = {
 INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "Read": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
             "start_line": {
                 "type": "integer",
                 "minimum": 1,
@@ -337,7 +351,7 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "ReadBytes": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
             "offset": {"type": "integer", "minimum": 0, "default": 0},
             "length": {
                 "type": "integer",
@@ -350,8 +364,8 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "EditBytes": object_schema(
         {
-            "path": PATH_SCHEMA,
-            "expected_hash": HASH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
+            "expected_hash": EXPECTED_HASH_SCHEMA,
             "edits": {
                 "type": "array",
                 "minItems": 1,
@@ -384,7 +398,7 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "List": object_schema(
         {
-            "path": {**PATH_SCHEMA, "default": "."},
+            "path": {**INPUT_PATH_SCHEMA, "default": "."},
             "depth": {
                 "type": "integer",
                 "minimum": 1,
@@ -402,7 +416,7 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Find": object_schema(
         {
-            "path": {**PATH_SCHEMA, "default": "."},
+            "path": {**INPUT_PATH_SCHEMA, "default": "."},
             "patterns": {
                 "type": "array",
                 "items": {"type": "string", "minLength": 1},
@@ -428,11 +442,14 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Search": object_schema(
         {
-            "path": {**PATH_SCHEMA, "default": "."},
+            "path": {**INPUT_PATH_SCHEMA, "default": "."},
             "query": {"type": "string", "minLength": 1},
             "regex": {"type": "boolean", "default": False},
             "case_sensitive": {"type": "boolean", "default": True},
-            "globs": STRING_ARRAY,
+            "globs": {
+                **STRING_ARRAY,
+                "description": "Optional file glob patterns matched against each reported path and basename.",
+            },
             "depth": {
                 "type": "integer",
                 "minimum": 1,
@@ -464,7 +481,7 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         {
             "paths": {
                 "type": "array",
-                "items": PATH_SCHEMA,
+                "items": INPUT_PATH_SCHEMA,
                 "minItems": 1,
                 "maxItems": 256,
             }
@@ -473,14 +490,14 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "MakeDirectory": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
             "parents": {"type": "boolean", "default": False},
         },
         ["path"],
     ),
     "Create": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
             "content": {"type": "string"},
             "encoding": {**CREATE_ENCODING_SCHEMA, "default": "utf-8"},
             "bom": {"type": "boolean", "default": False},
@@ -489,7 +506,7 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Edit": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
             "encoding": {**ENCODING_SCHEMA, "default": "auto"},
             "edits": {
                 "type": "array",
@@ -575,8 +592,8 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Append": object_schema(
         {
-            "path": PATH_SCHEMA,
-            "expected_hash": HASH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
+            "expected_hash": EXPECTED_HASH_SCHEMA,
             "encoding": {**ENCODING_SCHEMA, "default": "auto"},
             "content": {"type": "string"},
         },
@@ -584,8 +601,8 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Replace": object_schema(
         {
-            "path": PATH_SCHEMA,
-            "expected_hash": HASH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
+            "expected_hash": EXPECTED_HASH_SCHEMA,
             "encoding": {**ENCODING_SCHEMA, "default": "auto"},
             "content": {"type": "string"},
         },
@@ -593,31 +610,67 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Copy": object_schema(
         {
-            "path": PATH_SCHEMA,
-            "destination": PATH_SCHEMA,
-            "expected_hash": HASH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
+            "destination": INPUT_PATH_SCHEMA,
+            "expected_hash": EXPECTED_HASH_SCHEMA,
         },
         ["path", "destination", "expected_hash"],
     ),
     "Move": object_schema(
         {
-            "path": PATH_SCHEMA,
-            "destination": PATH_SCHEMA,
-            "expected_hash": HASH_SCHEMA,
+            "path": INPUT_PATH_SCHEMA,
+            "destination": INPUT_PATH_SCHEMA,
+            "expected_hash": EXPECTED_HASH_SCHEMA,
         },
         ["path", "destination", "expected_hash"],
     ),
     "Delete": object_schema(
-        {"path": PATH_SCHEMA, "expected_hash": HASH_SCHEMA},
+        {"path": INPUT_PATH_SCHEMA, "expected_hash": EXPECTED_HASH_SCHEMA},
         ["path", "expected_hash"],
     ),
 }
 
 
+PATH_TYPE_SCHEMA = {
+    "type": "string",
+    "enum": ["file", "directory", "symlink", "other"],
+}
+LIST_ENTRY_SCHEMA = object_schema(
+    {
+        "path": OUTPUT_PATH_SCHEMA,
+        "type": PATH_TYPE_SCHEMA,
+        "size": {"type": "integer", "description": "Filesystem-reported size in bytes."},
+        "modified_ms": {
+            "type": "integer",
+            "description": "Last modification time as Unix epoch milliseconds.",
+        },
+    },
+    ["path", "type", "size", "modified_ms"],
+)
+STAT_ENTRY_SCHEMA = object_schema(
+    {
+        "path": OUTPUT_PATH_SCHEMA,
+        "exists": {
+            "type": "boolean",
+            "description": "Whether the requested path currently exists.",
+        },
+        "type": PATH_TYPE_SCHEMA,
+        "size": {"type": "integer", "description": "Filesystem-reported size in bytes."},
+        "modified_ms": {
+            "type": "integer",
+            "description": "Last modification time as Unix epoch milliseconds.",
+        },
+        "readonly": {"type": "boolean"},
+        "hash": HASH_SCHEMA,
+    },
+    ["path", "exists"],
+)
+
+
 OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     "Read": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "lines": {
                 "type": "object",
                 "additionalProperties": {"type": ["string", "object"]},
@@ -673,7 +726,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "ReadBytes": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "data": {
                 "type": "string",
                 "description": "Bytes as lowercase two-digit hexadecimal values separated by one space.",
@@ -689,7 +742,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "EditBytes": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "operation": {"type": "string", "enum": ["bytes_edited"]},
             "previous_hash": HASH_SCHEMA,
             "edit_results": {
@@ -734,8 +787,8 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "List": object_schema(
         {
-            "path": PATH_SCHEMA,
-            "entries": {"type": "array", "items": {"type": "object"}},
+            "path": OUTPUT_PATH_SCHEMA,
+            "entries": {"type": "array", "items": LIST_ENTRY_SCHEMA},
             "returned": {"type": "integer"},
             "truncated": {"type": "boolean"},
             "tip": {"type": "string"},
@@ -744,7 +797,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Find": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "results": {"type": "array", "items": {"type": "string"}},
             "returned": {"type": "integer"},
             "truncated": {"type": "boolean"},
@@ -754,14 +807,20 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Search": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "matches": {
                 "type": "array",
                 "items": object_schema(
                     {
-                        "path": PATH_SCHEMA,
-                        "column": {"type": "integer"},
-                        "match_length": {"type": "integer"},
+                        "path": OUTPUT_PATH_SCHEMA,
+                        "column": {
+                            "type": "integer",
+                            "description": "1-based Unicode character column within the decoded line.",
+                        },
+                        "match_length": {
+                            "type": "integer",
+                            "description": "Matched length in decoded Unicode characters.",
+                        },
                         "before": {
                             "type": "object",
                             "additionalProperties": {"type": "string"},
@@ -790,7 +849,10 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                     ],
                 ),
             },
-            "skipped_binary": {"type": "integer"},
+            "skipped_binary": {
+                "type": "integer",
+                "description": "Number of candidate files skipped because they were binary, malformed, unreadable, or unsupported as text.",
+            },
             "returned": {"type": "integer"},
             "truncated": {"type": "boolean"},
             "tip": {"type": "string"},
@@ -799,7 +861,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "Stat": object_schema(
         {
-            "entries": {"type": "array", "items": {"type": "object"}},
+            "entries": {"type": "array", "items": STAT_ENTRY_SCHEMA},
             "returned": {"type": "integer"},
             "tip": {"type": "string"},
         },
@@ -807,7 +869,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
     ),
     "MakeDirectory": object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "operation": {"type": "string"},
             "exists": {"type": "boolean"},
         },
@@ -818,7 +880,7 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
 for _tool in ("Create", "Edit", "Append", "Replace"):
     OUTPUT_SCHEMAS[_tool] = object_schema(
         {
-            "path": PATH_SCHEMA,
+            "path": OUTPUT_PATH_SCHEMA,
             "operation": {"type": "string"},
             "previous_hash": {"type": ["string", "null"]},
             "hash": HASH_SCHEMA,
@@ -886,8 +948,8 @@ OUTPUT_SCHEMAS["Edit"]["required"].remove("hash")
 OUTPUT_SCHEMAS["Append"]["properties"]["appended_bytes"] = {"type": "integer"}
 OUTPUT_SCHEMAS["Copy"] = object_schema(
     {
-        "path": PATH_SCHEMA,
-        "destination": PATH_SCHEMA,
+        "path": OUTPUT_PATH_SCHEMA,
+        "destination": OUTPUT_PATH_SCHEMA,
         "operation": {"type": "string", "enum": ["copied"]},
         "hash": HASH_SCHEMA,
         "size": {"type": "integer"},
@@ -896,8 +958,8 @@ OUTPUT_SCHEMAS["Copy"] = object_schema(
 )
 OUTPUT_SCHEMAS["Move"] = object_schema(
     {
-        "path": PATH_SCHEMA,
-        "destination": PATH_SCHEMA,
+        "path": OUTPUT_PATH_SCHEMA,
+        "destination": OUTPUT_PATH_SCHEMA,
         "operation": {"type": "string"},
         "previous_hash": HASH_SCHEMA,
         "hash": HASH_SCHEMA,
@@ -907,7 +969,7 @@ OUTPUT_SCHEMAS["Move"] = object_schema(
 )
 OUTPUT_SCHEMAS["Delete"] = object_schema(
     {
-        "path": PATH_SCHEMA,
+        "path": OUTPUT_PATH_SCHEMA,
         "operation": {"type": "string"},
         "deleted_hash": HASH_SCHEMA,
         "exists": {"type": "boolean"},
@@ -922,7 +984,7 @@ ROUTES = {
     "EditBytes": "Atomically replace, delete, or insert one or more independently located byte ranges after inspecting them with File.ReadBytes.",
     "List": "Inspect directory contents without invoking a shell.",
     "Find": "Find filesystem paths by glob patterns with optional recursion depth.",
-    "Search": "Search text through me-s's integrated ripgrep engine with bounded encoding detection and a fixed 120-second deadline.",
+    "Search": "Search text with literal or Rust regular expressions across common text encodings, with a fixed 120-second deadline.",
     "Stat": "Inspect existence, type, metadata, and current content hashes.",
     "MakeDirectory": "Create one explicit directory, optionally including its missing parent chain.",
     "Create": "Create a new text file in an explicit encoding, defaulting to UTF-8; never overwrite an existing file.",
@@ -935,19 +997,24 @@ ROUTES = {
 }
 
 INSTRUCTIONS = {
-    "Read": "Line numbers are inclusive and 1-based. Use start_line and end_line as optional bounds: omit start_line to begin at line 1, omit end_line to continue through EOF, or omit both to read the complete file. Every successful result includes total_lines for the complete file. start_line and end_line in the result identify the actual returned range and are null when no line exists in the requested range. The lines object maps each actual file line number to its logical text without any LF, CRLF, or CR terminator; an empty string is one blank line. Keys are minimally zero-padded to the digit width of total_lines solely to preserve numeric order in serialized JSON; interpret them as decimal line numbers. Missing numeric keys in a safely truncated model-visible result are omitted lines, not empty lines.\n\nEDIT AUTHORIZATION: editable_ranges is the complete current set of inclusive 1-based line ranges that File.Edit is allowed to target for this file. It is authorization state, not merely a description of what this one Read requested. Every successful Read adds only the complete ordinary-string lines actually returned and visible to you; repeated reads of the same unchanged file merge adjacent or separate ranges and return the full accumulated set. Safely omitted lines and incomplete text_fragments do not become editable. Replace and delete operations must be fully contained in editable_ranges. An insert before an existing line requires that line to be editable; inserting after the final line requires that the final line and EOF were read; inserting into an empty file requires a successful Read that established the empty EOF. Before File.Edit, read every target line or insertion point and receive the Read result in an earlier model response. File.Search, File.Stat, hashes, remembered content, and any other tool do not grant edit authorization. A successful File.Edit or a detected file change clears the authorization, so call File.Read again before another edit.\n\nSource file size is not artificially capped: the complete file is loaded into memory to detect its encoding, count lines, and compute its hash. Large model-visible results are reduced only by the structured safety envelope, which preserves the JSON shape and absolute line numbers and reports truncate=true. Auto detection checks BOM, Unicode encodings, strict UTF-8, then common legacy encodings conservatively. If auto detection is uncertain, retry only when the encoding is known by setting encoding explicitly; otherwise use ReadBytes.",
-    "ReadBytes": "Offsets are zero-based, and source file size is not artificially capped. The result data contains lowercase two-digit hexadecimal bytes separated by one space, without a 0x prefix. length is the number of bytes represented by data, and hash identifies the complete file rather than only the returned range. Use the returned bytes and hash as the baseline for File.EditBytes. If the model-context safety envelope reports truncate:true, data retains only the earliest complete bytes from the requested range; read another range before editing bytes that are not visible. truncate_info.ranges.bytes reports retained_offset_start, retained_offset_end_exclusive, removed_offset_start, and removed_offset_end_exclusive as absolute half-open byte ranges.",
+    "Read": (
+        "Line numbers are inclusive and 1-based. Use start_line and end_line as optional bounds: omit start_line to begin at line 1, omit end_line to continue through EOF, or omit both to read the complete file. Every successful result includes total_lines for the complete file. start_line and end_line in the result identify the actual returned range and are null when no line exists in the requested range. The lines object maps each actual file line number to its logical text without any LF, CRLF, or CR terminator; an empty string is one blank line. Keys are minimally zero-padded to the digit width of total_lines solely to preserve numeric order in serialized JSON; interpret them as decimal line numbers. Missing numeric keys in a safely truncated model-visible result are omitted lines, not empty lines.\n\n"
+        "EDIT AUTHORIZATION: editable_ranges is the complete current set of inclusive 1-based line ranges that File.Edit may target for this file. Every successful Read adds only complete ordinary-string lines actually returned and visible to you; repeated reads of the same unchanged file merge their ranges. Safely omitted lines and incomplete text_fragments are not editable. Replace and delete ranges must be fully contained in editable_ranges. Inserting before an existing line requires that line to be editable; inserting after the final line requires that the final line and EOF were read; inserting into an empty file requires Read to have established the empty EOF. Before File.Edit, call File.Read for every target line or insertion point and receive the Read result in an earlier model response. A Read and Edit emitted together cannot authorize each other. Only current File.Read results establish editable_ranges. A successful File.Edit or a detected file change clears them.\n\n"
+        "Read may inspect the complete file even when you request a bounded line range because it determines the file encoding, total line count, and current hash. Automatic detection supports common Unicode, East Asian, and Windows text encodings and returns encoding, encoding_confidence, and bom. If the encoding is known, pass it explicitly. If automatic detection is uncertain, retry with a known encoding or use File.ReadBytes. Large model-visible results may be safely reduced while preserving their structured line numbers; never treat omitted lines or incomplete text_fragments as editable content."
+    ),
+    "ReadBytes": "Offsets are zero-based. data contains the returned bytes as lowercase two-digit hexadecimal values separated by one space, without a 0x prefix. length is the number of returned bytes, and hash identifies the complete file rather than only the returned range. Use the returned bytes and hash as the baseline for File.EditBytes; call ReadBytes again with another offset when more bytes are needed. If the model-context safety envelope reports truncate:true, data retains only the earliest complete bytes from the requested range, so read another range before editing bytes that are not visible. truncate_info.ranges.bytes reports retained_offset_start, retained_offset_end_exclusive, removed_offset_start, and removed_offset_end_exclusive as exact absolute half-open byte ranges.",
     "EditBytes": (
-        "EditBytes atomically applies one or more operations to one file. First use File.ReadBytes to inspect every target range and obtain the complete file hash, then pass that hash as expected_hash. target_offset is a zero-based original byte offset, and target_length selects the half-open original range [target_offset, target_offset + target_length). Every operation is independently located against the same original pre-edit snapshot. Earlier array items never shift later offsets, and array order is not execution order. The tool validates every operation before writing and commits the combined result once. A later operation cannot target bytes created by another operation in the same call; perform dependent work only after another ReadBytes.\n"
+        "EditBytes atomically applies one or more operations to one file. First use File.ReadBytes to inspect every target range and obtain the complete file hash, then pass that hash as expected_hash. target_offset is a zero-based original byte offset, and target_length selects the half-open original range [target_offset, target_offset + target_length). Every operation is independently located against the same original pre-edit snapshot. Earlier array items never shift later offsets, and array order is not execution order. A later operation cannot target bytes created by another operation in the same call; perform dependent work only after another ReadBytes.\n"
         "Use target_length > 0 with non-empty data to replace the selected bytes, target_length > 0 with data=\"\" to delete them, and target_length=0 with non-empty data to insert before target_offset. Offset 0 is the beginning; target_offset equal to the original file size is the only insertion point after the final byte and also inserts into an empty file. An empty insertion is invalid. Replacement ranges must not overlap. One original insertion point may appear only once. An insertion strictly inside a replaced range conflicts, while insertion exactly at either outer boundary is allowed. Every selected range must stay within the original file.\n"
-        "data is exact binary content written as lowercase two-digit hexadecimal bytes separated by one space, without 0x prefixes; use an empty string only for deletion. Source file size is not artificially capped; the complete file is loaded into memory for the atomic edit. Unselected bytes and file permissions are preserved. Malformed hexadecimal data, invalid or overlapping ranges, duplicate insertion points, a stale hash, and all other failures leave the file unchanged. A successful result deliberately does not return the new hash. Its old byte offsets and hash are stale: before every later File.EditBytes on this file, call File.ReadBytes again and use the refreshed bytes and hash."
+        "data is exact binary content written as lowercase two-digit hexadecimal bytes separated by one space, without 0x prefixes; use an empty string only for deletion. Unselected bytes and file permissions are preserved. The tool validates every item before writing; malformed data, invalid or overlapping ranges, duplicate insertion points, a stale hash, or any other failure leaves the file unchanged. After success, the old byte offsets and hash are stale and the result does not contain the current hash. Call File.ReadBytes again before any later EditBytes on this file."
     ),
     "List": "Depth counts levels below path. Results are stable and symbolic-link directories are never traversed.",
-    "Find": "Patterns match each reported normalized POSIX path and basename; exclusions match the reported path. Paths inside the workspace are reported relative to it, while paths outside are reported as normalized absolute paths. depth counts levels below path: 1 visits only direct children and 2 visits direct children plus their children. Omit depth for unlimited recursion. If path is a file, it alone is considered. Results are stable and symbolic-link directories are never traversed.",
+    "Find": "Patterns match each returned path and basename; exclusions match the returned path. depth counts levels below path: 1 visits only direct children and 2 visits direct children plus their children. Omit depth for unlimited recursion. If path names a file, only that file is considered. Results are stable, and symbolic-link directories are never traversed.",
     "Search": (
-        "Literal search is the default and uses me-s's integrated ripgrep engine; regex=true uses Rust/ripgrep linear-time regular-expression syntax, so unsupported constructs such as look-around and backreferences return invalid_regex instead of falling back to another engine. For a directory path, depth counts levels below it: 1 searches only direct child files and 2 also searches files in direct child directories. Omit depth for unlimited recursion. Directory searches obey .gitignore, .ignore, Git excludes, and global Git ignores; hidden entries are skipped and symbolic-link directories are never followed. If path explicitly names a file, that file is searched even when an ignore rule would exclude it. Source file size is not artificially capped, max_matches bounds the returned result, and the complete search has a hard 120-second deadline. A search_timeout error is non-retryable and tells you to search a smaller path, reduce depth, or use narrower globs. "
-        "Each match returns before, match_text, and after as line-number-keyed objects using the same 1-based, minimally zero-padded keys and logical line text as File.Read; values never contain line terminators. The sole key in match_text is the matching file line; column and match_length count decoded Unicode characters, not bytes. Example: {\"path\":\"src/main.rs\",\"column\":5,\"match_length\":7,\"before\":{\"041\":\"fn main() {\"},\"match_text\":{\"042\":\"    runtime.start();\"},\"after\":{\"043\":\"}\"}}. Search is only a locator: it never establishes editable_ranges. Before editing a located file, call File.Read for every target range. Never infer unseen edit boundaries from Search results. With top-level truncate:true, missing before or after keys are omitted context lines, and the sole match_text value may instead be a text_fragments object while its line key and match metadata remain intact. "
-        "Search performs bounded encoding detection: it reads at most a 64 KiB prefix, handles UTF BOMs and strict UTF-8 first, and uses chardetng only when UTF-8 fails. Detected common East Asian and Windows encodings are strictly stream-decoded without replacement before rg matching; GB2312, CP936, and GBK guesses use the GB18030 superset, and a later invalid UTF-8 line can trigger one bounded legacy fallback. UTF-8 keeps the direct rg path. This lightweight locator detection is intentionally separate from File.Read's complete conservative encoding detection. Binary, malformed, unreadable, or unsupported files count in skipped_binary; use File.Read when exact encoding-aware content is required."
+        "Literal search is the default. Set regex=true to use Rust regular-expression syntax; unsupported constructs such as look-around and backreferences return invalid_regex. case_sensitive defaults to true. For directory searches, depth=1 searches only direct child files, depth=2 also searches one directory level below them, and omitting depth searches recursively without a depth limit. globs restrict files by matching each returned path and basename. Directory searches obey .gitignore, .ignore, Git excludes, and global Git ignores; hidden entries and symbolic-link directories are skipped. If path explicitly names a file, that file is searched directly even when an ignore rule would exclude it.\n\n"
+        "Search automatically handles UTF-8, BOM-marked UTF-16 and UTF-32, and common East Asian, Windows, and Web legacy encodings, including the GB2312/CP936/GBK/GB18030 family, Big5, Shift-JIS, EUC-JP, EUC-KR, Windows-1251, and Windows-1252. No encoding parameter is required. Encoding recognition is intended for fast location and can be ambiguous; Search returns neither an encoding name nor confidence. Use File.Read when exact text or encoding identification is required. Binary, malformed, unreadable, or unsupported files are skipped and counted in skipped_binary.\n\n"
+        "Each match returns before, match_text, and after as line-number-keyed objects using the same 1-based, minimally zero-padded keys and logical line text as File.Read; values contain no line terminators. The sole key in match_text is the matching file line. column is the 1-based decoded Unicode character column, and match_length is measured in decoded Unicode characters, not bytes. Example: {\"path\":\"src/main.rs\",\"column\":5,\"match_length\":7,\"before\":{\"041\":\"fn main() {\"},\"match_text\":{\"042\":\"    runtime.start();\"},\"after\":{\"043\":\"}\"}}. Search results do not authorize File.Edit; call File.Read for every target range before editing. With top-level truncate:true, missing before or after keys are omitted context lines, and the match_text value may become a text_fragments object while its line key and match metadata remain intact.\n\n"
+        "The complete search has a fixed 120-second deadline and returns no partial result if that deadline expires. search_timeout is non-retryable; search a smaller path, reduce depth, or use narrower globs. max_matches limits the number of returned matches, and truncated=true means that limit was reached."
     ),
     "Stat": "A missing path is a normal result. Content hashes are returned only for ordinary files, not directories or symbolic links.",
     "MakeDirectory": "parents defaults to false, requiring the immediate parent to exist. Set parents=true to create every missing directory in the path. The target itself must not already exist; existing files, directories, and symbolic links return already_exists.",
@@ -956,7 +1023,7 @@ INSTRUCTIONS = {
         "Edit atomically applies one or more explicit operations to one text file. Before Edit, you MUST call File.Read for every target line or insertion point, receive that result, and only then call Edit in a later model response; a Read and Edit emitted together cannot authorize each other. The latest File.Read result returns editable_ranges, the complete current edit authorization for that file. Replace and delete ranges must be fully contained in it. An insertion before an existing line requires that line in editable_ranges; insertion after the final line additionally requires that File.Read established EOF; insertion into an empty file requires a Read-established empty EOF. File.Search, File.Stat, hashes from other tools, generated content, and remembered line numbers never establish permission. Every operation is independently located against the same original pre-edit snapshot. Earlier array items never shift later line numbers; array order is not execution order. The tool validates every operation before writing and commits the combined result once. If one item is malformed, unread, out of range, unencodable, overlapping, duplicated at the same insertion point, or otherwise ambiguous, the entire call fails and the file remains unchanged. A later item cannot target lines created by an earlier item in the same call.\n"
         "Each edits item uses exactly one of three shapes. Replace: {operation:\"replace\", start_line, end_line, new_lines}; start_line and end_line are inclusive original 1-based line numbers, require 1 <= start_line <= end_line <= total_lines, and new_lines must be non-empty. Delete: {operation:\"delete\", start_line, end_line}; it removes those complete original lines and accepts no new_lines. Insert: {operation:\"insert\", before_line, new_lines}; it inserts before the original 1-based before_line and requires non-empty new_lines. before_line=1 inserts at the beginning and into an empty file; before_line=total_lines+1 appends only when the existing final line is terminated. Do not encode an operation indirectly with an empty new_lines array or reversed line range.\n"
         "new_lines is an array of logical lines matching File.Read values. Each array item is exactly one line and MUST NOT contain LF or CR; use an empty string for one blank line. File automatically selects and preserves the file's existing line-ending convention. To change part of a line, replace that whole source line with its complete resulting logical text, including unchanged surrounding characters but no terminator. To merge several source lines, replace their whole range with the resulting logical line or lines. To append after an unterminated final source line, include that final line in a replacement and supply both resulting logical lines.\n"
-        "Replacement and deletion ranges must not overlap. An insertion cannot lie strictly inside such a range, and one original insertion point may appear only once; an insertion exactly at a range boundary is allowed. Source file size is not artificially capped; the complete file is loaded into memory. Existing encoding, BOM, permissions, line-ending style, and all unselected text are preserved. A successful Edit clears every editable range for that file. Before any later Edit, use File.Read to inspect a wider continuous range around every intended target so the surrounding context, line numbers, and editable_ranges are all fresh."
+        "Replacement and deletion ranges must not overlap. An insertion cannot lie strictly inside such a range, and one original insertion point may appear only once; an insertion exactly at a range boundary is allowed. Existing encoding, BOM, permissions, line-ending style, and all unselected text are preserved. A successful Edit clears every editable range for that file. Before any later Edit, use File.Read to inspect a wider continuous range around every intended target so the surrounding context, line numbers, and editable_ranges are all fresh."
     ),
     "Append": "The file must exist and match expected_hash. Existing encoding and BOM are preserved. Content is appended exactly and no newline is added. Unrepresentable text returns encoding_error without modifying the file.",
     "Replace": "The file must exist and match expected_hash. Its detected encoding and BOM are preserved while the complete content is replaced atomically. Unrepresentable text returns encoding_error without modifying the file.",
@@ -2942,7 +3009,7 @@ def handle(request: Any) -> None:
     if command == "getBrief":
         result(
             request_id,
-            "Read, search, copy, and safely mutate files and explicitly create directories. Relative paths resolve from the workspace; absolute paths and relative paths that resolve outside the workspace are supported. Paths inside the workspace are returned relative to it, while outside paths are returned as normalized absolute paths. PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION: obey the governing external-path safety rule before any modification outside the workspace. Source file size is not artificially capped; operations that need complete contents load them into memory, while bounded query parameters limit model-visible results. Line-oriented results and edits use logical lines without CR or LF; File preserves the file's detected line-ending convention automatically. Exact text reads and writes conservatively detect common Unicode, East Asian, and Windows encodings, preserve the original encoding and BOM, and reject uncertain or lossy writes. File.Search instead uses me-s's integrated ripgrep engine with bounded 64 KiB encoding detection and strict streaming transcoding for common legacy encodings, follows ignore rules, and has a fixed 120-second deadline. File.Edit is limited to ranges actually returned by File.Read, clears those ranges after success, and validates the remembered file version internally. Binary operations use zero-based byte ranges and canonical hexadecimal data. Other mutations use an 8-character SHA-256-derived concurrency fingerprint. This short value detects stale edits; it is not a security integrity digest. Recoverable failures may include a short tip that states the next useful action in plain language.",
+            "File tools read exact text or bytes, list and find paths, search text, inspect metadata, create directories and files, and safely mutate existing files. Relative paths resolve from the workspace; absolute paths are accepted. Paths inside the workspace are returned relative to it, while paths outside are returned as normalized absolute paths. PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION: obey the governing external-path safety rule before modifying anything outside the workspace. Use File.Read before File.Edit, and use File.ReadBytes before File.EditBytes. Hash-gated mutations require the current hash returned by a recent File inspection and fail if the file has changed. Text operations preserve detected encoding, BOM, permissions, and line endings where applicable, and reject uncertain or lossy writes. Search automatically handles common Unicode, East Asian, and Windows text encodings, follows ignore rules, and has a fixed 120-second deadline. Recoverable failures may include a short tip describing the next safe action.",
         )
         return
     tool = request.get("tool")

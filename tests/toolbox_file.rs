@@ -321,17 +321,22 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
         .collect::<Vec<_>>();
     let brief = toolbox.query("getBrief", None);
     let brief = brief["output"].as_str().unwrap();
-    assert!(brief.contains("8-character"));
-    assert!(brief.contains("Source file size is not artificially capped"));
-    assert!(brief.contains("absolute paths and relative paths that resolve outside"));
+    assert!(brief.contains("Use File.Read before File.Edit"));
+    assert!(brief.contains("use File.ReadBytes before File.EditBytes"));
+    assert!(brief.contains("Hash-gated mutations require the current hash"));
+    assert!(brief.contains("absolute paths are accepted"));
     assert!(brief.contains("PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION"));
-    assert!(brief.contains("plain language"));
+    assert!(brief.contains("common Unicode, East Asian, and Windows text encodings"));
+    assert!(brief.contains("next safe action"));
+    assert!(!brief.contains("SHA-256"));
+    assert!(!brief.contains("64 KiB"));
+    assert!(!brief.contains("streaming transcoding"));
     let read_schema = toolbox.query("getInputSchema", Some("Read"));
     assert!(
         read_schema["output"]["properties"]["path"]["description"]
             .as_str()
             .unwrap()
-            .contains("normalized absolute paths outside")
+            .contains("Relative paths resolve from the workspace; absolute paths are accepted")
     );
     assert!(
         read_schema["output"]["properties"]
@@ -356,6 +361,12 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     assert!(read_examples.contains("\"end_line\":200"));
     assert!(!read_examples.contains("max_lines"));
     let read_output_schema = toolbox.query("getOutputSchema", Some("Read"));
+    assert!(
+        read_output_schema["output"]["properties"]["path"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("returned relative to it")
+    );
     for model_visible_read_section in [
         read_schema["output"].to_string(),
         read_output_schema["output"].to_string(),
@@ -478,7 +489,7 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
         search_instructions["output"]
             .as_str()
             .unwrap()
-            .contains("never establishes editable_ranges")
+            .contains("Search results do not authorize File.Edit")
     );
     let find_input = toolbox.query("getInputSchema", Some("Find"));
     assert_eq!(find_input["output"]["properties"]["depth"]["minimum"], 1);
@@ -515,7 +526,7 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
         search_instructions["output"]
             .as_str()
             .unwrap()
-            .contains("Omit depth for unlimited recursion")
+            .contains("omitting depth searches recursively without a depth limit")
     );
     for tool in ["Find", "Search"] {
         let examples = toolbox.query("getExamples", Some(tool));
@@ -534,12 +545,14 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     );
     let read_instructions = toolbox.query("getInstructions", Some("Read"));
     let read_instructions_text = read_instructions["output"].as_str().unwrap();
-    assert!(read_instructions_text.contains("Source file size is not artificially capped"));
+    assert!(read_instructions_text.contains("may inspect the complete file"));
     assert!(read_instructions_text.contains("EDIT AUTHORIZATION"));
     assert!(read_instructions_text.contains("complete current set"));
-    assert!(read_instructions_text.contains("File.Search"));
+    assert!(read_instructions_text.contains("Only current File.Read results establish"));
     assert!(read_instructions_text.contains("earlier model response"));
-    assert!(read_instructions_text.contains("clears the authorization"));
+    assert!(read_instructions_text.contains("clears them"));
+    assert!(read_instructions_text.contains("Automatic detection supports common Unicode"));
+    assert!(!read_instructions_text.contains("strict UTF-8 first"));
     let read_output = toolbox.query("getOutputSchema", Some("Read"));
     assert_eq!(
         read_output["output"]["properties"]["lines"]["type"],
@@ -589,7 +602,7 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     let edit_bytes_instructions = edit_bytes_instructions["output"].as_str().unwrap();
     assert!(edit_bytes_instructions.contains("same original pre-edit snapshot"));
     assert!(edit_bytes_instructions.contains("half-open original range"));
-    assert!(edit_bytes_instructions.contains("call File.ReadBytes again"));
+    assert!(edit_bytes_instructions.contains("Call File.ReadBytes again"));
     assert!(!edit_bytes_instructions.contains("uppercase"));
     assert!(!edit_bytes_instructions.contains("multiple spaces"));
     let edit_bytes_examples = toolbox.query("getExamples", Some("EditBytes"));
@@ -625,27 +638,53 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     let search_instructions = search_instructions["output"].as_str().unwrap();
     assert!(search_instructions.contains("before, match_text, and after"));
     assert!(search_instructions.contains("line-number-keyed objects"));
-    assert!(search_instructions.contains("never establishes editable_ranges"));
+    assert!(search_instructions.contains("Search results do not authorize File.Edit"));
     assert!(search_instructions.contains("top-level truncate:true"));
     assert!(search_instructions.contains("text_fragments"));
-    assert!(search_instructions.contains("Source file size is not artificially capped"));
-    assert!(!search_instructions.contains("oversized files are skipped"));
-    assert!(search_instructions.contains("integrated ripgrep engine"));
-    assert!(search_instructions.contains("Rust/ripgrep linear-time"));
+    assert!(search_instructions.contains("Rust regular-expression syntax"));
+    assert!(search_instructions.contains("look-around and backreferences return invalid_regex"));
     assert!(search_instructions.contains(".gitignore"));
-    assert!(search_instructions.contains("hard 120-second deadline"));
+    assert!(search_instructions.contains("fixed 120-second deadline"));
+    assert!(search_instructions.contains("returns no partial result"));
     assert!(search_instructions.contains("search_timeout"));
     assert!(search_instructions.contains("decoded Unicode characters"));
-    assert!(search_instructions.contains("bounded encoding detection"));
-    assert!(search_instructions.contains("64 KiB prefix"));
-    assert!(search_instructions.contains("chardetng"));
-    assert!(search_instructions.contains("GB2312"));
-    assert!(search_instructions.contains("strictly stream-decoded without replacement"));
-    assert!(
-        search_instructions
-            .contains("separate from File.Read's complete conservative encoding detection")
+    assert!(search_instructions.contains("GB2312/CP936/GBK/GB18030 family"));
+    assert!(search_instructions.contains("Big5"));
+    assert!(search_instructions.contains("EUC-JP"));
+    assert!(search_instructions.contains("Windows-1251"));
+    assert!(search_instructions.contains("No encoding parameter is required"));
+    assert!(search_instructions.contains("can be ambiguous"));
+    assert!(search_instructions.contains("neither an encoding name nor confidence"));
+    assert!(search_instructions.contains("truncated=true means that limit was reached"));
+    assert!(!search_instructions.contains("chardetng"));
+    assert!(!search_instructions.contains("64 KiB"));
+    assert!(!search_instructions.contains("integrated ripgrep engine"));
+    assert!(!search_instructions.contains("another engine"));
+    assert!(!search_instructions.contains("stream-decoded"));
+    let list_output = toolbox.query("getOutputSchema", Some("List"));
+    let list_entry = &list_output["output"]["properties"]["entries"]["items"];
+    assert_eq!(
+        list_entry["required"],
+        json!(["path", "type", "size", "modified_ms"])
     );
-    assert!(read_instructions_text.contains("common legacy encodings conservatively"));
+    assert_eq!(
+        list_entry["properties"]["type"]["enum"],
+        json!(["file", "directory", "symlink", "other"])
+    );
+    assert!(
+        list_entry["properties"]["modified_ms"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("Unix epoch milliseconds")
+    );
+    let stat_output = toolbox.query("getOutputSchema", Some("Stat"));
+    let stat_entry = &stat_output["output"]["properties"]["entries"]["items"];
+    assert_eq!(stat_entry["required"], json!(["path", "exists"]));
+    assert!(stat_entry["properties"].get("type").is_some());
+    assert!(stat_entry["properties"].get("size").is_some());
+    assert!(stat_entry["properties"].get("modified_ms").is_some());
+    assert!(stat_entry["properties"].get("readonly").is_some());
+    assert!(stat_entry["properties"].get("hash").is_some());
     let create_encodings = toolbox.query("getInputSchema", Some("Create"))["output"]["properties"]
         ["encoding"]["enum"]
         .as_array()
@@ -665,6 +704,12 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     assert_eq!(
         copy_input["output"]["required"],
         json!(["path", "destination", "expected_hash"])
+    );
+    assert!(
+        copy_input["output"]["properties"]["expected_hash"]["description"]
+            .as_str()
+            .unwrap()
+            .contains("mutation fails if the file has changed")
     );
     let copy_instructions = toolbox.query("getInstructions", Some("Copy"));
     assert!(
