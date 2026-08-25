@@ -155,6 +155,8 @@ const elements = {
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
   sessionTerminalControls: $("#session-terminal-controls"),
+  remoteControlView: $("#remote-control-view"),
+  remoteControl: $("#remote-control"),
   terminalView: $("#terminal-view"),
   transcript: $("#transcript"),
   transcriptContent: $("#transcript-content"),
@@ -257,6 +259,37 @@ function getSessionTerminalController() {
     });
   }
   return sessionTerminalController;
+}
+
+let remoteControlController = null;
+
+function remoteControlUnauthorized() {
+  remoteControlController?.authenticationLost();
+  showLogin("登录已失效，请重新登录");
+}
+
+function getRemoteControlController() {
+  if (!remoteControlController) {
+    remoteControlController = globalThis.MeRemoteControl.create({
+      container: elements.remoteControl,
+      request: (action, options) => fetch(
+        scopedApiPath(`/api/remote-control/${encodeURIComponent(action)}`, "chat"),
+        { cache: "no-store", ...options },
+      ),
+      onUnauthorized: remoteControlUnauthorized,
+      notify: (message, kind) => toast(message, kind === "error"),
+    });
+  }
+  return remoteControlController;
+}
+
+function deactivateRemoteControlView() {
+  remoteControlController?.deactivate();
+}
+
+function syncRemoteControlView() {
+  if (state.view.kind === "remote-control") getRemoteControlController().activate();
+  else deactivateRemoteControlView();
 }
 
 let fileManagerController = null;
@@ -502,6 +535,7 @@ function scopedApiPath(path, workspaceId = state.workspaceId) {
   const childPath = path === "/api/sync" || path === "/api/snapshot" || path === "/api/command"
     || path.startsWith("/api/deletion-blocker/")
     || path.startsWith("/api/session-terminal/")
+    || path.startsWith("/api/remote-control/")
     || path.startsWith("/api/files/");
   if (!childPath) return path;
   if (!workspaceId) throw new Error("尚未选择工作区");
@@ -2823,10 +2857,12 @@ function renderTabs() {
   elements.chatView.classList.toggle("active", state.view.kind === "chat");
   elements.workmapView.classList.toggle("active", state.view.kind === "workmap");
   elements.sessionTerminalView.classList.toggle("active", state.view.kind === "session-terminal");
+  elements.remoteControlView.classList.toggle("active", state.view.kind === "remote-control");
   elements.filesView.classList.toggle("active", state.view.kind === "files");
   elements.terminalView.classList.toggle("active", state.view.kind === "terminal");
   syncSessionTerminalView();
   syncFileManagerView();
+  syncRemoteControlView();
 }
 
 function showView(view) {
@@ -5181,6 +5217,7 @@ window.addEventListener("pagehide", () => {
   cancelBackgroundWorkspaceSync();
   stopUiAnimation();
   deactivateSessionTerminalView();
+  deactivateRemoteControlView();
   flushDraftBeforePageCloses();
 });
 window.addEventListener("pageshow", () => {
@@ -5188,7 +5225,7 @@ window.addEventListener("pageshow", () => {
   syncUiAnimationScheduler();
   if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
   scheduleBackgroundWorkspaceSync(0);
-  if (state.view.kind === "session-terminal") renderTabs();
+  if (state.view.kind === "session-terminal" || state.view.kind === "remote-control") renderTabs();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopUiAnimation(); else syncUiAnimationScheduler();

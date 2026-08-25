@@ -821,3 +821,38 @@ button { color: inherit; }
   .file-manager-dialog { min-height: 0; max-height: 100%; }
   .file-manager-dialog-body { padding-block: 12px; }
 }
+
+
+.remote-control-view { position: relative; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; background: var(--panel); }
+.remote-control { display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; flex-direction: column; overflow: hidden; }
+.remote-control-toolbar { display: flex; min-width: 0; flex: 0 0 auto; align-items: center; gap: 8px; padding: 10px 14px; overflow-x: auto; overflow-y: hidden; border-bottom: 1px solid var(--border); background: var(--panel-2); overscroll-behavior-x: contain; scrollbar-width: none; touch-action: pan-x; -webkit-overflow-scrolling: touch; }
+.remote-control-toolbar::-webkit-scrollbar { display: none; }
+.remote-control-toolbar button, .remote-control-toolbar select { min-height: 34px; border: 1px solid var(--border-bright); border-radius: 8px; background: var(--panel-3); color: var(--text); font: inherit; }
+.remote-control-toolbar button { min-width: 58px; padding: 6px 13px; cursor: pointer; }
+.remote-control-toolbar button:hover:not(:disabled), .remote-control-toolbar select:hover:not(:disabled) { border-color: var(--accent); }
+.remote-control-toolbar button:focus-visible, .remote-control-toolbar select:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.remote-control-toolbar button:disabled, .remote-control-toolbar select:disabled { opacity: .45; cursor: default; }
+.remote-control-toolbar label { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
+.remote-control-toolbar select { min-width: 84px; padding: 5px 28px 5px 9px; cursor: pointer; }
+.remote-control-stage { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; align-items: center; justify-content: center; margin: 14px; overflow: hidden; border: 1px solid var(--border-bright); border-radius: 12px; background: var(--terminal-bg); box-shadow: inset 0 0 0 1px rgb(255 255 255 / .02); touch-action: none; user-select: none; -webkit-user-select: none; }
+.remote-control-stage img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; touch-action: none; -webkit-user-drag: none; }
+.remote-control-stage img[hidden] { display: none; }
+.remote-control-empty { max-width: 420px; padding: 24px; color: var(--muted); text-align: center; line-height: 1.55; }
+.remote-control-keyboard { position: absolute; z-index: 2; left: 50%; bottom: 0; width: 2px; height: 2px; padding: 0; transform: translateX(-50%); border: 0; opacity: .01; background: transparent; color: transparent; caret-color: transparent; font-size: 16px; resize: none; }
+.remote-control-keyboard:focus { outline: 0; }
+.remote-control-captured .remote-control-stage { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent), 0 0 0 2px color-mix(in srgb, var(--accent) 18%, transparent); }
+.remote-control:not(.remote-control-active) .remote-control-stage img { cursor: default; }
+.remote-control-statusbar { display: flex; min-width: 0; min-height: 38px; flex: 0 0 auto; align-items: center; gap: 14px; padding: 7px 14px calc(7px + env(safe-area-inset-bottom)); border-top: 1px solid var(--border); color: var(--muted); font-size: 12px; white-space: nowrap; }
+.remote-control-statusbar [data-remote-frame-count] { flex: 0 0 auto; color: var(--text); font: 700 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-variant-numeric: tabular-nums; }
+.remote-control-statusbar [data-remote-status] { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.remote-control-statusbar [data-state="error"], .remote-control-statusbar [data-state="busy"], .remote-control-statusbar [data-state="unsupported"] { color: var(--red); }
+.remote-control-statusbar [data-state="active"], .remote-control-statusbar [data-state="captured"] { color: var(--accent); }
+.remote-control-release-hint { margin-left: auto; color: var(--dim); }
+@media (max-width: 700px), (max-height: 520px) {
+  .remote-control-toolbar { gap: 6px; padding: 7px max(8px, env(safe-area-inset-right)) 7px max(8px, env(safe-area-inset-left)); }
+  .remote-control-toolbar button { min-width: 54px; min-height: 36px; padding-inline: 10px; }
+  .remote-control-toolbar select { min-height: 36px; }
+  .remote-control-stage { margin: 8px; border-radius: 9px; }
+  .remote-control-statusbar { gap: 9px; padding-inline: 10px; }
+  .remote-control-release-hint { display: none; }
+}

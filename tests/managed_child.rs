@@ -212,6 +212,45 @@ fn managed_child_loads_authenticates_reports_identity_and_shuts_down() {
             "managed route {path} must stay private",
         );
     }
+    assert_eq!(
+        client
+            .post(format!("{address}/api/remote-control/status"))
+            .json(&serde_json::json!({"controller_token": null}))
+            .send()
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    let remote_status: serde_json::Value = client
+        .post(format!("{address}/api/remote-control/status"))
+        .header(
+            reqwest::header::AUTHORIZATION,
+            bearer_header_value(&launch.token),
+        )
+        .json(&serde_json::json!({"controller_token": null}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(remote_status["ok"], true);
+    assert_eq!(remote_status["active"], false);
+    assert!(remote_status["supported"].is_boolean());
+    assert_eq!(
+        client
+            .post(format!("{address}/api/remote-control/status?private=true"))
+            .header(
+                reqwest::header::AUTHORIZATION,
+                bearer_header_value(&launch.token),
+            )
+            .json(&serde_json::json!({"controller_token": null}))
+            .send()
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+
     let sync: serde_json::Value = client
         .post(format!("{address}/api/sync"))
         .header(

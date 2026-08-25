@@ -23,6 +23,10 @@ use crate::{
         MANAGED_AUTH_HEADER, MANAGED_BIND_ADDRESS, MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH,
         MANAGED_SHUTDOWN_PATH, ManagedReadyResponse, bearer_token_matches,
     },
+    remote_control::{
+        MAX_REMOTE_CONTROL_BODY_BYTES, REMOTE_CONTROL_PATH_PREFIX, RemoteControlRuntime,
+        RemoteInputEvent,
+    },
     session_terminal::{MAX_INPUT_BYTES, SessionTerminalOperation, SessionTerminalRegistry},
     turn_history,
     ui_backend::{
@@ -56,6 +60,7 @@ const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
 const KATEX_CSS: &str = include_str!("webui/vendor/katex.min.css");
 const STYLE_CSS: &str = include_str!("webui/style.css");
 const SESSION_TERMINAL_JS: &str = include_str!("webui/session-terminal.js");
+const REMOTE_CONTROL_JS: &str = include_str!("webui/remote-control.js");
 const FILE_MANAGER_JS: &str = include_str!("webui/file-manager.js");
 const XTERM_JS: &str = include_str!("webui/vendor/xterm.js");
 const XTERM_ADDON_FIT_JS: &str = include_str!("webui/vendor/xterm-addon-fit.js");
@@ -149,9 +154,10 @@ pub(crate) fn shared_katex_font(path: &str) -> Option<&'static [u8]> {
         .find_map(|(candidate, content)| (*candidate == path).then_some(*content))
 }
 
-pub(crate) fn shared_session_terminal_asset(path: &str) -> Option<(&'static str, &'static str)> {
+pub(crate) fn shared_webui_component_asset(path: &str) -> Option<(&'static str, &'static str)> {
     match path {
         "/session-terminal.js" => Some(("text/javascript; charset=utf-8", SESSION_TERMINAL_JS)),
+        "/remote-control.js" => Some(("text/javascript; charset=utf-8", REMOTE_CONTROL_JS)),
         "/xterm.js" => Some(("text/javascript; charset=utf-8", XTERM_JS)),
         "/xterm-addon-fit.js" => Some(("text/javascript; charset=utf-8", XTERM_ADDON_FIT_JS)),
         "/xterm-addon-unicode11.js" => {
@@ -173,6 +179,7 @@ pub struct WebUiServer {
     port: u16,
     shutdown: Arc<AtomicBool>,
     worker: Option<JoinHandle<()>>,
+    _remote_control: Arc<RemoteControlRuntime>,
     _session_terminals: Arc<SessionTerminalRegistry>,
     _host_files: Arc<HostFileManager>,
 }
@@ -190,6 +197,7 @@ impl WebUiServer {
 impl Drop for WebUiServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
+        self._remote_control.shutdown();
         self._host_files.shutdown();
         if let Some(worker) = self.worker.take() {
             let _ = worker.join();
@@ -270,6 +278,7 @@ fn start_with_server(
     let backend: Arc<dyn UiBackend> = Arc::new(backend);
     let initial = backend.snapshot()?;
     let host_files = Arc::new(HostFileManager::new(&initial.environment.workspace)?);
+    let remote_control = Arc::new(RemoteControlRuntime::new()?);
     let session_terminals = Arc::new(SessionTerminalRegistry::new(
         &initial.environment.workspace,
     )?);
@@ -279,6 +288,7 @@ fn start_with_server(
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
+    let worker_remote_control = Arc::clone(&remote_control);
     let worker_session_terminals = Arc::clone(&session_terminals);
     let worker_host_files = Arc::clone(&host_files);
     let worker = thread::Builder::new()
@@ -286,6 +296,7 @@ fn start_with_server(
         .spawn(move || {
             let mut last_reconcile_error = None;
             while !worker_shutdown.load(Ordering::Acquire) {
+                worker_remote_control.expire_if_stale();
                 let reconcile = backend
                     .agent_ids()
                     .and_then(|agent_ids| worker_session_terminals.reconcile(agent_ids));
@@ -305,6 +316,7 @@ fn start_with_server(
                         let commands = Arc::clone(&commands);
                         let auth = Arc::clone(&auth);
                         let managed = Arc::clone(&managed);
+                        let remote_control = Arc::clone(&worker_remote_control);
                         let session_terminals = Arc::clone(&worker_session_terminals);
                         let host_files = Arc::clone(&worker_host_files);
                         let _ = thread::Builder::new()
@@ -316,6 +328,7 @@ fn start_with_server(
                                     commands.as_ref(),
                                     auth.as_ref(),
                                     managed.as_ref().as_ref(),
+                                    remote_control.as_ref(),
                                     session_terminals.as_ref(),
                                     host_files.as_ref(),
                                 );
@@ -334,6 +347,7 @@ fn start_with_server(
         port,
         shutdown,
         worker: Some(worker),
+        _remote_control: remote_control,
         _session_terminals: session_terminals,
         _host_files: host_files,
     })
@@ -562,6 +576,7 @@ fn serve(
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
     managed: Option<&ManagedWebAccess>,
+    remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
     host_files: &HostFileManager,
 ) {
@@ -571,6 +586,7 @@ fn serve(
             backend,
             commands,
             managed,
+            remote_control,
             session_terminals,
             host_files,
         ),
@@ -579,6 +595,7 @@ fn serve(
             backend,
             commands,
             auth,
+            remote_control,
             session_terminals,
             host_files,
         ),
@@ -600,6 +617,7 @@ fn route_managed(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     managed: &ManagedWebAccess,
+    remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
     host_files: &HostFileManager,
 ) -> Result<HttpResponse> {
@@ -641,6 +659,7 @@ fn route_managed(
             request,
             backend,
             commands,
+            remote_control,
             session_terminals,
             host_files,
             path,
@@ -650,6 +669,7 @@ fn route_managed(
             request,
             backend,
             commands,
+            remote_control,
             session_terminals,
             host_files,
             path,
@@ -660,6 +680,7 @@ fn route_managed(
                 request,
                 backend,
                 commands,
+                remote_control,
                 session_terminals,
                 host_files,
                 path,
@@ -675,6 +696,21 @@ fn route_managed(
                 request,
                 backend,
                 commands,
+                remote_control,
+                session_terminals,
+                host_files,
+                path,
+                query,
+            )
+        }
+        (&Method::Post, path)
+            if query.is_none() && path.starts_with(REMOTE_CONTROL_PATH_PREFIX) =>
+        {
+            operational_route(
+                request,
+                backend,
+                commands,
+                remote_control,
                 session_terminals,
                 host_files,
                 path,
@@ -693,6 +729,7 @@ fn route(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
+    remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
     host_files: &HostFileManager,
 ) -> Result<HttpResponse> {
@@ -704,7 +741,7 @@ fn route(
         return Ok(bytes_response("font/woff2", font));
     }
     if request.method() == &Method::Get
-        && let Some((content_type, content)) = shared_session_terminal_asset(path)
+        && let Some((content_type, content)) = shared_webui_component_asset(path)
     {
         return Ok(text_response(content_type, content));
     }
@@ -774,6 +811,7 @@ fn route(
         request,
         backend,
         commands,
+        remote_control,
         session_terminals,
         host_files,
         path,
@@ -785,6 +823,7 @@ fn operational_route(
     request: &mut Request,
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
+    remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
     host_files: &HostFileManager,
     path: &str,
@@ -846,6 +885,11 @@ fn operational_route(
                     || (*method == Method::Get && parse_download_content_path(path).is_some())) =>
         {
             host_file_response(request, host_files, path)
+        }
+        (&Method::Post, path)
+            if query.is_none() && path.starts_with(REMOTE_CONTROL_PATH_PREFIX) =>
+        {
+            remote_control_response(request, remote_control, path)
         }
         (&Method::Post, "/api/command") => command_response(request, commands),
         _ => Ok(json_response(
@@ -1344,6 +1388,154 @@ fn session_terminal_operation_response(operation: SessionTerminalOperation) -> H
             "error": operation.error,
         }),
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteStatusRequest {
+    controller_token: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteStartRequest {
+    fps: u8,
+    scale: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteTokenRequest {
+    controller_token: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteSettingsRequest {
+    controller_token: String,
+    fps: u8,
+    scale: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteFrameRequest {
+    controller_token: String,
+    after_sequence: Option<u64>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteScreenshotRequest {
+    scale: u8,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RemoteInputRequest {
+    controller_token: String,
+    events: Vec<RemoteInputEvent>,
+}
+
+fn remote_control_response(
+    request: &mut Request,
+    remote_control: &RemoteControlRuntime,
+    path: &str,
+) -> Result<HttpResponse> {
+    let action = path
+        .strip_prefix(REMOTE_CONTROL_PATH_PREFIX)
+        .unwrap_or_default();
+    let result = match action {
+        "status" => {
+            let input: RemoteStatusRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .status(input.controller_token.as_deref())
+                .map(|status| json_response(StatusCode(200), &status))
+        }
+        "start" => {
+            let input: RemoteStartRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .start(input.fps, input.scale)
+                .map(|started| json_response(StatusCode(200), &started))
+        }
+        "stop" => {
+            let input: RemoteTokenRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .stop(&input.controller_token)
+                .map(|operation| json_response(StatusCode(200), &operation))
+        }
+        "keepalive" => {
+            let input: RemoteTokenRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .keepalive(&input.controller_token)
+                .map(|operation| json_response(StatusCode(200), &operation))
+        }
+        "settings" => {
+            let input: RemoteSettingsRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .settings(&input.controller_token, input.fps, input.scale)
+                .map(|operation| json_response(StatusCode(200), &operation))
+        }
+        "frame" => {
+            let input: RemoteFrameRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .frame(&input.controller_token, input.after_sequence)
+                .map(|frame| match frame {
+                    Some(frame) => remote_frame_response(frame),
+                    None => data_response(StatusCode(204), Vec::new(), vec![no_store()]),
+                })
+        }
+        "screenshot" => {
+            let input: RemoteScreenshotRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .screenshot(input.scale)
+                .map(|frame| match frame {
+                    Some(frame) => remote_frame_response(frame),
+                    None => data_response(StatusCode(204), Vec::new(), vec![no_store()]),
+                })
+        }
+        "input" => {
+            let input: RemoteInputRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .input(&input.controller_token, &input.events)
+                .map(|operation| json_response(StatusCode(200), &operation))
+        }
+        "release" => {
+            let input: RemoteTokenRequest = read_json(request, MAX_REMOTE_CONTROL_BODY_BYTES)?;
+            remote_control
+                .release_inputs(&input.controller_token)
+                .map(|operation| json_response(StatusCode(200), &operation))
+        }
+        _ => {
+            return Ok(json_response(
+                StatusCode(404),
+                &json!({"ok": false, "error": "not found"}),
+            ));
+        }
+    };
+    Ok(result.unwrap_or_else(remote_control_error_response))
+}
+
+fn remote_control_error_response(error: crate::remote_control::RemoteControlError) -> HttpResponse {
+    json_response(
+        StatusCode(error.status()),
+        &json!({"ok": false, "code": error.code(), "error": error.message()}),
+    )
+}
+
+fn remote_frame_response(frame: crate::remote_control::RemoteFrame) -> HttpResponse {
+    let headers = [
+        ("X-Me-Remote-Sequence", frame.sequence.to_string()),
+        ("X-Me-Screen-Width", frame.screen_width.to_string()),
+        ("X-Me-Screen-Height", frame.screen_height.to_string()),
+        ("X-Me-Frame-Width", frame.frame_width.to_string()),
+        ("X-Me-Frame-Height", frame.frame_height.to_string()),
+    ]
+    .into_iter()
+    .filter_map(|(name, value)| Header::from_bytes(name, value).ok())
+    .chain([content_type("image/jpeg"), no_store()])
+    .collect::<Vec<_>>();
+    data_response(StatusCode(200), frame.jpeg.as_ref().clone(), headers)
 }
 
 fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpResponse> {
@@ -3589,6 +3781,14 @@ mod tests {
                 .status()
                 .is_success()
         );
+        assert!(
+            client
+                .get(format!("{address}/remote-control.js"))
+                .send()
+                .unwrap()
+                .status()
+                .is_success()
+        );
         let status: serde_json::Value = client
             .get(format!("{address}/api/auth/status"))
             .send()
@@ -3641,6 +3841,15 @@ mod tests {
             client
                 .post(format!("{address}/api/files/list"))
                 .json(&json!({"path": null, "roots": false}))
+                .send()
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
+                .post(format!("{address}/api/remote-control/status"))
+                .json(&json!({"controller_token": null}))
                 .send()
                 .unwrap()
                 .status(),
@@ -3702,6 +3911,36 @@ mod tests {
             .unwrap();
         assert_eq!(files["ok"], true);
         assert!(files["entries"].is_array());
+        let remote_status: serde_json::Value = client
+            .post(format!("{address}/api/remote-control/status"))
+            .header(reqwest::header::COOKIE, cookie)
+            .json(&json!({"controller_token": null}))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(remote_status["ok"], true);
+        assert_eq!(remote_status["active"], false);
+        assert!(remote_status["supported"].is_boolean());
+        for path in [
+            "/api/remote-control/unknown",
+            "/api/remote-control/status?private=true",
+            "/api/remote-control/status/extra",
+        ] {
+            assert_eq!(
+                client
+                    .post(format!("{address}{path}"))
+                    .header(reqwest::header::COOKIE, cookie)
+                    .json(&json!({"controller_token": null}))
+                    .send()
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::NOT_FOUND,
+                "{path}",
+            );
+        }
         let native_terminal: serde_json::Value = client
             .post(format!(
                 "{address}/api/session-terminal/{session_agent}/read"

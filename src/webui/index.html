@@ -55,6 +55,7 @@
         <button data-view="workmap">工作图</button>
         <button data-view="files">文件</button>
         <button data-view="session-terminal">终端</button>
+        <button data-view="remote-control">远程控制</button>
         <span id="terminal-tabs"></span>
       </nav>
 
@@ -110,6 +111,38 @@
             <button type="button" data-session-terminal-byte="10" aria-label="发送 Ctrl+P" disabled>^P</button>
             <button type="button" data-session-terminal-byte="11" aria-label="发送 Ctrl+Q" disabled>^Q</button>
             <button type="button" data-session-terminal-byte="0d" aria-label="发送 Enter" disabled>Enter</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="remote-control-view" class="view remote-control-view" aria-label="远程控制">
+        <div id="remote-control" class="remote-control">
+          <div class="remote-control-toolbar">
+            <button type="button" data-remote-start>开始</button>
+            <button type="button" data-remote-stop disabled>停止</button>
+            <button type="button" data-remote-screenshot>截屏</button>
+            <label>帧率：<select data-remote-fps>
+              <option value="1">1 FPS</option>
+              <option value="3" selected>3 FPS</option>
+              <option value="5">5 FPS</option>
+              <option value="10">10 FPS</option>
+            </select></label>
+            <label>清晰度：<select data-remote-scale>
+              <option value="100">100%</option>
+              <option value="75">75%</option>
+              <option value="50" selected>50%</option>
+              <option value="25">25%</option>
+            </select></label>
+          </div>
+          <div class="remote-control-stage" data-remote-stage>
+            <img data-remote-image alt="宿主机主屏幕" draggable="false" hidden>
+            <div class="remote-control-empty" data-remote-empty>点击“截屏”获取一帧，或点击“开始”进行远程控制。</div>
+            <textarea class="remote-control-keyboard" data-remote-keyboard aria-label="远程键盘输入" autocomplete="off" autocapitalize="off" spellcheck="false"></textarea>
+          </div>
+          <div class="remote-control-statusbar">
+            <span data-remote-frame-count>frame: 0</span>
+            <span data-remote-status data-state="pending">正在检查远程控制状态</span>
+            <span class="remote-control-release-hint">Ctrl+Shift+E 释放键鼠</span>
           </div>
         </div>
       </section>
@@ -205,6 +238,7 @@
   <script src="/xterm-addon-unicode11.js"></script>
   <script src="/file-manager.js"></script>
   <script src="/session-terminal.js"></script>
+  <script src="/remote-control.js"></script>
   <script src="/app.js"></script>
 </body>
 </html>

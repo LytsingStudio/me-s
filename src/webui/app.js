@@ -135,6 +135,8 @@ const elements = {
   sessionTerminalView: $("#session-terminal-view"),
   sessionTerminalScreen: $("#session-terminal-screen"),
   sessionTerminalControls: $("#session-terminal-controls"),
+  remoteControlView: $("#remote-control-view"),
+  remoteControl: $("#remote-control"),
   terminalView: $("#terminal-view"),
   transcript: $("#transcript"),
   transcriptContent: $("#transcript-content"),
@@ -235,6 +237,34 @@ function getSessionTerminalController() {
     });
   }
   return sessionTerminalController;
+}
+
+let remoteControlController = null;
+
+function remoteControlUnauthorized() {
+  remoteControlController?.authenticationLost();
+  showLogin("登录已失效，请重新登录");
+}
+
+function getRemoteControlController() {
+  if (!remoteControlController) {
+    remoteControlController = globalThis.MeRemoteControl.create({
+      container: elements.remoteControl,
+      request: (action, options) => fetch(`/api/remote-control/${encodeURIComponent(action)}`, { cache: "no-store", ...options }),
+      onUnauthorized: remoteControlUnauthorized,
+      notify: (message, kind) => toast(message, kind === "error"),
+    });
+  }
+  return remoteControlController;
+}
+
+function deactivateRemoteControlView() {
+  remoteControlController?.deactivate();
+}
+
+function syncRemoteControlView() {
+  if (state.view.kind === "remote-control") getRemoteControlController().activate();
+  else deactivateRemoteControlView();
 }
 
 let fileManagerController = null;
@@ -2146,6 +2176,7 @@ function syncSessionTerminalView() {
   sessionTerminalIdentityKey = key;
 }
 
+
 function renderTabs() {
   elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.classList.toggle("active", state.view.kind === button.dataset.view));
   elements.terminalTabs.innerHTML = state.terminals.map((session) =>
@@ -2157,10 +2188,12 @@ function renderTabs() {
   elements.chatView.classList.toggle("active", state.view.kind === "chat");
   elements.workmapView.classList.toggle("active", state.view.kind === "workmap");
   elements.sessionTerminalView.classList.toggle("active", state.view.kind === "session-terminal");
+  elements.remoteControlView.classList.toggle("active", state.view.kind === "remote-control");
   elements.filesView.classList.toggle("active", state.view.kind === "files");
   elements.terminalView.classList.toggle("active", state.view.kind === "terminal");
   syncSessionTerminalView();
   syncFileManagerView();
+  syncRemoteControlView();
 }
 
 function showView(view) {
@@ -3937,13 +3970,14 @@ window.addEventListener("pagehide", () => {
   state.pageClosing = true;
   stopUiAnimation();
   deactivateSessionTerminalView();
+  deactivateRemoteControlView();
   flushDraftBeforePageCloses();
 });
 window.addEventListener("pageshow", () => {
   state.pageClosing = false;
   syncUiAnimationScheduler();
   if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
-  if (state.view.kind === "session-terminal") renderTabs();
+  if (state.view.kind === "session-terminal" || state.view.kind === "remote-control") renderTabs();
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) stopUiAnimation(); else syncUiAnimationScheduler();

@@ -175,7 +175,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         return Ok(bytes_response("font/woff2", font));
     }
     if request.method() == &Method::Get
-        && let Some((content_type, content)) = crate::webui::shared_session_terminal_asset(&path)
+        && let Some((content_type, content)) = crate::webui::shared_webui_component_asset(&path)
     {
         return Ok(text_response(content_type, content));
     }
@@ -569,6 +569,11 @@ fn proxy_response(response: crate::gateway::ProxyResponse) -> HttpResponse {
         accept_ranges,
         content_range,
         vary,
+        remote_sequence,
+        screen_width,
+        screen_height,
+        frame_width,
+        frame_height,
         content_length,
         body,
     } = response;
@@ -580,6 +585,11 @@ fn proxy_response(response: crate::gateway::ProxyResponse) -> HttpResponse {
         ("Accept-Ranges", accept_ranges),
         ("Content-Range", content_range),
         ("Vary", vary),
+        ("X-Me-Remote-Sequence", remote_sequence),
+        ("X-Me-Screen-Width", screen_width),
+        ("X-Me-Screen-Height", screen_height),
+        ("X-Me-Frame-Width", frame_width),
+        ("X-Me-Frame-Height", frame_height),
     ] {
         if let Some(value) = value
             && let Ok(header) = Header::from_bytes(name, value)
@@ -649,5 +659,43 @@ mod tests {
         assert!(APP_JS.contains("id=\"settings-edb-cache-manager\""));
         assert!(APP_JS.contains("edbCacheInitialized: state.edbCacheInitialized"));
         assert!(APP_JS.contains("state.edbCacheInitialized = workspace.edbCacheInitialized"));
+    }
+
+    #[test]
+    fn remote_frame_proxy_preserves_binary_body_and_geometry_headers() {
+        let response = proxy_response(crate::gateway::ProxyResponse {
+            status: 200,
+            content_type: Some("image/jpeg".into()),
+            content_encoding: None,
+            content_disposition: None,
+            accept_ranges: None,
+            content_range: None,
+            vary: None,
+            remote_sequence: Some("42".into()),
+            screen_width: Some("1920".into()),
+            screen_height: Some("1080".into()),
+            frame_width: Some("960".into()),
+            frame_height: Some("540".into()),
+            content_length: Some(5),
+            body: Box::new(std::io::Cursor::new(vec![0xff, 0xd8, 1, 0xff, 0xd9])),
+        });
+        let header = |name: &'static str| {
+            response
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv(name))
+                .map(|header| header.value.as_str().to_owned())
+        };
+        assert_eq!(response.status_code(), StatusCode(200));
+        assert_eq!(response.data_length(), Some(5));
+        assert_eq!(header("Content-Type").as_deref(), Some("image/jpeg"));
+        assert_eq!(header("X-Me-Remote-Sequence").as_deref(), Some("42"));
+        assert_eq!(header("X-Me-Screen-Width").as_deref(), Some("1920"));
+        assert_eq!(header("X-Me-Screen-Height").as_deref(), Some("1080"));
+        assert_eq!(header("X-Me-Frame-Width").as_deref(), Some("960"));
+        assert_eq!(header("X-Me-Frame-Height").as_deref(), Some("540"));
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_reader(), &mut body).unwrap();
+        assert_eq!(body, [0xff, 0xd8, 1, 0xff, 0xd9]);
     }
 }

@@ -280,11 +280,33 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert!(session_terminal_runtime.contains("MeSessionTerminal"));
     assert!(session_terminal_runtime.contains("/api/session-terminal/"));
 
+    let remote_control_runtime = http
+        .get(format!("{address}/remote-control.js"))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .text()
+        .unwrap();
+    assert!(remote_control_runtime.contains("MeRemoteControl"));
+    assert!(remote_control_runtime.contains("X-Me-Remote-Sequence"));
+    assert!(!remote_control_runtime.contains("WebSocket"));
+
     assert_eq!(
         http.get(format!("{address}/api/gateway/state"))
             .send()
             .unwrap()
             .status(),
+        reqwest::StatusCode::UNAUTHORIZED
+    );
+    assert_eq!(
+        http.post(format!(
+            "{address}/api/workspaces/chat/remote-control/status"
+        ))
+        .json(&serde_json::json!({"controller_token": null}))
+        .send()
+        .unwrap()
+        .status(),
         reqwest::StatusCode::UNAUTHORIZED
     );
     let cookie = login(&address);
@@ -302,6 +324,45 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
     assert_eq!(initial["workspaces"][0]["id"], "chat");
     assert!(root.join(".me-gateway/state.json").exists());
     assert!(workspace_config_path(&root).exists());
+
+    let remote_status: serde_json::Value = http
+        .post(format!(
+            "{address}/api/workspaces/chat/remote-control/status"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&serde_json::json!({"controller_token": null}))
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(remote_status["ok"], true);
+    assert_eq!(remote_status["active"], false);
+    assert!(remote_status["supported"].is_boolean());
+    assert_eq!(
+        http.post(format!(
+            "{address}/api/workspaces/chat/remote-control/status?private=true"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&serde_json::json!({"controller_token": null}))
+        .send()
+        .unwrap()
+        .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    let unknown_remote = http
+        .post(format!(
+            "{address}/api/workspaces/chat/remote-control/unknown"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&serde_json::json!({}))
+        .send()
+        .unwrap();
+    assert_eq!(unknown_remote.status(), reqwest::StatusCode::BAD_GATEWAY);
+    let unknown_remote_body = unknown_remote.text().unwrap();
+    assert!(!unknown_remote_body.contains("127.0.0.1"));
+    assert!(!unknown_remote_body.contains("token"));
 
     let child_snapshot: serde_json::Value = http
         .get(format!("{address}/api/workspaces/chat/snapshot"))

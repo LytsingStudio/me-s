@@ -60,6 +60,11 @@ pub struct ProxyResponse {
     pub accept_ranges: Option<String>,
     pub content_range: Option<String>,
     pub vary: Option<String>,
+    pub remote_sequence: Option<String>,
+    pub screen_width: Option<String>,
+    pub screen_height: Option<String>,
+    pub frame_width: Option<String>,
+    pub frame_height: Option<String>,
     pub content_length: Option<usize>,
     pub body: Box<dyn Read + Send>,
 }
@@ -472,6 +477,19 @@ impl Gateway {
         let accept_ranges = header(reqwest::header::ACCEPT_RANGES);
         let content_range = header(reqwest::header::CONTENT_RANGE);
         let vary = header(reqwest::header::VARY);
+        let remote_sequence = header(reqwest::header::HeaderName::from_static(
+            "x-me-remote-sequence",
+        ));
+        let screen_width = header(reqwest::header::HeaderName::from_static(
+            "x-me-screen-width",
+        ));
+        let screen_height = header(reqwest::header::HeaderName::from_static(
+            "x-me-screen-height",
+        ));
+        let frame_width = header(reqwest::header::HeaderName::from_static("x-me-frame-width"));
+        let frame_height = header(reqwest::header::HeaderName::from_static(
+            "x-me-frame-height",
+        ));
         let content_length = response
             .content_length()
             .and_then(|length| usize::try_from(length).ok());
@@ -483,6 +501,11 @@ impl Gateway {
             accept_ranges,
             content_range,
             vary,
+            remote_sequence,
+            screen_width,
+            screen_height,
+            frame_width,
+            frame_height,
             content_length,
             body: Box::new(response),
         })
@@ -710,11 +733,26 @@ fn validate_proxy_path(path: &str) -> Result<()> {
             | "files/downloads/cancel"
     );
     let file_download = parse_file_download_content_path(path).is_some();
+    let remote_control = path.strip_prefix("remote-control/").is_some_and(|action| {
+        matches!(
+            action,
+            "status"
+                | "start"
+                | "stop"
+                | "keepalive"
+                | "settings"
+                | "frame"
+                | "screenshot"
+                | "input"
+                | "release"
+        )
+    });
     if !matches!(path, "sync" | "snapshot" | "command")
         && !deletion_blocker
         && !session_terminal
         && !file_post
         && !file_download
+        && !remote_control
     {
         return Err("不支持的工作区接口".into());
     }
@@ -748,6 +786,15 @@ mod tests {
             "session-terminal/main/read",
             "session-terminal/main/input",
             "session-terminal/worker_1/resize",
+            "remote-control/status",
+            "remote-control/start",
+            "remote-control/stop",
+            "remote-control/keepalive",
+            "remote-control/settings",
+            "remote-control/frame",
+            "remote-control/screenshot",
+            "remote-control/input",
+            "remote-control/release",
             "files/list",
             "files/mkdir",
             "files/rename",
@@ -781,6 +828,10 @@ mod tests {
             "session-terminal/../read",
             "session-terminal/main/read?cursor=1",
             "sync?private=true",
+            "remote-control/",
+            "remote-control/unknown",
+            "remote-control/frame/extra",
+            "remote-control/frame?after=1",
             "files",
             "files/list/extra",
             "files/jobs/run",
