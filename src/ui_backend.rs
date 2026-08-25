@@ -7,7 +7,7 @@ use std::{
 use crate::{
     Result,
     config::UNSET_EFFORT,
-    event::{AgentKind, EdbMutation, Event, EventId},
+    event::{AgentKind, EdbMutation, Event, EventId, SystemStaticPromptMode},
     terminal::{TerminalFrame, TerminalSessionPreview},
     workspace::{AgentId, Workspace, WorkspaceHandle},
 };
@@ -131,6 +131,16 @@ pub trait UiBackend: Send + Sync {
 
     fn agent_ids(&self) -> Result<Vec<AgentId>>;
 
+    fn session_terminal_agent_ids(&self) -> Result<Vec<AgentId>> {
+        Ok(self
+            .snapshot()?
+            .agents
+            .into_iter()
+            .filter(|agent| agent.orchestrator_name != "chatbot")
+            .map(|agent| agent.id)
+            .collect())
+    }
+
     fn api_activity(&self, agent_id: &AgentId) -> Result<UiApiActivity>;
 
     fn terminal_sessions(&self, agent_id: &AgentId) -> Result<Vec<TerminalSessionPreview>>;
@@ -167,6 +177,11 @@ pub enum UiCommand {
     ChangeModel {
         agent_id: AgentId,
         model: String,
+    },
+    ChangeSystemStaticPrompt {
+        agent_id: AgentId,
+        mode: SystemStaticPromptMode,
+        content: Option<String>,
     },
     ClearContext {
         agent_id: AgentId,
@@ -330,6 +345,18 @@ impl UiBackend for WorkspaceUiBackend {
         self.handle.agent_ids()
     }
 
+    fn session_terminal_agent_ids(&self) -> Result<Vec<AgentId>> {
+        self.handle
+            .agent_ids()?
+            .into_iter()
+            .filter_map(|id| match self.handle.orchestrator_name(&id) {
+                Ok("chatbot") => None,
+                Ok(_) => Some(Ok(id)),
+                Err(error) => Some(Err(error)),
+            })
+            .collect()
+    }
+
     fn api_activity(&self, agent_id: &AgentId) -> Result<UiApiActivity> {
         let activity = self.handle.api_activity(agent_id)?;
         Ok(UiApiActivity {
@@ -387,6 +414,15 @@ impl UiCommandGateway for WorkspaceUiCommandGateway {
             }
             UiCommand::ChangeModel { agent_id, model } => {
                 self.handle.submit_model_change(&agent_id, model)?;
+                Ok(UiCommandReceipt::Accepted)
+            }
+            UiCommand::ChangeSystemStaticPrompt {
+                agent_id,
+                mode,
+                content,
+            } => {
+                self.handle
+                    .submit_system_static_prompt_change(&agent_id, mode, content)?;
                 Ok(UiCommandReceipt::Accepted)
             }
             UiCommand::ClearContext { agent_id } => {
@@ -693,6 +729,134 @@ mod tests {
         drop(after_a);
         drop(before_b);
         drop(before_a);
+        drop(reader_b);
+        drop(reader_a);
+        drop(commands);
+        drop(backend);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn chatbot_static_prompt_commands_converge_through_authoritative_events() {
+        let directory = workspace();
+        let workspace = Workspace::open(&directory, config(), vec![model()]).unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
+        let reader_a = backend.clone();
+        let reader_b = backend.clone();
+        let chatbot = match commands
+            .submit(UiCommand::AddAgent {
+                orchestrator: "chatbot".into(),
+            })
+            .unwrap()
+        {
+            UiCommandReceipt::AgentCreated(agent) => agent.id,
+            receipt => panic!("unexpected receipt {receipt:?}"),
+        };
+        assert!(
+            !backend
+                .session_terminal_agent_ids()
+                .unwrap()
+                .contains(&chatbot)
+        );
+
+        assert_eq!(
+            commands
+                .submit(UiCommand::ChangeSystemStaticPrompt {
+                    agent_id: chatbot.clone(),
+                    mode: SystemStaticPromptMode::Custom,
+                    content: Some("# Custom\n\n跨设备保持完整内容。".into()),
+                })
+                .unwrap(),
+            UiCommandReceipt::Accepted
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let custom_event_id = loop {
+            let snapshot = reader_a.snapshot().unwrap();
+            if let Some(change) = snapshot
+                .agent(&chatbot)
+                .unwrap()
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::SystemStaticPromptChange(change) => Some(change),
+                    _ => None,
+                })
+            {
+                assert_eq!(change.mode, SystemStaticPromptMode::Custom);
+                assert_eq!(
+                    change.content.as_deref(),
+                    Some("# Custom\n\n跨设备保持完整内容。")
+                );
+                break change.id;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        };
+        let observed_b = reader_b.snapshot().unwrap();
+        assert!(observed_b.agent(&chatbot).unwrap().events.iter().any(|event| {
+            matches!(event, Event::SystemStaticPromptChange(change) if change.id == custom_event_id)
+        }));
+
+        assert_eq!(
+            commands
+                .submit(UiCommand::ChangeSystemStaticPrompt {
+                    agent_id: chatbot.clone(),
+                    mode: SystemStaticPromptMode::Default,
+                    content: None,
+                })
+                .unwrap(),
+            UiCommandReceipt::Accepted
+        );
+        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        loop {
+            let snapshot = reader_b.snapshot().unwrap();
+            if snapshot
+                .agent(&chatbot)
+                .unwrap()
+                .events
+                .iter()
+                .rev()
+                .find_map(|event| match event {
+                    Event::SystemStaticPromptChange(change) => Some(change),
+                    _ => None,
+                })
+                .is_some_and(|change| {
+                    change.mode == SystemStaticPromptMode::Default && change.content.is_none()
+                })
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            thread::sleep(Duration::from_millis(5));
+        }
+
+        let main = match commands
+            .submit(UiCommand::AddAgent {
+                orchestrator: "main-agent".into(),
+            })
+            .unwrap()
+        {
+            UiCommandReceipt::AgentCreated(agent) => agent.id,
+            receipt => panic!("unexpected receipt {receipt:?}"),
+        };
+        assert!(
+            backend
+                .session_terminal_agent_ids()
+                .unwrap()
+                .contains(&main)
+        );
+        let error = commands
+            .submit(UiCommand::ChangeSystemStaticPrompt {
+                agent_id: main.clone(),
+                mode: SystemStaticPromptMode::Custom,
+                content: Some("not allowed".into()),
+            })
+            .unwrap_err();
+        assert!(error.to_string().contains("does not support"));
+
+        commands.handle.delete_agent(&chatbot, true).unwrap();
+        commands.handle.delete_agent(&main, true).unwrap();
         drop(reader_b);
         drop(reader_a);
         drop(commands);

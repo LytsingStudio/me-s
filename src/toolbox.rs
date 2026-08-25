@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Result, agent_title, agent_toolbox, compact,
     config::{config_home, create_private_directory},
-    image_toolbox, python_runtime,
+    current_time, image_toolbox, python_runtime,
     terminal::{
         self, TerminalFrame, TerminalLineUpdate, TerminalManager, TerminalRequest,
         TerminalSessionPreview, TerminalStatus,
@@ -230,6 +230,58 @@ impl ToolboxCatalog {
     }
 }
 
+pub fn chatbot_catalog() -> Result<ToolboxCatalog> {
+    let (title_tools, title_brief) = agent_title::catalog_parts();
+    let (time_tools, time_brief) = current_time::catalog_parts();
+    let (compact_tools, compact_brief) = compact::chatbot_catalog_parts();
+    let mut tools = Vec::new();
+    tools.extend(title_tools);
+    tools.extend(time_tools);
+    tools.extend(compact_tools);
+    let mut catalog = catalog_from_parts(tools, vec![title_brief, time_brief, compact_brief])?;
+    catalog.prompt = render_chatbot_catalog_prompt(&catalog.tools, &catalog.briefs)?;
+    Ok(catalog)
+}
+
+fn render_chatbot_catalog_prompt(
+    tools: &[ToolboxTool],
+    briefs: &[(String, String)],
+) -> Result<String> {
+    let mut sections = vec![r#"# Chatbot utilities and result envelope
+
+The utility catalog contains exactly SetTitle, CurrentTime, and Compact. Their Provider function names are identical to the names shown below.
+
+Every utility response uses this runtime envelope:
+
+```json
+{
+  "result": {
+    "state": "succeeded",
+    "exit_code": null,
+    "detail": {}
+  },
+  "truncate": false
+}
+```
+
+`result.state` reports `succeeded`, `failed`, `interrupted`, or `indeterminate`. Each Result detail schema below describes only `result.detail`; it does not describe the outer envelope. `detail` is omitted when a response has no detail. Treat each response as conversation state for the current turn and follow any retryable flag or tip it contains."#.into()];
+    for (utility, brief) in briefs {
+        let mut section = format!("# Utility {utility}\n\n{}", brief.trim());
+        for tool in tools.iter().filter(|tool| tool.toolbox == utility.as_str()) {
+            section.push_str(&format!(
+                "\n\n## {}\n\nRoute:\n{}\n\nInstructions:\n{}\n\nResult detail schema:\n```json\n{}\n```\n\nExamples:\n{}",
+                tool.full_name,
+                tool.route.trim(),
+                tool.instructions.trim(),
+                serde_json::to_string_pretty(&tool.output_schema)?,
+                tool.examples.trim(),
+            ));
+        }
+        sections.push(section);
+    }
+    Ok(sections.join("\n\n"))
+}
+
 pub struct ToolboxRuntime {
     catalog: ToolboxCatalog,
     programs: BTreeMap<String, ToolboxClient>,
@@ -288,6 +340,7 @@ impl ToolboxRuntime {
                 agent_toolbox::AGENT_TOOLBOX_NAME
                     | agent_toolbox::WORKER_TOOLBOX_NAME
                     | agent_title::TOOLBOX_NAME
+                    | current_time::TOOLBOX_NAME
                     | workmap::WORKMAP_TOOLBOX_NAME
                     | compact::TOOLBOX_NAME
                     | image_toolbox::TOOLBOX_NAME
@@ -2104,6 +2157,39 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[test]
+    fn chatbot_catalog_contains_exactly_three_native_utility_tools() {
+        let catalog = chatbot_catalog().unwrap();
+        assert_eq!(
+            catalog
+                .tools()
+                .iter()
+                .map(|tool| tool.full_name.as_str())
+                .collect::<Vec<_>>(),
+            vec![
+                compact::TOOL_NAME,
+                current_time::TOOL_NAME,
+                agent_title::TOOL_NAME,
+            ]
+        );
+        assert_eq!(catalog.model_definitions().len(), 3);
+        assert!(catalog.resolve_api_name("SetTitle").is_some());
+        assert!(catalog.resolve_api_name("CurrentTime").is_some());
+        assert!(catalog.resolve_api_name("Compact").is_some());
+        assert!(catalog.resolve_api_name("File_Read").is_none());
+        assert!(catalog.resolve_api_name("Terminal_Create").is_none());
+        assert!(catalog.resolve_api_name("WorkMap_Read").is_none());
+        assert!(catalog.resolve_api_name("Image_View").is_none());
+        assert!(
+            catalog
+                .prompt()
+                .contains("exactly SetTitle, CurrentTime, and Compact")
+        );
+        assert!(!catalog.prompt().contains("File.Read"));
+        assert!(!catalog.prompt().contains("WorkMap"));
+        assert!(!catalog.prompt().contains("Terminal"));
     }
 
     #[test]

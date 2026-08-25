@@ -552,6 +552,17 @@ impl ChatProjection {
                     });
                 }
             }
+            Event::SystemStaticPromptChange(change) => {
+                self.messages.push(ChatMessage {
+                    kind: ChatBlockKind::StateNotice,
+                    content: change.content.as_ref().map_or_else(
+                        || "系统提示词已恢复默认".to_owned(),
+                        |content| format!("系统提示词已更新\n\n{content}"),
+                    ),
+                    timestamp_ms: change.timestamp_ms,
+                    tool: None,
+                });
+            }
             Event::ContextCleared(cleared) => {
                 self.messages.push(ChatMessage {
                     kind: ChatBlockKind::StateNotice,
@@ -1065,6 +1076,8 @@ enum RewindChoiceKind {
     UserPrompt(String),
     ContextCleared,
     ContextCompacted,
+    SystemStaticPromptCustom(String),
+    SystemStaticPromptDefault,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -2860,6 +2873,15 @@ fn rewind_choices(events: &[Event]) -> Result<Vec<RewindChoice>> {
                 event_id: cleared.id,
                 kind: RewindChoiceKind::ContextCleared,
             }),
+            Event::SystemStaticPromptChange(change) => Some(RewindChoice {
+                event_id: change.id,
+                kind: change
+                    .content
+                    .as_ref()
+                    .map_or(RewindChoiceKind::SystemStaticPromptDefault, |content| {
+                        RewindChoiceKind::SystemStaticPromptCustom(content.clone())
+                    }),
+            }),
             Event::CompactStateUpdate(update) if update.state == CompactState::Completed => {
                 Some(RewindChoice {
                     event_id: update.id,
@@ -4266,6 +4288,14 @@ fn overlay_content(overlay: &OverlayState, input: &str) -> (String, String, Vec<
                     }
                     RewindChoiceKind::ContextCompacted => {
                         format!("#{:<5} 上下文压缩", choice.event_id)
+                    }
+                    RewindChoiceKind::SystemStaticPromptCustom(content) => format!(
+                        "#{:<5} 应用自定义系统提示词：{}",
+                        choice.event_id,
+                        content.split_whitespace().collect::<Vec<_>>().join(" ")
+                    ),
+                    RewindChoiceKind::SystemStaticPromptDefault => {
+                        format!("#{:<5} 恢复默认系统提示词", choice.event_id)
                     }
                 })
                 .collect(),
@@ -8604,6 +8634,69 @@ mod tests {
         assert_eq!(
             handle_overlay_key(&mut blocked, &mut input, KeyCode::Enter),
             OverlayAction::Close
+        );
+    }
+
+    #[test]
+    fn prompt_change_rewind_choices_distinguish_custom_and_default_and_restore_prefix_state() {
+        let mut edb = EventDataBase::new();
+        let first = edb
+            .append_system_static_prompt_change(
+                crate::event::SystemStaticPromptMode::Custom,
+                Some("# 第一版\n\n完整多行内容".into()),
+            )
+            .unwrap();
+        let restored = edb
+            .append_system_static_prompt_change(crate::event::SystemStaticPromptMode::Default, None)
+            .unwrap();
+        let latest = edb
+            .append_system_static_prompt_change(
+                crate::event::SystemStaticPromptMode::Custom,
+                Some("# 第二版\n\n稍后撤回".into()),
+            )
+            .unwrap();
+        assert_eq!(
+            rewind_choices(edb.events()).unwrap(),
+            vec![
+                RewindChoice {
+                    event_id: latest,
+                    kind: RewindChoiceKind::SystemStaticPromptCustom("# 第二版\n\n稍后撤回".into(),),
+                },
+                RewindChoice {
+                    event_id: restored,
+                    kind: RewindChoiceKind::SystemStaticPromptDefault,
+                },
+                RewindChoice {
+                    event_id: first,
+                    kind: RewindChoiceKind::SystemStaticPromptCustom(
+                        "# 第一版\n\n完整多行内容".into(),
+                    ),
+                },
+            ]
+        );
+        let overlay = OverlayState::Rewind {
+            choices: rewind_choices(edb.events()).unwrap(),
+            selected: 0,
+        };
+        let (_, _, rows, _) = overlay_content(&overlay, "");
+        assert!(rows.iter().any(|row| row.contains("应用自定义系统提示词")));
+        assert!(rows.iter().any(|row| row.contains("恢复默认系统提示词")));
+
+        let high_water = edb.next_event_id();
+        edb.rewind_to_event(latest).unwrap();
+        assert_eq!(edb.next_event_id(), high_water);
+        let projection = ChatProjection::replay_events(edb.events()).unwrap();
+        assert_eq!(
+            projection.messages.last().unwrap().content,
+            "系统提示词已恢复默认"
+        );
+
+        edb.rewind_to_event(restored).unwrap();
+        assert_eq!(edb.next_event_id(), high_water);
+        let projection = ChatProjection::replay_events(edb.events()).unwrap();
+        assert_eq!(
+            projection.messages.last().unwrap().content,
+            "系统提示词已更新\n\n# 第一版\n\n完整多行内容"
         );
     }
 

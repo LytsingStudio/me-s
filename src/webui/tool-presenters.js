@@ -4,7 +4,7 @@
   const registry = new Map();
 
   const KNOWN_TOOLS = [
-    "SetTitle", "Compact",
+    "SetTitle", "CurrentTime", "Compact",
     "WorkMap.Read", "WorkMap.ReadHistory", "WorkMap.Start", "WorkMap.UpdatePlanState",
     "WorkMap.AddNote", "WorkMap.ChangePlan", "WorkMap.AddPlan", "WorkMap.CloseObjective",
     "WorkMap.AddMemory", "WorkMap.InvalidateMemory",
@@ -889,6 +889,22 @@
     summary: (input) => input.title || "",
     input: (input) => [fieldBlock("标题", [["新标题", input.title]])],
     output: () => [noticeBlock("结果", "会话标题已更新", "success")],
+  });
+
+  define("CurrentTime", {
+    title: "查询当前时间", icon: "time",
+    summary: () => "",
+    input: () => [noticeBlock("参数", "无参数", "muted")],
+    output(input, output) {
+      const value = objectValue(resultValue(output));
+      return [fieldBlock("当前时间", [
+        ["本地时间", value.local_rfc3339],
+        ["UTC 时间", value.utc_rfc3339],
+        ["UTC 偏移", value.utc_offset],
+        ["星期", value.weekday],
+        ["Unix 时间（毫秒）", value.unix_timestamp_ms],
+      ])];
+    },
   });
 
   define("Compact", {

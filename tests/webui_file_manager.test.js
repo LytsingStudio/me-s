@@ -32,7 +32,7 @@ describe("per-session host file manager", () => {
 
   test("both WebUIs present WorkMap as 工作图", () => {
     for (const html of [directHtml, gatewayHtml]) {
-      expect(html).toContain('data-view="workmap">工作图</button>');
+      expect(html).toContain('data-view="workmap" data-work-only>工作图</button>');
       expect(html).toContain('<strong>工作图</strong>');
     }
   });

@@ -122,6 +122,26 @@ button { color: inherit; }
 .view { display: none; min-width: 0; min-height: 0; }
 .view.active { display: flex; }
 #chat-view { flex-direction: column; }
+.system-prompt-view { align-items: stretch; justify-content: center; overflow: auto; padding: 28px max(24px, calc((100% - 1040px) / 2)); }
+.system-prompt-panel { display: flex; width: 100%; max-height: 760px; min-height: 420px; flex: 1 1 auto; flex-direction: column; overflow: hidden; border: 1px solid var(--border-bright); border-radius: 15px; background: var(--panel); box-shadow: var(--shadow); }
+.system-prompt-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 20px; padding: 22px 24px 18px; border-bottom: 1px solid var(--border); }
+.system-prompt-header h2 { margin: 0; color: var(--text); font-size: 18px; }
+.system-prompt-header p { max-width: 680px; margin: 7px 0 0; color: var(--muted); font-size: 13px; line-height: 1.6; }
+.system-prompt-mode { flex: 0 0 auto; padding: 5px 9px; border: 1px solid var(--border-bright); border-radius: 999px; background: var(--panel-2); color: var(--muted); font-size: 12px; font-weight: 700; }
+.system-prompt-mode[data-mode="custom"] { border-color: color-mix(in srgb, var(--violet) 55%, var(--border)); color: var(--violet); }
+.system-prompt-input { width: 100%; min-height: 0; flex: 1 1 auto; resize: none; border: 0; outline: 0; padding: 22px 24px; background: var(--bg); color: var(--text); font: 14px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; tab-size: 2; }
+.system-prompt-input:focus { box-shadow: inset 0 0 0 2px color-mix(in srgb, var(--violet) 55%, transparent); }
+.system-prompt-input:disabled { opacity: .72; cursor: wait; }
+.system-prompt-actions { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 14px 18px; border-top: 1px solid var(--border); background: var(--panel-2); }
+.system-prompt-actions > span { color: var(--muted); font-size: 12px; }
+.system-prompt-actions > span[data-state="dirty"] { color: var(--yellow); }
+.system-prompt-actions > span[data-state="pending"] { color: var(--cyan); }
+.system-prompt-actions > div { display: flex; align-items: center; gap: 8px; }
+.system-prompt-actions button { min-height: 34px; padding: 7px 12px; border: 1px solid var(--border-bright); border-radius: 9px; background: transparent; color: var(--text); cursor: pointer; }
+.system-prompt-actions button:hover:not(:disabled) { background: var(--panel-3); }
+.system-prompt-actions button.primary-button { border-color: var(--primary-border); background: var(--primary-bg); color: var(--on-accent); }
+.system-prompt-actions button.primary-button:hover:not(:disabled) { background: var(--primary-hover); }
+.system-prompt-actions button:disabled { opacity: .4; cursor: default; }
 .transcript { contain: layout paint style; flex: 1; min-height: 0; overflow: auto; overflow-anchor: auto; padding: 28px max(24px, calc((100% - 1200px) / 2)); }
 .transcript-content { display: flow-root; min-height: 100%; }
 .scroll-to-bottom-anchor { position: relative; z-index: 12; height: 0; flex: 0 0 0; pointer-events: none; }
@@ -431,6 +451,7 @@ button { color: inherit; }
   .objective-summary, .composer-shell { margin-left: 16px; margin-right: 16px; }
   .statusbar { padding: 5px 16px; }
   #input-hint { display: none; }
+  .system-prompt-view { padding-left: 16px; padding-right: 16px; }
 }
 
 @media (orientation: portrait) {
@@ -531,6 +552,14 @@ button { color: inherit; }
   .composer-actions::before { content: ""; }
   .composer-actions .composer-button { min-width: 50px; min-height: 30px; }
 
+  .system-prompt-view { justify-content: flex-start; overflow: hidden; padding: 10px max(10px, env(safe-area-inset-right)) 10px max(10px, env(safe-area-inset-left)); }
+  .system-prompt-panel { min-height: 0; max-height: none; border-radius: 12px; }
+  .system-prompt-header { gap: 12px; padding: 15px 14px 13px; }
+  .system-prompt-header p { margin-top: 5px; font-size: 12px; line-height: 1.45; }
+  .system-prompt-mode { padding: 4px 7px; }
+  .system-prompt-input { min-height: 0; padding: 14px; font-size: 16px; }
+  .system-prompt-actions { align-items: stretch; flex-direction: column; gap: 9px; padding: 10px 12px calc(10px + env(safe-area-inset-bottom)); }
+  .system-prompt-actions > div { justify-content: flex-end; }
   .view-toolbar { padding: 11px max(12px, env(safe-area-inset-right)) 11px max(12px, env(safe-area-inset-left)); }
   .view-toolbar span { display: block; margin: 3px 0 0; }
   .document-view { padding: 18px max(12px, env(safe-area-inset-right)) 18px max(12px, env(safe-area-inset-left)); }

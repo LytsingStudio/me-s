@@ -14,8 +14,8 @@ use crate::{
         ModelConfig, UNSET_EFFORT, WorkspaceConfig, create_private_directory, workspace_config_path,
     },
     event::{
-        AgentKind, EdbMutation, Event, EventDataBase, EventId, agent_kind_definition,
-        latest_agent_turn,
+        AgentKind, EdbMutation, Event, EventDataBase, EventId, SystemStaticPromptMode,
+        agent_kind_definition, latest_agent_turn,
     },
     model::ModelRuntime,
     orchestrator::{
@@ -418,6 +418,16 @@ impl Workspace {
 
     pub fn submit_model_change(&self, id: &AgentId, model: String) -> Result<()> {
         self.handle.submit_model_change(id, model)
+    }
+
+    pub fn submit_system_static_prompt_change(
+        &self,
+        id: &AgentId,
+        mode: SystemStaticPromptMode,
+        content: Option<String>,
+    ) -> Result<()> {
+        self.handle
+            .submit_system_static_prompt_change(id, mode, content)
     }
 
     pub fn submit_context_clear(&self, id: &AgentId) -> Result<()> {
@@ -1033,7 +1043,7 @@ impl WorkspaceHandle {
         Ok(children)
     }
 
-    fn orchestrator_name(&self, id: &AgentId) -> Result<&'static str> {
+    pub(crate) fn orchestrator_name(&self, id: &AgentId) -> Result<&'static str> {
         self.with_runtime(id, |runtime| Ok(runtime.orchestrator_name()))
     }
 
@@ -1181,6 +1191,17 @@ impl WorkspaceHandle {
 
     pub(crate) fn submit_model_change(&self, id: &AgentId, model: String) -> Result<()> {
         self.with_runtime(id, |runtime| runtime.submit_model_change(model))
+    }
+
+    pub(crate) fn submit_system_static_prompt_change(
+        &self,
+        id: &AgentId,
+        mode: SystemStaticPromptMode,
+        content: Option<String>,
+    ) -> Result<()> {
+        self.with_runtime(id, |runtime| {
+            runtime.submit_system_static_prompt_change(mode, content)
+        })
     }
 
     pub(crate) fn submit_context_clear(&self, id: &AgentId) -> Result<()> {

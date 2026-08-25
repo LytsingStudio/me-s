@@ -13,6 +13,10 @@ const TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so 
 Call Compact only after the runtime explicitly warns that context space is running low, and only at a safe point: finish the current atomic action, persist any valuable WorkMap state, and make Compact the only tool call in that model response. Compact has no arguments. The runtime rejects Compact when no warning is active and reports the current context usage. After accepting the request, the runtime will perform context compaction, activate the resulting continuation summary only after successful completion, then continue the same Agent turn. WorkMap survives compaction independently of the summary; after compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. Do not call Compact merely to shorten a healthy context, and do not narrate or imitate compaction in assistant text."#;
 
 const INSTRUCTIONS: &str = r#"Call with an empty object only after the runtime explicitly issues a context-low warning. Compact must be the sole tool call in the response. A call made without an active warning is rejected with the current context usage. After the tool is accepted, the runtime performs context compaction automatically; do not issue other tools in that response."#;
+
+const CHATBOT_TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a concise continuation summary when context space is running low.
+
+Call Compact only after the runtime explicitly warns that context space is running low. It must be the only tool call in that response. After the call is accepted, the runtime creates a conversational continuity summary and continues the same user turn from it. If summarization fails or is interrupted, the previous conversation remains effective. Do not call Compact merely to shorten a healthy conversation."#;
 const LOW_CONTEXT_WINDOW_MAX: u64 = 384_000;
 const MEDIUM_CONTEXT_WINDOW_MAX: u64 = 680_000;
 const ROUTE: &str = "Compress the accumulated conversation at a safe point only after the runtime explicitly warns that context is running low. It must be the sole tool call in the response.";
@@ -129,6 +133,22 @@ fn multi_turn_prompt(stage: CompactStage, active_sessions: Option<&str>) -> Opti
     }
 }
 
+pub const CHATBOT_COMPACT_PROMPT: &str = r#"CRITICAL: Respond with raw text only. Do not call any tools.
+
+Create one self-contained continuation summary of the conversation for another Chatbot model that will immediately continue the same user turn. Focus on natural conversational continuity rather than a technical handoff.
+
+Preserve only information that remains useful:
+- the current topic and the user's active intent;
+- facts, preferences, boundaries, and personal context shared by the user;
+- important conclusions, commitments, and unresolved questions;
+- the still-relevant emotional tone and interaction style;
+- recent conversational progress and the natural point from which the next response should continue;
+- exact names, dates, numbers, quotations, and wording wherever precision matters.
+
+Clearly distinguish what the user stated, what the assistant suggested, and what remains uncertain. Resolve apparent conflicts using the latest applicable message, but do not turn uncertainty into fact. Drop repetitive greetings, stale or superseded material, needless restatement, and implementation-oriented detail that does not help continue the conversation.
+
+Do not answer the user, continue the discussion, add new advice, or mention this compaction process. Output only the continuation summary as plain Markdown text."#;
+
 const SINGLE_TURN_STAGES: [Option<CompactStage>; 1] = [None];
 const MULTI_TURN_STAGES: [Option<CompactStage>; 6] = [
     Some(CompactStage::Analysis),
@@ -154,7 +174,7 @@ pub fn stages(kind: CompactKind, has_active_sessions: bool) -> &'static [Option<
             &MULTI_TURN_STAGES_WITH_ACTIVE_SESSIONS
         }
         CompactKind::MainAgentMultiTurn | CompactKind::ManagerMultiTurn => &MULTI_TURN_STAGES,
-        CompactKind::WorkerSingleTurn => &SINGLE_TURN_STAGES,
+        CompactKind::WorkerSingleTurn | CompactKind::ChatbotSingleTurn => &SINGLE_TURN_STAGES,
     }
 }
 
@@ -167,6 +187,7 @@ pub fn prompt(
         (CompactKind::MainAgentMultiTurn, Some(stage)) => multi_turn_prompt(stage, active_sessions),
         (CompactKind::ManagerMultiTurn, Some(stage)) => multi_turn_prompt(stage, active_sessions),
         (CompactKind::WorkerSingleTurn, None) => Some(WORKER_COMPACT_PROMPT.to_owned()),
+        (CompactKind::ChatbotSingleTurn, None) => Some(CHATBOT_COMPACT_PROMPT.to_owned()),
         _ => None,
     }
 }
@@ -280,6 +301,11 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
     )
 }
 
+pub fn chatbot_catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
+    let (tools, _) = catalog_parts();
+    (tools, (TOOLBOX_NAME.into(), CHATBOT_TOOLBOX_BRIEF.into()))
+}
+
 pub fn execute(
     arguments: &str,
     warning_active: bool,
@@ -346,6 +372,13 @@ pub fn format_summary(summary: &str) -> String {
 pub fn continuation_message(summary: &str) -> String {
     format!(
         "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nThe persistent WorkMap survives compaction separately from this summary. The summary is not authoritative for the Current Objective, its Plan IDs, Notes, or completion state. Before any further non-WorkMap action, call WorkMap.Read and resume from that result. Any final-answer audit performed before compaction is stale and must be repeated.\n\n{}",
+        summary.trim()
+    )
+}
+
+pub fn chatbot_continuation_message(summary: &str) -> String {
+    format!(
+        "This conversation is continuing from a summary of the earlier messages. Use it as context, preserve the user's intent and the established tone, and continue the same turn naturally from the exact point where the conversation paused. Do not discuss the summary or the compaction process unless the user explicitly asks about it.\n\n{}",
         summary.trim()
     )
 }
@@ -487,7 +520,7 @@ mod tests {
     }
 
     #[test]
-    fn multi_turn_and_worker_prompts_have_distinct_contracts() {
+    fn compact_profiles_have_distinct_prompt_contracts() {
         assert!(MULTI_TURN_ANALYSIS_PROMPT.contains("stage 1 of a multi-stage"));
         assert!(MULTI_TURN_ANALYSIS_PROMPT.contains("Previous Summary Handling"));
         assert!(MULTI_TURN_ANALYSIS_PROMPT.contains("source of information, never as a template"));
@@ -523,6 +556,17 @@ mod tests {
                 .to_ascii_lowercase()
                 .contains("assistant")
         );
+        assert!(CHATBOT_COMPACT_PROMPT.contains("raw text only"));
+        assert!(CHATBOT_COMPACT_PROMPT.contains("current topic"));
+        assert!(CHATBOT_COMPACT_PROMPT.contains("emotional tone"));
+        assert!(CHATBOT_COMPACT_PROMPT.contains("user stated"));
+        assert!(CHATBOT_COMPACT_PROMPT.contains("assistant suggested"));
+        assert!(CHATBOT_COMPACT_PROMPT.contains("remains uncertain"));
+        assert!(CHATBOT_COMPACT_PROMPT.contains("repetitive greetings"));
+        assert!(!CHATBOT_COMPACT_PROMPT.contains("WorkMap"));
+        assert!(!CHATBOT_COMPACT_PROMPT.contains("Active Tool Sessions"));
+        assert!(!CHATBOT_COMPACT_PROMPT.contains("Worker conversation"));
+
         let formatted =
             format_summary("<analysis>draft</analysis>\n\n<summary>\nalpha\n\n\n beta\n</summary>");
         assert_eq!(formatted, "Summary:\nalpha\n\n beta");
@@ -583,6 +627,20 @@ mod tests {
         assert!(
             prompt(
                 CompactKind::WorkerSingleTurn,
+                Some(CompactStage::Analysis),
+                None
+            )
+            .is_none()
+        );
+
+        assert_eq!(stages(CompactKind::ChatbotSingleTurn, false), &[None]);
+        assert_eq!(
+            prompt(CompactKind::ChatbotSingleTurn, None, None),
+            Some(CHATBOT_COMPACT_PROMPT.to_owned())
+        );
+        assert!(
+            prompt(
+                CompactKind::ChatbotSingleTurn,
                 Some(CompactStage::Analysis),
                 None
             )

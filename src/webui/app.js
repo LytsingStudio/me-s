@@ -12,6 +12,7 @@ const CONNECTION_STABILIZE_SUCCESSES = 2;
 const INPUT_ANIMATION_QUIET_MS = 250;
 const UI_ANIMATION_INTERVAL_MS = 100;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
+const SYSTEM_STATIC_PROMPT_MAX_BYTES = 32 * 1024;
 function browserPort(locationValue = document.location) {
   const explicitPort = String(locationValue?.port || "");
   const protocol = String(locationValue?.protocol || "").toLowerCase();
@@ -42,11 +43,13 @@ document.documentElement?.classList?.toggle("ios-webkit", IOS_WEBKIT);
 const state = {
   snapshot: {
     revision: 0, environment: null, agents: [], models: [], orchestrators: [], default_orchestrator: null,
-    tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] },
+    chatbot_default_static_prompt: "",
+    tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] }
   },
   stores: new Map(),
   drafts: new Map(),
   draftSync: new Map(),
+  promptDrafts: new Map(),
   selectedAgent: null,
   apiActivity: { agentId: null, active: false, receivedSseEvents: 0 },
   pendingAgentSelection: null,
@@ -129,6 +132,12 @@ const elements = {
   tabs: $("#view-tabs"),
   terminalTabs: $("#terminal-tabs"),
   chatView: $("#chat-view"),
+  systemPromptView: $("#system-prompt-view"),
+  systemPromptMode: $("#system-prompt-mode"),
+  systemPromptInput: $("#system-prompt-input"),
+  systemPromptStatus: $("#system-prompt-status"),
+  systemPromptRestore: $("#system-prompt-restore"),
+  systemPromptApply: $("#system-prompt-apply"),
   workmapView: $("#workmap-view"),
   filesView: $("#files-view"),
   fileManager: $("#file-manager"),
@@ -344,6 +353,10 @@ function agentMeta() {
 
 function isWorkerAgent(meta = agentMeta()) {
   return meta?.orchestrator === "worker-agent";
+}
+
+function isChatbotAgent(meta = agentMeta()) {
+  return meta?.orchestrator === "chatbot";
 }
 
 function canControlRuntime(meta = agentMeta()) {
@@ -1092,6 +1105,7 @@ function snapshotPresentationSignature(snapshot) {
     ]),
     orchestrators: snapshot.orchestrators || [],
     defaultOrchestrator: snapshot.default_orchestrator || null,
+    chatbotDefaultStaticPrompt: snapshot.chatbot_default_static_prompt || "",
   });
 }
 
@@ -1113,6 +1127,7 @@ function reconcileAgents() {
       state.stores.delete(id);
       state.drafts.delete(id);
       clearDraftBatch(state.draftSync.get(id));
+      state.promptDrafts.delete(id);
       state.draftSync.delete(id);
       state.workerActivityIndexes.delete(id);
       changed = true;
@@ -1126,6 +1141,11 @@ function reconcileAgents() {
   if (!state.selectedAgent || !ids.has(state.selectedAgent)) {
     state.selectedAgent = state.snapshot.agents.find((agent) => agent.id === "main")?.id
       || state.snapshot.agents[0]?.id || null;
+    state.view = { kind: "chat", sessionId: null };
+  }
+  if (isChatbotAgent() && !["chat", "system-prompt"].includes(state.view.kind)) {
+    state.view = { kind: "chat", sessionId: null };
+  } else if (!isChatbotAgent() && state.view.kind === "system-prompt") {
     state.view = { kind: "chat", sessionId: null };
   }
   return changed || previousAgent !== state.selectedAgent
@@ -1635,6 +1655,16 @@ function consumeChatEvents(projection, events) {
       case "ContextCleared":
         addNotice(projection, changes, "上下文已清空", value);
         break;
+      case "SystemStaticPromptChange":
+        addNotice(
+          projection,
+          changes,
+          normalize(value.mode) === "custom"
+            ? `系统提示词已更新\n${String(value.content ?? "")}`
+            : "系统提示词已恢复默认",
+          value,
+        );
+        break;
       case "CompactStateUpdate":
         if (value.state === "Started") {
           beginCompactActivity(projection, changes, value);
@@ -1957,6 +1987,7 @@ function renderAll() {
   renderAgents();
   renderTabs();
   renderAgentControls();
+  renderSystemPromptEditor();
   renderTranscript(true, 0);
   refreshRunningToolNodes();
   renderObjective();
@@ -1984,6 +2015,7 @@ function renderIncremental(request) {
   if (request.connection) renderConnection();
   if (request.agents) renderAgents();
   if (request.tabs) renderTabs();
+  if (request.tabs || request.currentEvents) renderSystemPromptEditor();
   if (changes.transcript) {
     renderTranscript(Boolean(changes.fullReplay), changes.transcriptFrom ?? 0);
     transcriptChanged = true;
@@ -2178,14 +2210,29 @@ function syncSessionTerminalView() {
 
 
 function renderTabs() {
-  elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.classList.toggle("active", state.view.kind === button.dataset.view));
-  elements.terminalTabs.innerHTML = state.terminals.map((session) =>
+  const chatbot = isChatbotAgent();
+  const allowed = chatbot ? new Set(["chat", "system-prompt"]) : null;
+  if ((chatbot && !allowed.has(state.view.kind)) || (!chatbot && state.view.kind === "system-prompt")) {
+    state.view = { kind: "chat", sessionId: null };
+  }
+  elements.tabs.querySelectorAll("[data-work-only]").forEach((node) => {
+    node.classList.toggle("hidden", chatbot);
+  });
+  elements.tabs.querySelectorAll("[data-chatbot-only]").forEach((node) => {
+    node.classList.toggle("hidden", !chatbot);
+  });
+  elements.tabs.querySelectorAll("button[data-view]").forEach((button) => {
+    button.classList.toggle("active", !button.classList.contains("hidden")
+      && state.view.kind === button.dataset.view);
+  });
+  elements.terminalTabs.innerHTML = chatbot ? "" : state.terminals.map((session) =>
     `<button data-terminal="${escapeAttr(session.session_id)}" class="${state.view.kind === "terminal" && state.view.sessionId === session.session_id ? "active" : ""}">Terminal · ${escapeHtml(session.session_id)}</button>`
   ).join("");
   elements.terminalTabs.querySelectorAll("[data-terminal]").forEach((button) => button.addEventListener("click", () => {
     showView({ kind: "terminal", sessionId: button.dataset.terminal });
   }));
   elements.chatView.classList.toggle("active", state.view.kind === "chat");
+  elements.systemPromptView.classList.toggle("active", state.view.kind === "system-prompt");
   elements.workmapView.classList.toggle("active", state.view.kind === "workmap");
   elements.sessionTerminalView.classList.toggle("active", state.view.kind === "session-terminal");
   elements.remoteControlView.classList.toggle("active", state.view.kind === "remote-control");
@@ -2198,18 +2245,165 @@ function renderTabs() {
 
 function showView(view) {
   flushPendingRender();
-  if (view.kind === "terminal"
-      && (state.view.kind !== "terminal" || state.view.sessionId !== view.sessionId)) {
+  const chatbot = isChatbotAgent();
+  const nextView = (chatbot && !["chat", "system-prompt"].includes(view.kind))
+    || (!chatbot && view.kind === "system-prompt")
+    ? { kind: "chat", sessionId: null } : view;
+  if (nextView.kind === "terminal"
+      && (state.view.kind !== "terminal" || state.view.sessionId !== nextView.sessionId)) {
     state.terminalFollowBottom = true;
   }
-  state.view = view;
+  state.view = nextView;
   renderTabs();
+  renderSystemPromptEditor();
   renderObjective();
   if (state.view.kind === "workmap") renderWorkMap();
   renderComposer();
   renderStatus();
   updateScrollToBottomButton();
   if (state.view.kind === "terminal") void renderTerminal();
+}
+
+function latestSystemPromptState(agentId = state.selectedAgent) {
+  const defaultContent = String(state.snapshot.chatbot_default_static_prompt ?? "");
+  const events = state.stores.get(agentId)?.events || [];
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const [kind, value] = eventParts(events[index]);
+    if (kind !== "SystemStaticPromptChange") continue;
+    const custom = normalize(value.mode) === "custom";
+    return {
+      mode: custom ? "Custom" : "Default",
+      content: custom ? String(value.content ?? "") : defaultContent,
+      eventId: Number(value.id),
+    };
+  }
+  return { mode: "Default", content: defaultContent, eventId: null };
+}
+
+function systemPromptChangeMatches(value, pending) {
+  const mode = normalize(value.mode) === "custom" ? "Custom" : "Default";
+  return mode === pending.mode
+    && (mode === "Default" || String(value.content ?? "") === pending.content);
+}
+
+function systemPromptEditorState(agentId = state.selectedAgent) {
+  const meta = state.snapshot.agents.find((agent) => agent.id === agentId);
+  if (!agentId || !isChatbotAgent(meta)) return null;
+  const saved = latestSystemPromptState(agentId);
+  let draft = state.promptDrafts.get(agentId);
+  if (!draft) {
+    draft = {
+      content: saved.content, dirty: false, pending: null,
+      savedMode: saved.mode, savedContent: saved.content, savedEventId: saved.eventId,
+    };
+    state.promptDrafts.set(agentId, draft);
+  }
+  if (draft.pending) {
+    const events = state.stores.get(agentId)?.events || [];
+    const confirmation = events.find((event) => {
+      const [kind, value] = eventParts(event);
+      return kind === "SystemStaticPromptChange"
+        && Number(value.id) > draft.pending.afterEventId
+        && systemPromptChangeMatches(value, draft.pending);
+    });
+    if (confirmation) {
+      const confirmed = draft.pending;
+      draft.pending = null;
+      draft.dirty = false;
+      draft.content = saved.content;
+      toast(confirmed.mode === "Custom" ? "系统提示词已更新" : "系统提示词已恢复默认");
+    }
+  }
+  const savedChanged = draft.savedMode !== saved.mode
+    || draft.savedContent !== saved.content || draft.savedEventId !== saved.eventId;
+  if (savedChanged && !draft.dirty && !draft.pending) draft.content = saved.content;
+  draft.savedMode = saved.mode;
+  draft.savedContent = saved.content;
+  draft.savedEventId = saved.eventId;
+  return { draft, saved };
+}
+
+function systemPromptContentBytes(content) {
+  return new TextEncoder().encode(content).length;
+}
+
+function renderSystemPromptEditor() {
+  const context = systemPromptEditorState();
+  if (!context) return;
+  const { draft, saved } = context;
+  const pending = draft.pending;
+  const valid = draft.content.trim().length > 0
+    && systemPromptContentBytes(draft.content) <= SYSTEM_STATIC_PROMPT_MAX_BYTES;
+  if (elements.systemPromptInput.value !== draft.content) {
+    elements.systemPromptInput.value = draft.content;
+  }
+  elements.systemPromptMode.textContent = saved.mode === "Custom" ? "自定义" : "内置默认";
+  elements.systemPromptMode.dataset.mode = normalize(saved.mode);
+  elements.systemPromptInput.disabled = Boolean(pending);
+  elements.systemPromptInput.setAttribute("aria-busy", String(Boolean(pending)));
+  elements.systemPromptStatus.dataset.state = pending ? "pending" : draft.dirty ? "dirty" : "synced";
+  elements.systemPromptStatus.textContent = pending
+    ? pending.status === "unknown"
+      ? "命令结果未知，正在等待 EDB 确认…"
+      : "命令已接受，正在等待 EDB 确认…"
+    : draft.content.trim().length === 0
+      ? "自定义提示词不能为空"
+      : systemPromptContentBytes(draft.content) > SYSTEM_STATIC_PROMPT_MAX_BYTES
+        ? "内容超过 32 KiB"
+        : draft.dirty ? "有尚未应用的更改" : "已与 EDB 同步";
+  elements.systemPromptApply.disabled = Boolean(pending) || !draft.dirty || !valid;
+  elements.systemPromptRestore.disabled = Boolean(pending)
+    || (saved.mode === "Default" && !draft.dirty);
+}
+
+function lastPhysicalEventId(agentId) {
+  return (state.stores.get(agentId)?.events || []).reduce((highest, event) => {
+    const [, value] = eventParts(event);
+    const id = Number(value.id);
+    return Number.isFinite(id) ? Math.max(highest, id) : highest;
+  }, -1);
+}
+
+async function submitSystemPromptChange(mode) {
+  const agentId = state.selectedAgent;
+  const context = systemPromptEditorState(agentId);
+  if (!context || context.draft.pending) return;
+  const content = mode === "Custom" ? context.draft.content : null;
+  if (mode === "Custom") {
+    if (!content.trim()) return toast("自定义提示词不能为空", true);
+    if (systemPromptContentBytes(content) > SYSTEM_STATIC_PROMPT_MAX_BYTES) {
+      return toast("自定义提示词不能超过 32 KiB", true);
+    }
+  }
+  context.draft.pending = {
+    mode, content, afterEventId: lastPhysicalEventId(agentId), status: "submitting",
+  };
+  renderSystemPromptEditor();
+  try {
+    await sendCommand({
+      command: "change_system_static_prompt", agent_id: agentId, mode, content,
+    });
+    if (context.draft.pending) context.draft.pending.status = "waiting";
+  } catch (error) {
+    if (commandResultIsUnknown(error)) {
+      if (context.draft.pending) context.draft.pending.status = "unknown";
+      requestHttpSyncNow();
+      renderSystemPromptEditor();
+      return;
+    }
+    context.draft.pending = null;
+    toast(error.message, true);
+  }
+  renderSystemPromptEditor();
+}
+
+function updateSystemPromptDraft() {
+  const context = systemPromptEditorState();
+  if (!context || context.draft.pending) return;
+  context.draft.content = elements.systemPromptInput.value;
+  context.draft.dirty = context.draft.content !== context.saved.content
+    || context.saved.mode === "Default";
+  renderSystemPromptEditor();
 }
 
 function renderAgentControls() {}
@@ -3903,6 +4097,9 @@ elements.deleteUserTurn.addEventListener("click", () => {
 });
 elements.stop.addEventListener("click", stopGeneration);
 elements.send.addEventListener("click", submitOrOpenSendSettings);
+elements.systemPromptInput.addEventListener("input", updateSystemPromptDraft);
+elements.systemPromptApply.addEventListener("click", () => { void submitSystemPromptChange("Custom"); });
+elements.systemPromptRestore.addEventListener("click", () => { void submitSystemPromptChange("Default"); });
 elements.scrollToBottom.addEventListener("click", scrollTranscriptToBottomAfterLayout);
 elements.statusModelTrigger.addEventListener("click", openModelDrawer);
 elements.statusEffortTrigger.addEventListener("click", openEffortDrawer);

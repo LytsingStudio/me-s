@@ -57,6 +57,11 @@ function loadRuntime(relative) {
       portScopedCookieName: typeof portScopedCookieName === "function" ? portScopedCookieName : null,
       SEND_SHORTCUT_COOKIE: typeof SEND_SHORTCUT_COOKIE === "string" ? SEND_SHORTCUT_COOKIE : null,
       readSendShortcutCookie: typeof readSendShortcutCookie === "function" ? readSendShortcutCookie : null,
+      latestSystemPromptState: typeof latestSystemPromptState === "function" ? latestSystemPromptState : null,
+      systemPromptChangeMatches: typeof systemPromptChangeMatches === "function" ? systemPromptChangeMatches : null,
+      systemPromptContentBytes: typeof systemPromptContentBytes === "function" ? systemPromptContentBytes : null,
+      systemPromptEditorState: typeof systemPromptEditorState === "function" ? systemPromptEditorState : null,
+      isChatbotAgent: typeof isChatbotAgent === "function" ? isChatbotAgent : null,
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
@@ -130,6 +135,96 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const singleWorkMap = single.projectWorkMap(fixture);
     expect({ ...gatewayWorkMap, _records: undefined })
       .toEqual({ ...singleWorkMap, _records: undefined });
+  });
+
+  test("projects complete Chatbot prompt-change notices symmetrically", () => {
+    const events = [
+      event("SystemStaticPromptChange", 1, { mode: "Custom", content: "# Persona\n\n完整多行内容。" }),
+      event("SystemStaticPromptChange", 2, { mode: "Default", content: null }),
+    ];
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      expect(runtime.projectChat(events).messages.map((message) => message.content)).toEqual([
+        "系统提示词已更新\n# Persona\n\n完整多行内容。",
+        "系统提示词已恢复默认",
+      ]);
+    }
+  });
+
+  test("derives saved prompt state from raw EDB while preserving dirty local drafts", () => {
+    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+      const runtime = loadRuntime(relative);
+      runtime.state.snapshot.chatbot_default_static_prompt = "内置默认提示";
+      runtime.state.snapshot.agents = [{ id: "chat", orchestrator: "chatbot" }];
+      runtime.state.selectedAgent = "chat";
+      runtime.state.stores.set("chat", { events: [] });
+      expect(runtime.latestSystemPromptState("chat")).toEqual({
+        mode: "Default", content: "内置默认提示", eventId: null,
+      });
+      runtime.state.stores.get("chat").events.push(
+        event("SystemStaticPromptChange", 5, { mode: "Custom", content: "custom-one" }),
+      );
+      expect(runtime.latestSystemPromptState("chat")).toEqual({
+        mode: "Custom", content: "custom-one", eventId: 5,
+      });
+      const editor = runtime.systemPromptEditorState("chat");
+      editor.draft.content = "本页尚未应用的草稿";
+      editor.draft.dirty = true;
+      runtime.state.stores.get("chat").events.push(
+        event("SystemStaticPromptChange", 8, { mode: "Custom", content: "remote-custom" }),
+      );
+      expect(runtime.systemPromptEditorState("chat").draft.content).toBe("本页尚未应用的草稿");
+      runtime.state.stores.get("chat").events.push(
+        event("SystemStaticPromptChange", 9, { mode: "Default", content: null }),
+      );
+      expect(runtime.latestSystemPromptState("chat")).toEqual({
+        mode: "Default", content: "内置默认提示", eventId: 9,
+      });
+      runtime.state.stores.get("chat").events.pop();
+      expect(runtime.latestSystemPromptState("chat").content).toBe("remote-custom");
+      expect(runtime.systemPromptChangeMatches(
+        { mode: "Custom", content: "精确内容" },
+        { mode: "Custom", content: "精确内容" },
+      )).toBe(true);
+      expect(runtime.systemPromptContentBytes("你")).toBe(3);
+    }
+  });
+
+  test("keeps Chatbot prompt drafts page-local and Workspace-plus-Agent isolated", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const first = gateway.emptyGatewayWorkspaceState();
+    const second = gateway.emptyGatewayWorkspaceState();
+    first.promptDrafts.set("main", { content: "workspace-one" });
+    second.promptDrafts.set("main", { content: "workspace-two" });
+    expect(first.promptDrafts).not.toBe(second.promptDrafts);
+    expect(first.promptDrafts.get("main").content).toBe("workspace-one");
+    expect(second.promptDrafts.get("main").content).toBe("workspace-two");
+  });
+
+  test("keeps Chatbot tabs, authoritative EDB confirmation, and editor styling aligned", () => {
+    const paths = [
+      ["../src/webui/index.html", "../src/webui/app.js", "../src/webui/style.css"],
+      ["../src/gateway_webui/index.html", "../src/gateway_webui/app.js", "../src/gateway_webui/style.css"],
+    ];
+    for (const [htmlPath, appPath, stylePath] of paths) {
+      const html = readFileSync(join(import.meta.dir, htmlPath), "utf8");
+      const app = readFileSync(join(import.meta.dir, appPath), "utf8");
+      const style = readFileSync(join(import.meta.dir, stylePath), "utf8");
+      expect(html).toContain('data-view="system-prompt" data-chatbot-only');
+      expect(html).toContain('data-view="workmap" data-work-only');
+      expect(html).toContain('id="system-prompt-input"');
+      expect(app).toContain('querySelectorAll("[data-work-only]")');
+      expect(app).toContain('command: "change_system_static_prompt"');
+      expect(app).toContain("Number(value.id) > draft.pending.afterEventId");
+      expect(app).toContain("if (confirmation) {");
+      expect(app).toContain("系统提示词已更新");
+      expect(app).toContain("系统提示词已恢复默认");
+      expect(style).toContain(".system-prompt-panel {");
+      expect(style).toContain(".system-prompt-actions > span[data-state=\"pending\"]");
+    }
+    const gatewayApp = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    expect(gatewayApp).toContain("promptDrafts: state.promptDrafts");
+    expect(gatewayApp).toContain("state.promptDrafts = workspace.promptDrafts;");
   });
 
   test("hides non-rendering Assistant-only content in both WebUIs without changing real content", () => {

@@ -18,8 +18,8 @@ function succeeded(value, updates = []) {
 
 describe("shared WebUI tool presenters", () => {
   test("explicitly covers every first-party and historical compatibility tool", () => {
-    expect(presenters.KNOWN_TOOLS).toHaveLength(56);
-    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(56);
+    expect(presenters.KNOWN_TOOLS).toHaveLength(57);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(57);
     expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
     for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
   });
@@ -45,6 +45,26 @@ describe("shared WebUI tool presenters", () => {
       expect(completed.outputBlocks.length).toBeGreaterThan(0);
       expect(presenters.renderDetails(completed)).toContain("tool-output-section");
     }
+  });
+
+  test("renders CurrentTime as one no-argument instant with all result fields", () => {
+    expect(presenters.summarize("CurrentTime", {})).toMatchObject({
+      title: "查询当前时间", summary: "",
+    });
+    const details = presenters.describe("CurrentTime", {}, succeeded({
+      local_rfc3339: "2026-08-25T12:34:56.789+08:00",
+      utc_rfc3339: "2026-08-25T04:34:56.789Z",
+      utc_offset: "+08:00",
+      weekday: "Tuesday",
+      unix_timestamp_ms: 1787632496789,
+    }));
+    const html = presenters.renderDetails(details);
+    expect(html).toContain("无参数");
+    expect(html).toContain("2026-08-25T12:34:56.789+08:00");
+    expect(html).toContain("2026-08-25T04:34:56.789Z");
+    expect(html).toContain("+08:00");
+    expect(html).toContain("Tuesday");
+    expect(html).toContain("1787632496789");
   });
 
   test("renders File.Read as line-numbered content instead of result JSON", () => {

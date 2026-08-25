@@ -17,7 +17,9 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
     Result,
-    event::{Event, EventBase, EventId},
+    event::{
+        Event, EventBase, EventId, SystemStaticPromptMode, validate_system_static_prompt_change,
+    },
     host_files::{DownloadStream, HostFileConflictPolicy, HostFileJobKind, HostFileManager},
     managed_protocol::{
         MANAGED_AUTH_HEADER, MANAGED_BIND_ADDRESS, MANAGED_PROTOCOL_VERSION, MANAGED_READY_PATH,
@@ -282,7 +284,14 @@ fn start_with_server(
     let session_terminals = Arc::new(SessionTerminalRegistry::new(
         &initial.environment.workspace,
     )?);
-    session_terminals.reconcile(initial.agent_ids())?;
+    session_terminals.reconcile(
+        initial
+            .agents
+            .iter()
+            .filter(|agent| agent.orchestrator_name != "chatbot")
+            .map(|agent| agent.id.clone())
+            .collect(),
+    )?;
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
     let managed = Arc::new(managed);
@@ -298,7 +307,7 @@ fn start_with_server(
             while !worker_shutdown.load(Ordering::Acquire) {
                 worker_remote_control.expire_if_stale();
                 let reconcile = backend
-                    .agent_ids()
+                    .session_terminal_agent_ids()
                     .and_then(|agent_ids| worker_session_terminals.reconcile(agent_ids));
                 match reconcile {
                     Ok(()) => last_reconcile_error = None,
@@ -1606,6 +1615,7 @@ struct SnapshotResponse {
     models: Vec<ModelMetadata>,
     orchestrators: Vec<String>,
     default_orchestrator: String,
+    chatbot_default_static_prompt: &'static str,
     tool_visibility: ToolVisibilityMetadata,
 }
 
@@ -1697,6 +1707,7 @@ fn snapshot_metadata(snapshot: UiSnapshot, include_event_hashes: bool) -> Snapsh
         models,
         orchestrators: orchestrators.to_vec(),
         default_orchestrator,
+        chatbot_default_static_prompt: crate::orchestrator::CHATBOT_DEFAULT_STATIC_PROMPT,
         tool_visibility: ToolVisibilityMetadata {
             hidden_names: CHAT_HIDDEN_TOOL_NAMES,
             hidden_prefixes: CHAT_HIDDEN_TOOL_PREFIXES,
@@ -1811,6 +1822,11 @@ enum WebCommand {
     ChangeModel {
         agent_id: String,
         model: String,
+    },
+    ChangeSystemStaticPrompt {
+        agent_id: String,
+        mode: SystemStaticPromptMode,
+        content: Option<String>,
     },
     ClearContext {
         agent_id: String,
@@ -1942,6 +1958,18 @@ fn into_ui_command(command: WebCommand) -> Result<UiCommand> {
             agent_id: AgentId::new(agent_id)?,
             model,
         },
+        WebCommand::ChangeSystemStaticPrompt {
+            agent_id,
+            mode,
+            content,
+        } => {
+            validate_system_static_prompt_change(mode, content.as_deref())?;
+            UiCommand::ChangeSystemStaticPrompt {
+                agent_id: AgentId::new(agent_id)?,
+                mode,
+                content,
+            }
+        }
         WebCommand::ClearContext { agent_id } => UiCommand::ClearContext {
             agent_id: AgentId::new(agent_id)?,
         },
@@ -2487,6 +2515,60 @@ mod tests {
                 final_answer_event_id: 51,
             }
         );
+        let parsed: WebCommand = serde_json::from_value(json!({
+            "command": "change_system_static_prompt",
+            "agent_id": "chat",
+            "mode": "Custom",
+            "content": "# Custom\n\n完整内容"
+        }))
+        .unwrap();
+        assert_eq!(
+            into_ui_command(parsed).unwrap(),
+            UiCommand::ChangeSystemStaticPrompt {
+                agent_id: AgentId::new("chat").unwrap(),
+                mode: SystemStaticPromptMode::Custom,
+                content: Some("# Custom\n\n完整内容".into()),
+            }
+        );
+        let parsed: WebCommand = serde_json::from_value(json!({
+            "command": "change_system_static_prompt",
+            "agent_id": "chat",
+            "mode": "Default"
+        }))
+        .unwrap();
+        assert_eq!(
+            into_ui_command(parsed).unwrap(),
+            UiCommand::ChangeSystemStaticPrompt {
+                agent_id: AgentId::new("chat").unwrap(),
+                mode: SystemStaticPromptMode::Default,
+                content: None,
+            }
+        );
+        assert!(
+            serde_json::from_value::<WebCommand>(json!({
+                "command": "change_system_static_prompt",
+                "agent_id": "chat",
+                "mode": "Unknown",
+                "content": "invalid"
+            }))
+            .is_err()
+        );
+        let invalid_custom: WebCommand = serde_json::from_value(json!({
+            "command": "change_system_static_prompt",
+            "agent_id": "chat",
+            "mode": "Custom",
+            "content": "   "
+        }))
+        .unwrap();
+        assert!(into_ui_command(invalid_custom).is_err());
+        let invalid_default: WebCommand = serde_json::from_value(json!({
+            "command": "change_system_static_prompt",
+            "agent_id": "chat",
+            "mode": "Default",
+            "content": "not allowed"
+        }))
+        .unwrap();
+        assert!(into_ui_command(invalid_default).is_err());
 
         assert_eq!(
             receipt_json(UiCommandReceipt::UserPromptSubmitted {
@@ -2569,6 +2651,14 @@ mod tests {
         assert_eq!(
             ordinary["agents"][0]["last_event_hash"],
             serde_json::Value::Null
+        );
+        assert_eq!(
+            payload["snapshot"]["chatbot_default_static_prompt"],
+            crate::orchestrator::CHATBOT_DEFAULT_STATIC_PROMPT
+        );
+        assert_eq!(
+            ordinary["chatbot_default_static_prompt"],
+            crate::orchestrator::CHATBOT_DEFAULT_STATIC_PROMPT
         );
     }
 
@@ -3676,7 +3766,7 @@ mod tests {
                 version: 2,
                 model: "test".into(),
                 effort: "unset".into(),
-                orchestrator: "chatbot".into(),
+                orchestrator: "main-agent".into(),
             },
             vec![model()],
         )
@@ -3691,7 +3781,7 @@ mod tests {
 
         let UiCommandReceipt::AgentCreated(created) = lifecycle
             .submit(UiCommand::AddAgent {
-                orchestrator: "chatbot".into(),
+                orchestrator: "main-agent".into(),
             })
             .unwrap()
         else {
@@ -3736,7 +3826,7 @@ mod tests {
                 version: 2,
                 model: "test".into(),
                 effort: "unset".into(),
-                orchestrator: "chatbot".into(),
+                orchestrator: "main-agent".into(),
             },
             vec![model()],
         )
@@ -3744,7 +3834,7 @@ mod tests {
         let (backend, commands) = workspace_ui_ports(workspace);
         let UiCommandReceipt::AgentCreated(session_agent) = commands
             .submit(UiCommand::AddAgent {
-                orchestrator: "chatbot".into(),
+                orchestrator: "main-agent".into(),
             })
             .unwrap()
         else {

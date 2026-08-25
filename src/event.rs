@@ -72,6 +72,7 @@ pub enum EventKind {
     WorkMapMutation,
     WorkMapPendingReminder,
     CompactStateUpdate,
+    SystemStaticPromptChange,
     AgentTitleChanged,
     CloneCompleted,
     ImageContent,
@@ -103,6 +104,7 @@ impl std::fmt::Display for EventKind {
             Self::WorkMapMutation => "workmap-mutation",
             Self::WorkMapPendingReminder => "workmap-pending-reminder",
             Self::CompactStateUpdate => "compact-state-update",
+            Self::SystemStaticPromptChange => "system-static-prompt-change",
             Self::AgentTitleChanged => "agent-title-changed",
             Self::CloneCompleted => "clone-completed",
             Self::ImageContent => "image-content",
@@ -295,6 +297,7 @@ pub enum CompactKind {
     MainAgentMultiTurn,
     ManagerMultiTurn,
     WorkerSingleTurn,
+    ChatbotSingleTurn,
 }
 
 impl CompactKind {
@@ -303,6 +306,7 @@ impl CompactKind {
             Self::MainAgentMultiTurn => 0,
             Self::ManagerMultiTurn => 1,
             Self::WorkerSingleTurn => 2,
+            Self::ChatbotSingleTurn => 3,
         }
     }
 
@@ -311,6 +315,7 @@ impl CompactKind {
             0 => Ok(Self::MainAgentMultiTurn),
             1 => Ok(Self::ManagerMultiTurn),
             2 => Ok(Self::WorkerSingleTurn),
+            3 => Ok(Self::ChatbotSingleTurn),
             _ => Err(format!("unsupported Compact kind {code}").into()),
         }
     }
@@ -334,7 +339,7 @@ impl CompactKind {
                     || usize::from(stage_count)
                         == CompactStage::MULTI_TURN_WITH_ACTIVE_SESSIONS.len()
             }
-            Self::WorkerSingleTurn => stage_count == 1,
+            Self::WorkerSingleTurn | Self::ChatbotSingleTurn => stage_count == 1,
         }
     }
 
@@ -362,6 +367,7 @@ impl std::fmt::Display for CompactKind {
             Self::MainAgentMultiTurn => "main-agent-multi-turn",
             Self::ManagerMultiTurn => "manager-multi-turn",
             Self::WorkerSingleTurn => "worker-single-turn",
+            Self::ChatbotSingleTurn => "chatbot-single-turn",
         })
     }
 }
@@ -908,6 +914,75 @@ pub struct ReasoningEffortChangedEvent {
     pub cause: ReasoningEffortChangeCause,
 }
 
+pub const MAX_SYSTEM_STATIC_PROMPT_BYTES: usize = 32 * 1024;
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub enum SystemStaticPromptMode {
+    Default,
+    Custom,
+}
+
+impl SystemStaticPromptMode {
+    fn code(self) -> u8 {
+        match self {
+            Self::Default => 0,
+            Self::Custom => 1,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self> {
+        match code {
+            0 => Ok(Self::Default),
+            1 => Ok(Self::Custom),
+            _ => Err(format!("invalid system static prompt mode {code}").into()),
+        }
+    }
+}
+
+impl std::fmt::Display for SystemStaticPromptMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::Default => "default",
+            Self::Custom => "custom",
+        })
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct SystemStaticPromptChangeEvent {
+    pub id: EventId,
+    pub timestamp_ms: u64,
+    pub mode: SystemStaticPromptMode,
+    pub content: Option<String>,
+}
+
+pub fn validate_system_static_prompt_change(
+    mode: SystemStaticPromptMode,
+    content: Option<&str>,
+) -> Result<()> {
+    match (mode, content) {
+        (SystemStaticPromptMode::Default, None) => Ok(()),
+        (SystemStaticPromptMode::Default, Some(_)) => {
+            Err("default system static prompt change cannot contain custom content".into())
+        }
+        (SystemStaticPromptMode::Custom, None) => {
+            Err("custom system static prompt change requires content".into())
+        }
+        (SystemStaticPromptMode::Custom, Some(content)) if content.trim().is_empty() => {
+            Err("custom system static prompt cannot be empty".into())
+        }
+        (SystemStaticPromptMode::Custom, Some(content))
+            if content.len() > MAX_SYSTEM_STATIC_PROMPT_BYTES =>
+        {
+            Err(format!(
+                "custom system static prompt exceeds {MAX_SYSTEM_STATIC_PROMPT_BYTES} UTF-8 bytes"
+            )
+            .into())
+        }
+        (SystemStaticPromptMode::Custom, Some(_)) => Ok(()),
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct ContextClearedEvent {
     pub id: EventId,
@@ -998,6 +1073,7 @@ pub enum Event {
     WorkMapMutation(WorkMapMutationEvent),
     WorkMapPendingReminder(WorkMapPendingReminderEvent),
     CompactStateUpdate(CompactStateUpdateEvent),
+    SystemStaticPromptChange(SystemStaticPromptChangeEvent),
     AgentTitleChanged(AgentTitleChangedEvent),
     CloneCompleted(CloneCompletedEvent),
     ImageContent(ImageContentEvent),
@@ -1042,6 +1118,7 @@ impl Event {
             Self::WorkMapMutation(event) => event.id,
             Self::WorkMapPendingReminder(event) => event.id,
             Self::CompactStateUpdate(event) => event.id,
+            Self::SystemStaticPromptChange(event) => event.id,
             Self::AgentTitleChanged(event) => event.id,
             Self::CloneCompleted(event) => event.id,
             Self::ImageContent(event) => event.id,
@@ -1073,6 +1150,7 @@ impl Event {
             Self::WorkMapMutation(_) => EventKind::WorkMapMutation,
             Self::WorkMapPendingReminder(_) => EventKind::WorkMapPendingReminder,
             Self::CompactStateUpdate(_) => EventKind::CompactStateUpdate,
+            Self::SystemStaticPromptChange(_) => EventKind::SystemStaticPromptChange,
             Self::AgentTitleChanged(_) => EventKind::AgentTitleChanged,
             Self::CloneCompleted(_) => EventKind::CloneCompleted,
             Self::ImageContent(_) => EventKind::ImageContent,
@@ -1104,6 +1182,7 @@ impl Event {
             Self::WorkMapMutation(event) => event.timestamp_ms,
             Self::WorkMapPendingReminder(event) => event.timestamp_ms,
             Self::CompactStateUpdate(event) => event.timestamp_ms,
+            Self::SystemStaticPromptChange(event) => event.timestamp_ms,
             Self::AgentTitleChanged(event) => event.timestamp_ms,
             Self::CloneCompleted(event) => event.timestamp_ms,
             Self::ImageContent(event) => event.timestamp_ms,
@@ -2156,6 +2235,54 @@ impl EventBase for CompactStateUpdateEvent {
 }
 
 #[allow(non_snake_case)]
+impl EventBase for SystemStaticPromptChangeEvent {
+    fn getID(&self) -> EventId {
+        self.id
+    }
+
+    fn getTimestamp(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    fn getEventKind(&self) -> EventKind {
+        EventKind::SystemStaticPromptChange
+    }
+
+    fn getHash(&self) -> String {
+        stable_hash(
+            self.id,
+            self.timestamp_ms,
+            27,
+            &[],
+            &[self.mode.code()],
+            &[self.content.as_deref().unwrap_or("")],
+        )
+    }
+
+    fn getBriefString(&self) -> String {
+        match &self.content {
+            Some(content) => format!(
+                "SystemStaticPromptChangeEvent(mode=custom, content={})",
+                abbreviated(content, 80)
+            ),
+            None => "SystemStaticPromptChangeEvent(mode=default)".into(),
+        }
+    }
+
+    fn getDetailString(&self) -> String {
+        format!(
+            "SystemStaticPromptChangeEvent(id={}, timestamp_ms={}, mode={}, content={})",
+            self.id,
+            self.timestamp_ms,
+            self.mode,
+            self.content
+                .as_deref()
+                .map_or_else(|| "none".to_owned(), quoted)
+        )
+    }
+}
+
+#[allow(non_snake_case)]
 impl EventBase for AgentTitleChangedEvent {
     fn getID(&self) -> EventId {
         self.id
@@ -2324,6 +2451,7 @@ impl EventBase for Event {
             Self::WorkMapMutation(event) => event.getID(),
             Self::WorkMapPendingReminder(event) => event.getID(),
             Self::CompactStateUpdate(event) => event.getID(),
+            Self::SystemStaticPromptChange(event) => event.getID(),
             Self::AgentTitleChanged(event) => event.getID(),
             Self::CloneCompleted(event) => event.getID(),
             Self::ImageContent(event) => event.getID(),
@@ -2359,6 +2487,7 @@ impl EventBase for Event {
             Self::WorkMapMutation(event) => event.getEventKind(),
             Self::WorkMapPendingReminder(event) => event.getEventKind(),
             Self::CompactStateUpdate(event) => event.getEventKind(),
+            Self::SystemStaticPromptChange(event) => event.getEventKind(),
             Self::AgentTitleChanged(event) => event.getEventKind(),
             Self::CloneCompleted(event) => event.getEventKind(),
             Self::ImageContent(event) => event.getEventKind(),
@@ -2390,6 +2519,7 @@ impl EventBase for Event {
             Self::WorkMapMutation(event) => event.getHash(),
             Self::WorkMapPendingReminder(event) => event.getHash(),
             Self::CompactStateUpdate(event) => event.getHash(),
+            Self::SystemStaticPromptChange(event) => event.getHash(),
             Self::AgentTitleChanged(event) => event.getHash(),
             Self::CloneCompleted(event) => event.getHash(),
             Self::ImageContent(event) => event.getHash(),
@@ -2421,6 +2551,7 @@ impl EventBase for Event {
             Self::WorkMapMutation(event) => event.getBriefString(),
             Self::WorkMapPendingReminder(event) => event.getBriefString(),
             Self::CompactStateUpdate(event) => event.getBriefString(),
+            Self::SystemStaticPromptChange(event) => event.getBriefString(),
             Self::AgentTitleChanged(event) => event.getBriefString(),
             Self::CloneCompleted(event) => event.getBriefString(),
             Self::ImageContent(event) => event.getBriefString(),
@@ -2452,6 +2583,7 @@ impl EventBase for Event {
             Self::WorkMapMutation(event) => event.getDetailString(),
             Self::WorkMapPendingReminder(event) => event.getDetailString(),
             Self::CompactStateUpdate(event) => event.getDetailString(),
+            Self::SystemStaticPromptChange(event) => event.getDetailString(),
             Self::AgentTitleChanged(event) => event.getDetailString(),
             Self::CloneCompleted(event) => event.getDetailString(),
             Self::ImageContent(event) => event.getDetailString(),
@@ -3028,6 +3160,25 @@ impl EventDataBase {
         Ok(id)
     }
 
+    pub fn append_system_static_prompt_change(
+        &mut self,
+        mode: SystemStaticPromptMode,
+        content: Option<String>,
+    ) -> Result<EventId> {
+        validate_system_static_prompt_change(mode, content.as_deref())?;
+        let id = self.next_event_id;
+        let timestamp_ms = self.next_timestamp_ms()?;
+        self.append(Event::SystemStaticPromptChange(
+            SystemStaticPromptChangeEvent {
+                id,
+                timestamp_ms,
+                mode,
+                content,
+            },
+        ))?;
+        Ok(id)
+    }
+
     pub fn append_agent_title_changed(
         &mut self,
         tool_call_id: EventId,
@@ -3560,7 +3711,7 @@ impl EventDataBase {
             .ok_or_else(|| format!("rewind target {target_event_id} does not exist"))?;
         let (target_order, restored_prompt_content) = match &self.events[selected_order] {
             Event::UserPrompt(prompt) => (selected_order, Some(prompt.content.clone())),
-            Event::ContextCleared(_) => (selected_order, None),
+            Event::ContextCleared(_) | Event::SystemStaticPromptChange(_) => (selected_order, None),
             Event::CompactStateUpdate(update) if update.state == CompactState::Completed => {
                 let Some(Event::ToolCall(call)) = self.get(update.tool_call_id) else {
                     return Err(format!(
@@ -3576,7 +3727,7 @@ impl EventDataBase {
             }
             _ => {
                 return Err(format!(
-                    "rewind target {target_event_id} is not a user prompt, context clear, or completed Compact"
+                    "rewind target {target_event_id} is not a user prompt, context clear, system static prompt change, or completed Compact"
                 )
                 .into());
             }
@@ -3847,6 +3998,15 @@ pub(crate) fn effective_history_events(
         .position(|event| event.id() == end_exclusive)
         .ok_or_else(|| format!("History boundary event {end_exclusive} does not exist"))?;
     effective_branch_events(&events[..end], false, false)
+}
+
+pub fn latest_system_static_prompt_change(
+    events: &[Event],
+) -> Option<&SystemStaticPromptChangeEvent> {
+    events.iter().rev().find_map(|event| match event {
+        Event::SystemStaticPromptChange(change) => Some(change),
+        _ => None,
+    })
 }
 
 pub fn latest_context_usage(events: &[Event]) -> Option<ApiUsage> {
@@ -4589,6 +4749,16 @@ fn encode_event_body(event: &Event) -> Vec<u8> {
             raw.extend_from_slice(event.detail.as_bytes());
             raw
         }
+        Event::SystemStaticPromptChange(event) => {
+            let mut raw = Vec::with_capacity(12 + event.content.as_deref().map_or(0, str::len));
+            raw.push(27);
+            encode_varint(event.timestamp_ms, &mut raw);
+            raw.push(event.mode.code());
+            if let Some(content) = &event.content {
+                raw.extend_from_slice(content.as_bytes());
+            }
+            raw
+        }
         Event::AgentTitleChanged(event) => {
             let mut raw = Vec::with_capacity(16 + event.title.len());
             raw.push(21);
@@ -4938,7 +5108,7 @@ pub(crate) fn migrate_compact_strategy_v36_to_v37(bytes: Vec<u8>) -> Result<Vec<
             // shared strategy. Make that strategy explicit in v37.
             CompactKind::MainAgentMultiTurn if manager_owned => CompactKind::ManagerMultiTurn,
             CompactKind::MainAgentMultiTurn => CompactKind::MainAgentMultiTurn,
-            CompactKind::ManagerMultiTurn => {
+            CompactKind::ManagerMultiTurn | CompactKind::ChatbotSingleTurn => {
                 return Err("EDB v36 contains an impossible Compact kind".into());
             }
         };
@@ -5504,6 +5674,28 @@ fn decode_event_with_format(
                 detail,
             }))
         }
+        27 => {
+            let (&mode, content) = body
+                .split_first()
+                .ok_or("missing SystemStaticPromptChangeEvent mode")?;
+            let mode = SystemStaticPromptMode::from_code(mode)?;
+            let content = match mode {
+                SystemStaticPromptMode::Default if content.is_empty() => None,
+                SystemStaticPromptMode::Default => {
+                    return Err("default SystemStaticPromptChangeEvent has trailing content".into());
+                }
+                SystemStaticPromptMode::Custom => Some(String::from_utf8(content.to_vec())?),
+            };
+            validate_system_static_prompt_change(mode, content.as_deref())?;
+            Ok(Event::SystemStaticPromptChange(
+                SystemStaticPromptChangeEvent {
+                    id,
+                    timestamp_ms,
+                    mode,
+                    content,
+                },
+            ))
+        }
         21 => {
             let (tool_call_id, consumed) = decode_varint(body)?;
             let title = String::from_utf8(body[consumed..].to_vec())?;
@@ -5769,6 +5961,198 @@ mod tests {
         edb.rewind_to_event(prompt_id).unwrap();
         assert_eq!(crate::agent_title::current_title(edb.events()), None);
         drop(edb);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn system_static_prompt_changes_validate_project_round_trip_and_rewind() {
+        let directory = temporary_path("system-static-prompt-change");
+        let path = directory.join("chatbot.edb");
+        let custom_one;
+        let restored_default;
+        let custom_two;
+        let hashes;
+        {
+            let mut edb = EventDataBase::open(&path).unwrap();
+            assert!(
+                edb.append_system_static_prompt_change(
+                    SystemStaticPromptMode::Custom,
+                    Some(" \n".into()),
+                )
+                .is_err()
+            );
+            assert!(
+                edb.append_system_static_prompt_change(
+                    SystemStaticPromptMode::Default,
+                    Some("unexpected".into()),
+                )
+                .is_err()
+            );
+            assert!(
+                edb.append_system_static_prompt_change(
+                    SystemStaticPromptMode::Custom,
+                    Some("x".repeat(MAX_SYSTEM_STATIC_PROMPT_BYTES + 1)),
+                )
+                .is_err()
+            );
+
+            custom_one = edb
+                .append_system_static_prompt_change(
+                    SystemStaticPromptMode::Custom,
+                    Some("You are calm.\n准确回答。".into()),
+                )
+                .unwrap();
+            restored_default = edb
+                .append_system_static_prompt_change(SystemStaticPromptMode::Default, None)
+                .unwrap();
+            custom_two = edb
+                .append_system_static_prompt_change(
+                    SystemStaticPromptMode::Custom,
+                    Some("Keep answers concise.".into()),
+                )
+                .unwrap();
+
+            assert!(latest_system_static_prompt_change(&edb.events()[..0]).is_none());
+            assert!(matches!(
+                latest_system_static_prompt_change(&edb.events()[..1]),
+                Some(change)
+                    if change.id == custom_one
+                        && change.mode == SystemStaticPromptMode::Custom
+                        && change.content.as_deref() == Some("You are calm.\n准确回答。")
+            ));
+            assert!(matches!(
+                latest_system_static_prompt_change(&edb.events()[..2]),
+                Some(change)
+                    if change.id == restored_default
+                        && change.mode == SystemStaticPromptMode::Default
+                        && change.content.is_none()
+            ));
+            let latest = latest_system_static_prompt_change(edb.events()).unwrap();
+            assert_eq!(latest.id, custom_two);
+            assert!(latest.getBriefString().contains("Keep answers concise"));
+            assert!(latest.getDetailString().contains("mode=custom"));
+            hashes = edb
+                .events()
+                .iter()
+                .map(EventBase::getHash)
+                .collect::<Vec<_>>();
+        }
+
+        let mut edb = EventDataBase::open(&path).unwrap();
+        assert_eq!(
+            edb.events()
+                .iter()
+                .map(EventBase::getHash)
+                .collect::<Vec<_>>(),
+            hashes
+        );
+        assert!(matches!(
+            latest_system_static_prompt_change(edb.events()),
+            Some(change) if change.id == custom_two
+        ));
+
+        let mutation = edb.rewind_to_event(custom_two).unwrap();
+        assert_eq!(
+            mutation,
+            EdbMutation::Rewind {
+                target_event_id: custom_two,
+                restored_prompt_content: None,
+            }
+        );
+        assert!(matches!(
+            latest_system_static_prompt_change(edb.events()),
+            Some(change) if change.id == restored_default
+                && change.mode == SystemStaticPromptMode::Default
+        ));
+        edb.rewind_to_event(restored_default).unwrap();
+        assert!(matches!(
+            latest_system_static_prompt_change(edb.events()),
+            Some(change) if change.id == custom_one
+                && change.content.as_deref() == Some("You are calm.\n准确回答。")
+        ));
+        assert_eq!(edb.next_event_id(), custom_two + 1);
+        drop(edb);
+
+        let reopened = EventDataBase::open(&path).unwrap();
+        assert!(matches!(
+            latest_system_static_prompt_change(reopened.events()),
+            Some(change) if change.id == custom_one
+        ));
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn chatbot_single_turn_compact_kind_round_trips_with_wire_code_three() {
+        assert_eq!(CompactKind::ChatbotSingleTurn.code(), 3);
+        assert_eq!(
+            CompactKind::from_code(3).unwrap(),
+            CompactKind::ChatbotSingleTurn
+        );
+        assert!(CompactKind::ChatbotSingleTurn.accepts_stage_count(1));
+        assert!(!CompactKind::ChatbotSingleTurn.accepts_stage_count(2));
+
+        let directory = temporary_path("chatbot-compact-kind");
+        let path = directory.join("chatbot.edb");
+        let compact;
+        {
+            let mut edb = EventDataBase::open(&path).unwrap();
+            let prompt = edb.append_user_prompt("compact chat").unwrap();
+            let api = edb.append_api_requesting(prompt).unwrap();
+            let tool = edb
+                .append_tool_call(api, prompt, "compact", crate::compact::TOOL_NAME, "{}")
+                .unwrap();
+            edb.append_api_state(api, prompt, ApiState::Completed, "")
+                .unwrap();
+            edb.append_tool_result(tool, ToolResultState::Succeeded, None, "{}")
+                .unwrap();
+            compact = edb
+                .append_compact_started(tool, prompt, CompactKind::ChatbotSingleTurn)
+                .unwrap();
+            edb.append_compact_terminal(
+                compact,
+                CompactState::Completed,
+                "Summary:\nConversation continuity",
+                "",
+            )
+            .unwrap();
+        }
+
+        let reopened = EventDataBase::open(&path).unwrap();
+        assert!(matches!(
+            reopened.get(compact),
+            Some(Event::CompactStateUpdate(update))
+                if update.kind == CompactKind::ChatbotSingleTurn
+                    && update.total_stages == 1
+        ));
+        assert!(matches!(
+            reopened.events().last(),
+            Some(Event::CompactStateUpdate(update))
+                if update.kind == CompactKind::ChatbotSingleTurn
+                    && update.state == CompactState::Completed
+        ));
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_v39_atomically_migrates_to_v40_without_changing_events() {
+        let directory = temporary_path("migrate-v39");
+        let path = directory.join("main.edb");
+        let expected;
+        {
+            let mut edb = EventDataBase::open(&path).unwrap();
+            edb.append_user_prompt("preserve v39").unwrap();
+            expected = edb.events().to_vec();
+        }
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[4] = 39;
+        fs::write(&path, bytes).unwrap();
+
+        let migrated = EventDataBase::open(&path).unwrap();
+        assert_eq!(migrated.events(), expected);
+        assert_eq!(fs::read(&path).unwrap()[4], 40);
+        drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -7237,7 +7621,7 @@ mod tests {
                     |update| update.kind == CompactKind::WorkerSingleTurn && update.stage.is_none()
                 )
         );
-        assert_eq!(fs::read(&path).unwrap()[4], 39);
+        assert_eq!(fs::read(&path).unwrap()[4], 40);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -7295,7 +7679,7 @@ mod tests {
                 Some(Event::CompactStateUpdate(update))
                     if update.kind == expected && update.total_stages == 6
             ));
-            assert_eq!(fs::read(&path).unwrap()[4], 39);
+            assert_eq!(fs::read(&path).unwrap()[4], 40);
             drop(migrated);
             fs::remove_dir_all(directory).unwrap();
         }
@@ -7332,7 +7716,7 @@ mod tests {
             migrated.get(compact),
             Some(Event::CompactStateUpdate(update)) if update.total_stages == 6
         ));
-        assert_eq!(fs::read(&path).unwrap()[4], 39);
+        assert_eq!(fs::read(&path).unwrap()[4], 40);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }

@@ -5,6 +5,7 @@ pub mod codex_oauth;
 pub mod compact;
 pub mod config;
 mod context_usage;
+pub mod current_time;
 pub mod desktop_toolbox;
 pub mod diag;
 mod edb_migration;
