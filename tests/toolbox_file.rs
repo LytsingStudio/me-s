@@ -636,7 +636,16 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     assert!(search_instructions.contains("hard 120-second deadline"));
     assert!(search_instructions.contains("search_timeout"));
     assert!(search_instructions.contains("decoded Unicode characters"));
-    assert!(search_instructions.contains("does not perform File.Read's legacy encoding detection"));
+    assert!(search_instructions.contains("bounded encoding detection"));
+    assert!(search_instructions.contains("64 KiB prefix"));
+    assert!(search_instructions.contains("chardetng"));
+    assert!(search_instructions.contains("GB2312"));
+    assert!(search_instructions.contains("strictly stream-decoded without replacement"));
+    assert!(
+        search_instructions
+            .contains("separate from File.Read's complete conservative encoding detection")
+    );
+    assert!(read_instructions_text.contains("common legacy encodings conservatively"));
     let create_encodings = toolbox.query("getInputSchema", Some("Create"))["output"]["properties"]
         ["encoding"]["enum"]
         .as_array()
@@ -2004,7 +2013,11 @@ fn integrated_search_honors_ripgrep_scope_and_match_semantics() {
     fs::write(root.join("custom.txt"), "ignored-needle\n").unwrap();
     fs::write(root.join(".hidden.txt"), "ignored-needle\n").unwrap();
     fs::write(root.join("binary.bin"), b"ignored-needle\0tail").unwrap();
-    fs::write(root.join("legacy.txt"), b"\xd6\xd0 ignored-needle\n").unwrap();
+    fs::write(
+        root.join("legacy.txt"),
+        b"\xbc\xf2\xcc\xe5\xd6\xd0\xce\xc4\xc4\xda\xc8\xdd\xa3\xac\xc4\xe3\xba\xc3\xca\xc0\xbd\xe7\xa1\xa3 ignored-needle\n",
+    )
+    .unwrap();
     let mut bom = vec![0xef, 0xbb, 0xbf];
     bom.extend_from_slice(b"bom needle\n");
     fs::write(root.join("bom.txt"), bom).unwrap();
@@ -2083,8 +2096,12 @@ fn integrated_search_honors_ripgrep_scope_and_match_semantics() {
         "Search",
         json!({"path":"search-root", "query":"ignored-needle"}),
     );
-    assert_eq!(ignored["output"]["returned"], 0);
-    assert_eq!(ignored["output"]["skipped_binary"], 2);
+    assert_eq!(ignored["output"]["returned"], 1);
+    assert_eq!(
+        ignored["output"]["matches"][0]["path"],
+        "search-root/legacy.txt"
+    );
+    assert_eq!(ignored["output"]["skipped_binary"], 1);
     let explicit_ignored = toolbox.execute(
         "Search",
         json!({"path":"search-root/ignored.txt", "query":"ignored-needle"}),
@@ -2122,6 +2139,130 @@ fn integrated_search_honors_ripgrep_scope_and_match_semantics() {
         assert_eq!(invalid["type"], "error");
         assert_eq!(invalid["error"]["code"], "invalid_regex");
         assert_eq!(invalid["error"]["retryable"], false);
+    }
+
+    toolbox.finish();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
+fn integrated_search_detects_common_legacy_encodings_and_late_non_utf8() {
+    let workspace = temporary_workspace();
+    let fixtures: Vec<(&str, &[u8], &str, &str)> = vec![
+        (
+            "simplified.txt",
+            b"\xbc\xf2\xcc\xe5\xd6\xd0\xce\xc4\xc4\xda\xc8\xdd\xa3\xac\xc4\xe3\xba\xc3\xca\xc0\xbd\xe7\xa1\xa3",
+            "你好世界",
+            "简体中文内容，你好世界。",
+        ),
+        (
+            "traditional.txt",
+            b"\xc1c\xc5\xe9\xa4\xa4\xa4\xe5\xa4\xba\xaee\xa1A\xa7A\xa6n\xa5@\xac\xc9\xa1C",
+            "你好世界",
+            "繁體中文內容，你好世界。",
+        ),
+        (
+            "japanese.txt",
+            b"\x93\xfa\x96{\x8c\xea\x82\xcc\x95\xb6\x8f\xcd\x82\xc5\x82\xb7\x81B\x82\xb1\x82\xf1\x82\xc9\x82\xbf\x82\xcd\x90\xa2\x8aE\x81B",
+            "こんにちは世界",
+            "日本語の文章です。こんにちは世界。",
+        ),
+        (
+            "korean.txt",
+            b"\xc7\xd1\xb1\xb9\xbe\xee \xb9\xae\xc0\xe5\xc0\xd4\xb4\xcf\xb4\xd9. \xbe\xc8\xb3\xe7\xc7\xcf\xbc\xbc\xbf\xe4 \xbc\xbc\xb0\xe8.",
+            "안녕하세요 세계",
+            "한국어 문장입니다. 안녕하세요 세계.",
+        ),
+        (
+            "western.txt",
+            b"Caf\xe9 d\xe9j\xe0 vu \x96 r\xe9sum\xe9 and na\xefve.",
+            "résumé",
+            "Café déjà vu – résumé and naïve.",
+        ),
+    ];
+    for (path, bytes, _, _) in &fixtures {
+        fs::write(workspace.join(path), bytes).unwrap();
+    }
+
+    let japanese = "日本語の文章です。こんにちは世界。".repeat(8);
+    let (euc_jp, _, euc_jp_errors) = encoding_rs::EUC_JP.encode(&japanese);
+    assert!(!euc_jp_errors);
+    fs::write(workspace.join("euc-jp.txt"), euc_jp.as_ref()).unwrap();
+
+    let extended_chinese = "简体中文内容和扩展字符𠀀。".repeat(8);
+    let (gb18030, _, gb18030_errors) = encoding_rs::GB18030.encode(&extended_chinese);
+    assert!(!gb18030_errors);
+    fs::write(workspace.join("gb18030-extended.txt"), gb18030.as_ref()).unwrap();
+
+    let russian = "Русский текст и проверка поиска. ".repeat(8);
+    let (windows_1251, _, windows_1251_errors) = encoding_rs::WINDOWS_1251.encode(&russian);
+    assert!(!windows_1251_errors);
+    fs::write(workspace.join("windows-1251.txt"), windows_1251.as_ref()).unwrap();
+
+    fs::write(
+        workspace.join("utf32.txt"),
+        utf32_be("UTF32 中文目标\n", true),
+    )
+    .unwrap();
+
+    let mut late = vec![b'a'; 64 * 1024 + 1024];
+    late.push(b'\n');
+    late.extend_from_slice(
+        b"\xbc\xf2\xcc\xe5\xd6\xd0\xce\xc4\xc4\xda\xc8\xdd\xa3\xac\xc4\xe3\xba\xc3\xca\xc0\xbd\xe7\xa1\xa3\n",
+    );
+    fs::write(workspace.join("late-gb18030.txt"), late).unwrap();
+
+    let script = generated_file_toolbox(&workspace);
+    let mut toolbox = ToolboxProcess::start(&workspace, &script);
+    for (path, _, query, expected) in fixtures {
+        let result = toolbox.execute("Search", json!({"path":path, "query":query}));
+        assert_eq!(
+            result["type"], "result",
+            "search failed for {path}: {result}"
+        );
+        assert_eq!(result["output"]["returned"], 1, "wrong result for {path}");
+        assert_eq!(result["output"]["skipped_binary"], 0);
+        assert_eq!(
+            result["output"]["matches"][0]["match_text"]
+                .as_object()
+                .unwrap()
+                .values()
+                .next()
+                .unwrap(),
+            expected
+        );
+    }
+
+    let gb_regex = toolbox.execute(
+        "Search",
+        json!({"path":"simplified.txt", "query":r"你.世界", "regex":true}),
+    );
+    assert_eq!(gb_regex["output"]["returned"], 1);
+    assert_eq!(gb_regex["output"]["matches"][0]["column"], 8);
+    assert_eq!(gb_regex["output"]["matches"][0]["match_length"], 4);
+    let western_case = toolbox.execute(
+        "Search",
+        json!({"path":"western.txt", "query":"RÉSUMÉ", "case_sensitive":false}),
+    );
+    assert_eq!(western_case["output"]["returned"], 1);
+
+    for (path, query) in [
+        ("euc-jp.txt", "こんにちは世界"),
+        ("gb18030-extended.txt", "𠀀"),
+        ("windows-1251.txt", "проверка поиска"),
+        ("utf32.txt", "中文目标"),
+        ("late-gb18030.txt", "你好世界"),
+    ] {
+        let result = toolbox.execute("Search", json!({"path":path, "query":query}));
+        assert_eq!(
+            result["type"], "result",
+            "search failed for {path}: {result}"
+        );
+        assert!(
+            result["output"]["returned"].as_u64().unwrap() >= 1,
+            "wrong result for {path}"
+        );
+        assert_eq!(result["output"]["skipped_binary"], 0);
     }
 
     toolbox.finish();
@@ -3113,8 +3254,10 @@ fn text_mutations_preserve_detected_encoding_bom_and_original_line_endings() {
         b"\xbc\xf2\xcc\xe5\xd6\xd0\xce\xc4\r\n"
     );
     let search = toolbox.execute("Search", json!({"path":"legacy.txt", "query":"中文"}));
-    assert_eq!(search["output"]["matches"].as_array().unwrap().len(), 0);
-    assert_eq!(search["output"]["skipped_binary"], 1);
+    assert_eq!(search["output"]["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(search["output"]["matches"][0]["column"], 3);
+    assert_eq!(search["output"]["matches"][0]["match_length"], 2);
+    assert_eq!(search["output"]["skipped_binary"], 0);
 
     let unicode = toolbox.execute("Read", json!({"path":"unicode.txt"}));
     let unicode_edited = toolbox.execute(

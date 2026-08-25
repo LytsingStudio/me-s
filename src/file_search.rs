@@ -1,9 +1,12 @@
 use std::{
     collections::BTreeMap,
-    io::{self, BufRead, Write},
+    fs::File,
+    io::{self, BufRead, Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
 };
 
+use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+use encoding_rs::{Decoder, DecoderResult, Encoding, GB18030, GBK, UTF_16BE, UTF_16LE};
 use globset::{Glob, GlobSet, GlobSetBuilder};
 use grep_matcher::Matcher;
 use grep_regex::{RegexMatcher, RegexMatcherBuilder};
@@ -13,6 +16,204 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 
 use crate::Result;
+
+const ENCODING_SAMPLE_BYTES: usize = 64 * 1024;
+const TRANSCODE_INPUT_BYTES: usize = 8 * 1024;
+const TRANSCODE_OUTPUT_BYTES: usize = 32 * 1024;
+
+#[derive(Clone, Copy, Debug)]
+enum SearchEncoding {
+    Utf8 {
+        bom_len: usize,
+    },
+    EncodingRs {
+        encoding: &'static Encoding,
+        bom_len: usize,
+    },
+    Utf32 {
+        little_endian: bool,
+        bom_len: usize,
+    },
+}
+
+impl SearchEncoding {
+    fn is_utf8(self) -> bool {
+        matches!(self, Self::Utf8 { .. })
+    }
+}
+
+struct EncodingProbe {
+    encoding: SearchEncoding,
+    sample: Vec<u8>,
+}
+
+struct StrictDecodeReader<R> {
+    inner: R,
+    decoder: Decoder,
+    input: [u8; TRANSCODE_INPUT_BYTES],
+    input_start: usize,
+    input_end: usize,
+    output: [u8; TRANSCODE_OUTPUT_BYTES],
+    output_start: usize,
+    output_end: usize,
+    eof: bool,
+    finished: bool,
+}
+
+impl<R: Read> StrictDecodeReader<R> {
+    fn new(inner: R, encoding: &'static Encoding) -> Self {
+        Self {
+            inner,
+            decoder: encoding.new_decoder_without_bom_handling(),
+            input: [0; TRANSCODE_INPUT_BYTES],
+            input_start: 0,
+            input_end: 0,
+            output: [0; TRANSCODE_OUTPUT_BYTES],
+            output_start: 0,
+            output_end: 0,
+            eof: false,
+            finished: false,
+        }
+    }
+
+    fn fill_output(&mut self) -> io::Result<()> {
+        self.output_start = 0;
+        self.output_end = 0;
+        while !self.finished && self.output_end == 0 {
+            if self.input_start == self.input_end && !self.eof {
+                self.input_start = 0;
+                self.input_end = self.inner.read(&mut self.input)?;
+                self.eof = self.input_end == 0;
+            }
+            let (result, read, written) = self.decoder.decode_to_utf8_without_replacement(
+                &self.input[self.input_start..self.input_end],
+                &mut self.output,
+                self.eof,
+            );
+            self.input_start += read;
+            self.output_end = written;
+            match result {
+                DecoderResult::InputEmpty if self.eof => self.finished = true,
+                DecoderResult::InputEmpty => {}
+                DecoderResult::OutputFull if written == 0 => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "encoding decoder made no progress",
+                    ));
+                }
+                DecoderResult::OutputFull => {}
+                DecoderResult::Malformed(_, _) => {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "malformed byte sequence for detected encoding",
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for StrictDecodeReader<R> {
+    fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        if self.output_start == self.output_end {
+            self.fill_output()?;
+        }
+        if self.output_start == self.output_end {
+            return Ok(0);
+        }
+        let count = destination
+            .len()
+            .min(self.output_end.saturating_sub(self.output_start));
+        destination[..count]
+            .copy_from_slice(&self.output[self.output_start..self.output_start + count]);
+        self.output_start += count;
+        Ok(count)
+    }
+}
+
+struct Utf32Reader<R> {
+    inner: R,
+    little_endian: bool,
+    pending: Vec<u8>,
+    output: Vec<u8>,
+    output_start: usize,
+    finished: bool,
+}
+
+impl<R: Read> Utf32Reader<R> {
+    fn new(inner: R, little_endian: bool) -> Self {
+        Self {
+            inner,
+            little_endian,
+            pending: Vec::with_capacity(TRANSCODE_INPUT_BYTES + 3),
+            output: Vec::with_capacity(TRANSCODE_OUTPUT_BYTES),
+            output_start: 0,
+            finished: false,
+        }
+    }
+
+    fn fill_output(&mut self) -> io::Result<()> {
+        self.output.clear();
+        self.output_start = 0;
+        while self.output.is_empty() && !self.finished {
+            let mut input = [0; TRANSCODE_INPUT_BYTES];
+            let read = self.inner.read(&mut input)?;
+            if read == 0 {
+                self.finished = true;
+                if !self.pending.is_empty() {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "incomplete UTF-32 code unit",
+                    ));
+                }
+                break;
+            }
+            self.pending.extend_from_slice(&input[..read]);
+            let complete = self.pending.len() / 4 * 4;
+            for unit in self.pending[..complete].chunks_exact(4) {
+                let bytes = [unit[0], unit[1], unit[2], unit[3]];
+                let scalar = if self.little_endian {
+                    u32::from_le_bytes(bytes)
+                } else {
+                    u32::from_be_bytes(bytes)
+                };
+                let character = char::from_u32(scalar).ok_or_else(|| {
+                    io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-32 scalar value")
+                })?;
+                let mut encoded = [0; 4];
+                self.output
+                    .extend_from_slice(character.encode_utf8(&mut encoded).as_bytes());
+            }
+            self.pending.drain(..complete);
+        }
+        Ok(())
+    }
+}
+
+impl<R: Read> Read for Utf32Reader<R> {
+    fn read(&mut self, destination: &mut [u8]) -> io::Result<usize> {
+        if destination.is_empty() {
+            return Ok(0);
+        }
+        if self.output_start == self.output.len() {
+            self.fill_output()?;
+        }
+        if self.output_start == self.output.len() {
+            return Ok(0);
+        }
+        let count = destination
+            .len()
+            .min(self.output.len().saturating_sub(self.output_start));
+        destination[..count]
+            .copy_from_slice(&self.output[self.output_start..self.output_start + count]);
+        self.output_start += count;
+        Ok(count)
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct SearchRequest {
@@ -109,6 +310,7 @@ struct ProbeSink {
     matched: bool,
     binary: bool,
     invalid_utf8: bool,
+    invalid_utf8_sample: Vec<u8>,
 }
 
 impl ProbeSink {
@@ -117,8 +319,16 @@ impl ProbeSink {
             self.binary = true;
             return false;
         }
-        if std::str::from_utf8(bytes).is_err() {
+        if let Err(error) = std::str::from_utf8(bytes) {
             self.invalid_utf8 = true;
+            if self.invalid_utf8_sample.is_empty() {
+                let start = error
+                    .valid_up_to()
+                    .saturating_sub(ENCODING_SAMPLE_BYTES / 4);
+                let end = bytes.len().min(start + ENCODING_SAMPLE_BYTES);
+                self.invalid_utf8_sample
+                    .extend_from_slice(&bytes[start..end]);
+            }
             return false;
         }
         true
@@ -248,13 +458,26 @@ fn search(
             continue;
         }
 
+        let encoding_probe = match detect_file_encoding(&path) {
+            Ok(Some(probe)) => probe,
+            Ok(None) | Err(_) => {
+                skipped_binary += 1;
+                continue;
+            }
+        };
+        let mut encoding = encoding_probe.encoding;
         let mut probe = ProbeSink::default();
-        if build_searcher(true)
-            .search_path(&matcher, &path, &mut probe)
-            .is_err()
-            || probe.binary
-            || probe.invalid_utf8
-        {
+        let mut probe_result = search_file(&matcher, &path, encoding, &mut probe);
+        if probe_result.is_ok() && !probe.binary && probe.invalid_utf8 && encoding.is_utf8() {
+            if let Some(fallback) =
+                detect_legacy_from_fragments(&encoding_probe.sample, &probe.invalid_utf8_sample)
+            {
+                encoding = fallback;
+                probe = ProbeSink::default();
+                probe_result = search_file(&matcher, &path, encoding, &mut probe);
+            }
+        }
+        if probe_result.is_err() || probe.binary || probe.invalid_utf8 {
             skipped_binary += 1;
             continue;
         }
@@ -263,9 +486,7 @@ fn search(
         }
 
         let mut lines = LineSink::default();
-        if build_searcher(true)
-            .search_path(&matcher, &path, &mut lines)
-            .is_err()
+        if search_file(&matcher, &path, encoding, &mut lines).is_err()
             || lines.binary
             || lines.invalid_utf8
         {
@@ -333,7 +554,147 @@ fn build_searcher(passthru: bool) -> Searcher {
         .line_number(true)
         .passthru(passthru)
         .binary_detection(BinaryDetection::quit(0))
+        .bom_sniffing(false)
         .build()
+}
+
+fn detect_file_encoding(path: &Path) -> io::Result<Option<EncodingProbe>> {
+    let mut file = File::open(path)?;
+    let size = file.metadata()?.len();
+    let mut sample = Vec::with_capacity(ENCODING_SAMPLE_BYTES);
+    Read::by_ref(&mut file)
+        .take(ENCODING_SAMPLE_BYTES as u64)
+        .read_to_end(&mut sample)?;
+    let complete = size <= sample.len() as u64;
+
+    let encoding = if sample.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
+        SearchEncoding::Utf32 {
+            little_endian: false,
+            bom_len: 4,
+        }
+    } else if sample.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
+        SearchEncoding::Utf32 {
+            little_endian: true,
+            bom_len: 4,
+        }
+    } else if sample.starts_with(&[0xEF, 0xBB, 0xBF]) {
+        SearchEncoding::Utf8 { bom_len: 3 }
+    } else if sample.starts_with(&[0xFE, 0xFF]) {
+        SearchEncoding::EncodingRs {
+            encoding: UTF_16BE,
+            bom_len: 2,
+        }
+    } else if sample.starts_with(&[0xFF, 0xFE]) {
+        SearchEncoding::EncodingRs {
+            encoding: UTF_16LE,
+            bom_len: 2,
+        }
+    } else {
+        if sample_looks_binary(&sample) {
+            return Ok(None);
+        }
+        if utf8_prefix_is_valid(&sample, complete) {
+            SearchEncoding::Utf8 { bom_len: 0 }
+        } else {
+            let Some(encoding) = detect_legacy_encoding(&sample, complete) else {
+                return Ok(None);
+            };
+            encoding
+        }
+    };
+    Ok(Some(EncodingProbe { encoding, sample }))
+}
+
+fn utf8_prefix_is_valid(sample: &[u8], complete: bool) -> bool {
+    match std::str::from_utf8(sample) {
+        Ok(_) => true,
+        Err(error) => !complete && error.error_len().is_none(),
+    }
+}
+
+fn sample_looks_binary(sample: &[u8]) -> bool {
+    if sample.contains(&0) {
+        return true;
+    }
+    let controls = sample
+        .iter()
+        .filter(|byte| **byte < 0x20 && !matches!(**byte, b'\t' | b'\n' | b'\r' | 0x0C))
+        .count();
+    controls >= 3 && controls.saturating_mul(100) > sample.len().max(1)
+}
+
+fn detect_legacy_encoding(sample: &[u8], complete: bool) -> Option<SearchEncoding> {
+    if sample.is_empty() || sample_looks_binary(sample) {
+        return None;
+    }
+    let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
+    if !detector.feed(sample, complete) {
+        return None;
+    }
+    Some(search_encoding_for_guess(
+        detector.guess(None, Utf8Detection::Deny),
+    ))
+}
+
+fn detect_legacy_from_fragments(prefix: &[u8], invalid: &[u8]) -> Option<SearchEncoding> {
+    if invalid.is_empty() || sample_looks_binary(invalid) {
+        return None;
+    }
+    let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
+    let prefix_limit = prefix.len().min(ENCODING_SAMPLE_BYTES / 2);
+    let invalid_limit = invalid
+        .len()
+        .min(ENCODING_SAMPLE_BYTES.saturating_sub(prefix_limit));
+    let mut non_ascii = detector.feed(&prefix[..prefix_limit], false);
+    non_ascii |= detector.feed(&invalid[..invalid_limit], false);
+    non_ascii.then(|| search_encoding_for_guess(detector.guess(None, Utf8Detection::Deny)))
+}
+
+fn search_encoding_for_guess(encoding: &'static Encoding) -> SearchEncoding {
+    SearchEncoding::EncodingRs {
+        encoding: if std::ptr::eq(encoding, GBK) {
+            GB18030
+        } else {
+            encoding
+        },
+        bom_len: 0,
+    }
+}
+
+fn search_file<S: Sink<Error = io::Error>>(
+    matcher: &RegexMatcher,
+    path: &Path,
+    encoding: SearchEncoding,
+    sink: &mut S,
+) -> io::Result<()> {
+    match encoding {
+        SearchEncoding::Utf8 { bom_len: 0 } => {
+            build_searcher(true).search_path(matcher, path, sink)
+        }
+        SearchEncoding::Utf8 { bom_len } => {
+            let file = open_after_bom(path, bom_len)?;
+            build_searcher(true).search_reader(matcher, file, sink)
+        }
+        SearchEncoding::EncodingRs { encoding, bom_len } => {
+            let file = open_after_bom(path, bom_len)?;
+            let reader = StrictDecodeReader::new(file, encoding);
+            build_searcher(true).search_reader(matcher, reader, sink)
+        }
+        SearchEncoding::Utf32 {
+            little_endian,
+            bom_len,
+        } => {
+            let file = open_after_bom(path, bom_len)?;
+            let reader = Utf32Reader::new(file, little_endian);
+            build_searcher(true).search_reader(matcher, reader, sink)
+        }
+    }
+}
+
+fn open_after_bom(path: &Path, bom_len: usize) -> io::Result<File> {
+    let mut file = File::open(path)?;
+    file.seek(SeekFrom::Start(bom_len as u64))?;
+    Ok(file)
 }
 
 fn candidates(
@@ -445,6 +806,8 @@ fn public_absolute_path(path: &Path) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::io::Cursor;
+
     use super::*;
 
     #[test]
@@ -458,5 +821,39 @@ mod tests {
     fn line_keys_use_total_line_width() {
         assert_eq!(line_key(8, 2), "09");
         assert_eq!(line_key(9, 2), "10");
+    }
+
+    #[test]
+    fn gbk_detection_uses_gb18030_superset() {
+        let detected = detect_legacy_encoding(
+            b"\xbc\xf2\xcc\xe5\xd6\xd0\xce\xc4\xc4\xda\xc8\xdd\xa3\xac\xc4\xe3\xba\xc3\xca\xc0\xbd\xe7\xa1\xa3",
+            true,
+        )
+        .unwrap();
+        match detected {
+            SearchEncoding::EncodingRs { encoding, .. } => {
+                assert!(std::ptr::eq(encoding, GB18030));
+            }
+            _ => panic!("expected a legacy encoding"),
+        }
+    }
+
+    #[test]
+    fn strict_decoder_rejects_malformed_input() {
+        let mut reader = StrictDecodeReader::new(Cursor::new(vec![0x81]), GB18030);
+        let mut output = Vec::new();
+        assert_eq!(
+            reader.read_to_end(&mut output).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn utf32_reader_streams_unicode_scalars() {
+        let input = [0x41, 0, 0, 0, 0x2D, 0x4E, 0, 0];
+        let mut reader = Utf32Reader::new(Cursor::new(input), true);
+        let mut output = String::new();
+        reader.read_to_string(&mut output).unwrap();
+        assert_eq!(output, "A中");
     }
 }
