@@ -86,24 +86,24 @@ Important behavior:
 - A session preserves shell state, including cwd, environment variables, jobs, and interactive program state, until it exits or is killed.
 - Use the same session_id for follow-up interaction. Create a new session only when isolation is useful or the previous one ended.
 - Create waits for the initial shell output with the same idle/maximum wait rules as Interact. That initial output is returned as tool output, so inspect it before the next action.
-- Every operation that reads the PTY uses one shared renderer and the same idle/maximum wait rules. PTY stdout and stderr are one terminal stream.
+- Every operation that reads a PTY session uses the same output state and idle/maximum wait rules. PTY stdout and stderr are one terminal stream.
 - `wait_ms` is the required quiet interval after the latest received PTY output; any newer output restarts it. `max_wait_ms` is the hard upper bound for that tool call.
 - For a non-empty `input`, the quiet interval never starts before all input bytes have been successfully written. Old unread output cannot make newly submitted input return immediately. For an empty polling input, already-pending output that has been quiet long enough may return immediately.
 - An idle return only says the PTY stopped producing output for `wait_ms`; it does not prove a foreground command finished. Confirm a shell prompt or the interactive program's known state. If output is inconclusive, poll with `input:[]`; do not submit a second shell command into a possibly running foreground process.
 - The PTY size is fixed for the whole session. Terminal resize is intentionally unavailable.
-- The headless VT100 terminal keeps 100000 scrollback rows. Rows use permanent absolute numbers that increase as the normal screen scrolls.
+- Terminal rows use permanent absolute numbers that increase as normal output scrolls, so the current viewport may begin above row 0.
 - Every tool result is one JSON object. Terminal reads appear in its `terminal_updates` array as structured line-level `terminal_patch` version 2 objects; the tool call outcome appears separately in `result`. Terminal patches are objects, never JSON encoded again inside a string field, and never cell matrices.
 - `viewport.first_terminal_row` and `viewport.last_terminal_row` identify the current visible absolute terminal row range. `rows` contains only rows whose final rendered cells differ from the previous baseline. Every included object completely replaces its `terminal_row`; `text:""` explicitly clears that terminal row.
 - Changes are compared only after the PTY becomes idle or reaches the maximum wait. Intermediate redraws are never reported separately, and a row that returns to its baseline is omitted.
-- `terminal_row` is renderer metadata, not terminal text, a source-file line number, a menu choice, a command argument, or any other application value. Only each row object's `text` is visible terminal content. Never reuse a `terminal_row` number as application input or infer application meaning from its numeric value.
+- `terminal_row` is patch metadata, not terminal text, a source-file line number, a menu choice, a command argument, or any other application value. Only each row object's `text` is visible terminal content. Never reuse a `terminal_row` number as application input or infer application meaning from its numeric value.
 - A row's `text` is the complete visible text with literal spaces preserved. `wrapped:true` marks terminal autowrap. Trailing default blanks are omitted; all remaining columns before the fixed terminal width are default blank cells. A row absent from `rows` is unchanged, not blank; `rows:[]` is a valid cursor-, viewport-, or state-only update.
 - Style 0 is the implicit default and is omitted from `styles`. Every object in `styles` defines one non-default style ID used by this patch. Missing foreground/background means terminal default; missing attributes means none. Colors are `indexed(N)` or `#rrggbb`; attributes are `bold`, `dim`, `italic`, `underline`, and `inverse`.
 - A row's optional `style_spans` describes only its non-default styled terminal-column ranges using `start_column`, `width`, and `style`. The complete visible content remains in `text`; no style markers are inserted into it and terminal text needs no custom escaping beyond ordinary JSON escaping. Treat inverse as a visual fact, not proof that text is selected.
 - `cursor` reports the real cursor separately without replacing its `underlying` character. `wide_continuation:true` means the cursor is on the continuation cell of a two-column character.
 - `sequence` increases once for every captured patch in one session. Use `session_id` plus `sequence` to order patches; sequence numbers from different sessions are unrelated.
 - `truncated:true` means only the newest complete changed rows that fit the requested limit are included. Never infer omitted rows. The live baseline still advances, so omitted changes are not automatically returned by a later poll; choose a larger `max_output_chars` before a read when losing changed rows would be unacceptable. `result.state` describes completion of this tool call; do not confuse it with the PTY process `pty_state`.
-- Primary/alternate screen switching remains an internal renderer detail. The model sees only the final changed rows on the active rendered surface.
-- The live TerminalSession alone owns the comparison baseline. EDB, rewind, clear, and ModelContext never alter, restore, or repair it.
+- A patch reports only the final changed rows on the active terminal screen; transient primary/alternate-screen switching is not reported as a separate event.
+- The comparison baseline belongs to the live session. Conversation rewind, clearing, or context replacement does not restore or reset it.
 - `input` actions execute once in exact array order before Terminal waits for output. Never guess an implied Enter.
 - A text action is exactly `{{"type":"text","text":"..."}}`. It writes ordinary UTF-8 text verbatim; newline and tab are allowed. Do not put Escape, Ctrl keys, JSON Unicode control escapes, Base64, or key names inside text.
 - A key action is exactly `{{"type":"key","key":"...","modifiers":[],"repeat":1}}`. `modifiers` and `repeat` are optional. Supported modifiers are `ctrl`, `alt`, and `shift`; they describe one simultaneous chord. `repeat` repeats that complete key chord and is between 1 and 1000.
@@ -111,9 +111,9 @@ Important behavior:
 - For printable keys, `ctrl` supports ASCII letters, Space/@, `[`, `\`, `]`, `^`, `_`, and `?`; `shift` is accepted only with ASCII letters. To enter a visible symbol such as `!`, send that resulting character directly as text or as `key:"!"` without guessing a physical keyboard layout.
 - Use multiple array elements for sequential actions. Sequential actions are not one simultaneous key chord or an escaped text string.
 - The tool converts semantic keys to canonical terminal bytes and VT sequences. Ctrl+I is indistinguishable from Tab, Ctrl+M from Enter, and Ctrl+[ from Escape at the PTY boundary. Host GUI shortcuts such as Command+C or a terminal application's paste shortcut are not PTY input.
-- A session exists only inside the current persistent Terminal toolbox process. Closing me, replacing the toolbox, or an external process failure destroys its live PTYs. EDB closes any unfinished tool transaction as `interrupted`; it does not synthesize a separate session-loss message.
+- A session exists only while its current Terminal toolbox process remains alive. If me, the toolbox, or its process restarts or fails, that process's PTYs are gone. Any unfinished tool call is reported as `interrupted`; no separate session-loss result is synthesized.
 - A session_id from an earlier toolbox process does not exist in a restarted process. A later attempt to use it fails with `session_not_found`; do not keep retrying that ID. Call Terminal.Create and continue in a new session if needed.
-- Historical EDB replay never recreates a PTY or repeats terminal side effects.
+- Replaying earlier conversation history does not recreate a PTY or repeat terminal side effects.
 - Follow the governing external-path safety rule for every command: external reads must be materially relevant, and no content outside the workspace may be modified without the actual user's explicit authorization for the exact operation and target scope. Do not expose secrets or perform destructive actions without exact authorization.
 
 The following examples progress from simple to complex and only explain how to interpret structured Terminal results. Neutral commands may appear solely to make returned text understandable; the examples do not prescribe tool input or a workflow for any task.
@@ -291,7 +291,7 @@ Example 7, truncated changed rows and an exited PTY:
 ```
 Only the newest complete changed rows that fit the output limit are present. Do not reconstruct omitted rows, and do not expect a later poll to resend them because the session baseline has advanced. `result.state:"succeeded"` means the Terminal tool call completed successfully; the patch's `pty_state:"exited"` and `exit_code:0` mean the PTY process itself ended normally. These are separate lifecycles, so the tool result's `exit_code` remains null here.
 
-Provider function names replace `.` with `_`, for example Terminal.Create is exposed as Terminal_Create."##
+"##
     )
 }
 
@@ -2453,7 +2453,7 @@ mod tests {
         #[cfg(unix)]
         assert!(tool_prompt(shell).contains("--noprofile --norc -i"));
         assert!(tool_prompt(shell).contains("session_not_found"));
-        assert!(tool_prompt(shell).contains("does not synthesize"));
+        assert!(tool_prompt(shell).contains("no separate session-loss result is synthesized"));
         assert!(tool_prompt(shell).contains(r#""terminal_updates""#));
         assert!(tool_prompt(shell).contains(r#""version": 2"#));
         assert!(tool_prompt(shell).contains(r#""terminal_row": 2, "text": """#));
@@ -2465,7 +2465,11 @@ mod tests {
         assert!(tool_prompt(shell).contains("do not expect a later poll to resend them"));
         assert!(tool_prompt(shell).contains("These are separate lifecycles"));
         assert!(tool_prompt(shell).contains("Old unread output cannot make"));
-        assert!(tool_prompt(shell).contains("EDB, rewind, clear, and ModelContext never alter"));
+        assert!(tool_prompt(shell).contains(
+            "Conversation rewind, clearing, or context replacement does not restore or reset it"
+        ));
+        assert!(!tool_prompt(shell).contains("TerminalSession"));
+        assert!(!tool_prompt(shell).contains("ModelContext"));
         assert!(tool_prompt(shell).contains(
             "examples progress from simple to complex and only explain how to interpret"
         ));

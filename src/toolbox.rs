@@ -1530,7 +1530,9 @@ fn render_catalog_prompt(
     briefs: &[(String, String)],
     excluded_toolbox: Option<&str>,
 ) -> Result<String> {
-    let mut sections = vec![r#"# Tool result envelope
+    let mut sections = vec![r#"# Tool names and result envelope
+
+Tool documentation uses stable names such as `File.Read`. Provider function names replace `.` with `_`, so `File.Read` is called as `File_Read`; this applies to every dotted toolbox tool name.
 
 Every tool response uses this runtime envelope:
 
@@ -1976,6 +1978,23 @@ fn terminal_input_schema(tool: &str) -> std::result::Result<Value, String> {
         .ok_or_else(|| format!("Terminal tool {tool} has no input schema"))
 }
 
+fn terminal_session_output_schema() -> Value {
+    json!({
+        "type": "object",
+        "required": ["session_id", "state", "shell", "width", "height", "cwd", "exit_code"],
+        "properties": {
+            "session_id": {"type": "string"},
+            "state": {"type": "string", "enum": ["running", "exited", "killed", "lost"]},
+            "shell": {"type": "string"},
+            "width": {"type": "integer"},
+            "height": {"type": "integer"},
+            "cwd": {"type": "string"},
+            "exit_code": {"type": ["integer", "null"]}
+        },
+        "additionalProperties": false
+    })
+}
+
 fn terminal_output_schema(tool: &str) -> std::result::Result<Value, String> {
     match tool {
         "Create" => Ok(json!({
@@ -1994,17 +2013,25 @@ fn terminal_output_schema(tool: &str) -> std::result::Result<Value, String> {
         "Interact" => Ok(json!({
             "type": "object",
             "required": ["session_id", "sequence", "size", "viewport", "changed_rows", "state", "exit_code", "truncated"],
-            "additionalProperties": true
-        })),
-        "Status" | "Kill" => Ok(json!({
-            "type": "object",
-            "required": ["session_id", "state", "shell", "width", "height", "cwd", "exit_code"],
+            "properties": {
+                "session_id": {"type": "string"},
+                "sequence": {"type": "integer", "minimum": 0},
+                "size": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 1}},
+                "viewport": {"type": "array", "minItems": 2, "maxItems": 2, "items": {"type": "integer", "minimum": 0}},
+                "changed_rows": {"type": "integer", "minimum": 0},
+                "state": {"type": "string", "enum": ["running", "exited", "killed", "lost"]},
+                "exit_code": {"type": ["integer", "null"]},
+                "truncated": {"type": "boolean"}
+            },
             "additionalProperties": false
         })),
+        "Status" | "Kill" => Ok(terminal_session_output_schema()),
         "List" => Ok(json!({
             "type": "object",
             "required": ["sessions"],
-            "properties": {"sessions": {"type": "array"}},
+            "properties": {
+                "sessions": {"type": "array", "items": terminal_session_output_schema()}
+            },
             "additionalProperties": false
         })),
         _ => Err(format!("unknown Terminal tool {tool}")),
@@ -2341,8 +2368,39 @@ for line in sys.stdin:
         assert!(catalog.prompt().contains("including its actual JSON type"));
         assert!(catalog.prompt().contains("\"state\": \"succeeded\""));
         assert!(catalog.prompt().contains("\"truncate\": false"));
+        assert!(
+            catalog
+                .prompt()
+                .contains("stable names such as `File.Read`")
+        );
+        assert!(catalog.prompt().contains("`File_Read`"));
     }
 
+    #[test]
+    fn terminal_output_schemas_define_required_fields_and_collection_items() {
+        for tool in terminal_local_names() {
+            let schema = terminal_output_schema(tool).unwrap();
+            let properties = schema["properties"].as_object().unwrap();
+            for field in schema["required"].as_array().unwrap() {
+                assert!(
+                    properties.contains_key(field.as_str().unwrap()),
+                    "Terminal.{tool} requires an undefined field {field}"
+                );
+            }
+        }
+
+        let status = terminal_output_schema("Status").unwrap();
+        assert_eq!(
+            status["properties"]["exit_code"]["type"],
+            json!(["integer", "null"])
+        );
+        let list = terminal_output_schema("List").unwrap();
+        assert_eq!(list["properties"]["sessions"]["items"], status);
+        let interact = terminal_output_schema("Interact").unwrap();
+        assert_eq!(interact["properties"]["size"]["minItems"], 2);
+        assert_eq!(interact["properties"]["viewport"]["maxItems"], 2);
+        assert_eq!(interact["properties"]["truncated"]["type"], "boolean");
+    }
     #[test]
     fn native_catalog_does_not_expose_disabled_agent_toolbox() {
         let catalog = ToolboxCatalog::native_for_test();

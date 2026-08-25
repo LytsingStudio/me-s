@@ -1253,6 +1253,12 @@ fn input_schema(tool: &str) -> std::result::Result<Value, DesktopError> {
         "required": ["x", "y", "width", "height"]
     });
     let button = json!({"type": "string", "enum": ["left", "right", "middle"]});
+    let key = json!({
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 32,
+        "description": "Case-insensitive physical key name for key_click, key_down, or key_up. Use text_input for visible Unicode text."
+    });
     Ok(json!({
         "type": "object",
         "additionalProperties": false,
@@ -1264,15 +1270,15 @@ fn input_schema(tool: &str) -> std::result::Result<Value, DesktopError> {
                 "items": {
                     "oneOf": [
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"capture"},"clip":clip},"required":["kind"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"delay"},"delay_ms":{"type":"integer","minimum":0,"maximum":MAX_DELAY_MS}},"required":["kind","delay_ms"]},
+                        {"type":"object","description":"One delay is at most 60000 ms; all delays in the batch together must not exceed 300000 ms.","additionalProperties":false,"properties":{"kind":{"const":"delay"},"delay_ms":{"type":"integer","minimum":0,"maximum":MAX_DELAY_MS}},"required":["kind","delay_ms"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"mouse_move"},"x":{"type":"integer","minimum":0,"maximum":MAX_COORDINATE},"y":{"type":"integer","minimum":0,"maximum":MAX_COORDINATE}},"required":["kind","x","y"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"mouse_down"},"button":button},"required":["kind"]},
                         {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"mouse_up"},"button":button},"required":["kind"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"mouse_wheel"},"delta_x":{"type":"integer","minimum":-MAX_WHEEL_DELTA,"maximum":MAX_WHEEL_DELTA},"delta_y":{"type":"integer","minimum":-MAX_WHEEL_DELTA,"maximum":MAX_WHEEL_DELTA}},"required":["kind","delta_x","delta_y"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"key_click"},"key":{"type":"string","minLength":1,"maxLength":32}},"required":["kind","key"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"key_down"},"key":{"type":"string","minLength":1,"maxLength":32}},"required":["kind","key"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"key_up"},"key":{"type":"string","minLength":1,"maxLength":32}},"required":["kind","key"]},
-                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"text_input"},"text":{"type":"string","minLength":1,"maxLength":MAX_TEXT_BYTES}},"required":["kind","text"]}
+                        {"type":"object","description":"At least one of delta_x and delta_y must be non-zero.","additionalProperties":false,"properties":{"kind":{"const":"mouse_wheel"},"delta_x":{"type":"integer","minimum":-MAX_WHEEL_DELTA,"maximum":MAX_WHEEL_DELTA},"delta_y":{"type":"integer","minimum":-MAX_WHEEL_DELTA,"maximum":MAX_WHEEL_DELTA}},"required":["kind","delta_x","delta_y"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"key_click"},"key":key.clone()},"required":["kind","key"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"key_down"},"key":key.clone()},"required":["kind","key"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"key_up"},"key":key.clone()},"required":["kind","key"]},
+                        {"type":"object","additionalProperties":false,"properties":{"kind":{"const":"text_input"},"text":{"type":"string","minLength":1,"maxLength":MAX_TEXT_BYTES,"description":"Visible Unicode text whose UTF-8 encoding must not exceed 32768 bytes."}},"required":["kind","text"]}
                     ]
                 }
             }
@@ -1323,11 +1329,15 @@ fn instructions(tool: &str) -> std::result::Result<&'static str, DesktopError> {
         ));
     }
     Ok(
-        r#"Desktop.Play controls the real desktop of the host running me-s or me-gateway, not a Camoufox page, browser viewport, or the client device displaying the WebUI.
+        r#"Desktop.Play controls the real desktop of the host running me-s or me-gateway, not a WebBrowser page, browser viewport, or the client device displaying the WebUI.
 
 The complete operations array is parsed and validated before any desktop input is injected. Operations then execute exactly in array order. Desktop effects cannot be rolled back: if one operation fails, prior effects remain and later operations do not run. Always inspect `state`, `completed_operations`, `failed_operation_index`, `error`, `auto_released`, and `cleanup_errors`.
 
-`capture` is optional. A Play may contain no capture. If present, capture may appear only once and must be the final operation. Capture first takes one full primary-display screenshot, then applies an optional in-memory `clip`; it never uses an operating-system region-capture API and never scales the crop. Clip coordinates and all mouse coordinates use full-screenshot pixels with a top-left origin. Invalid, zero-sized, or out-of-bounds clips reject the whole batch before input.
+Each `delay_ms` is between 0 and 60000 milliseconds, and all delays in one Play must total no more than 300000 milliseconds. A `mouse_wheel` operation requires at least one non-zero delta. `text_input` accepts non-empty visible Unicode text up to 32768 UTF-8 bytes.
+
+Use `text_input` for visible Unicode text. Use `key_click`, `key_down`, and `key_up` for physical keys and shortcuts. Key names are case-insensitive. Supported names are ASCII letters and digits; `return`, `escape`, `space`, `tab`, `backspace`, `delete`; `left`, `right`, `up`, `down`, `home`, `end`, `page_up`, `page_down`; `shift`, `right_shift`, `control`, `right_control`, `option`, `right_option`, `command`, `right_command`, `caps_lock`, `function`; `f1` through `f20`; and `minus`, `equal`, `left_bracket`, `right_bracket`, `backslash`, `semicolon`, `quote`, `comma`, `period`, `slash`, and `grave`. Common aliases include `enter`, `esc`, `ctrl`, `alt`, `cmd`, `meta`, `fn`, arrow-prefixed directions, and left-prefixed modifier names; multiword names accept `_` or `-`. Windows does not support `fn` or `function`.
+
+`capture` is optional. A Play may contain no capture. If present, capture may appear only once and must be the final operation. Capture always starts from one full primary-display screenshot and then applies an optional in-memory `clip`; the crop is never scaled. Clip coordinates and all mouse coordinates use full-screenshot pixels with a top-left origin. Invalid, zero-sized, or out-of-bounds clips reject the whole batch before input.
 
 A successful capture returns a workspace-relative PNG path under `.me/tmp/desktop`, the output dimensions, full screenshot dimensions, and the exact output region in full-screen coordinates. Call Image.View with that path to inspect the pixels. The Desktop result itself does not add image content to model context. If the viewed image is blank, malformed, or otherwise unexpected, stop rather than guessing desktop state.
 
@@ -1337,9 +1347,9 @@ On Windows, Desktop.Play must run inside the active, unlocked user's `WinSta0\\D
 
 Use deterministic batches for typing, shortcuts, clicks, double-clicks, drags, long presses, scrolling, and delays. If an action may unpredictably change focus, windows, menus, or control positions, end that Play with capture and inspect it before constructing another batch. Capture is still not mandatory for deterministic actions.
 
-Desktop is a host-global resource. Play obtains an internal cross-process exclusive lease; `desktop_busy` means another Agent or me process currently controls the desktop. Tool availability does not authorize destructive or externally visible actions. Obtain the same user authority required without Desktop before deleting data, sending messages, submitting forms, changing permissions, or causing another consequential effect.
+Only one Desktop controller can act at a time. `desktop_busy` means another Agent or me process currently controls the desktop. Tool availability does not authorize destructive or externally visible actions. Obtain the same user authority required without Desktop before deleting data, sending messages, submitting forms, changing permissions, or causing another consequential effect.
 
-The executor tracks synthetic key and mouse-down state and attempts to release leftovers on normal completion and runtime failures. `auto_released` reports successful finalizer releases. An operating-system force kill cannot be made perfectly recoverable, so do not leave inputs down longer than needed."#,
+Desktop tracks synthetic key and mouse-down state and attempts to release leftovers after normal completion and runtime failures. `auto_released` reports successful releases, while `cleanup_errors` reports failed releases. An operating-system force kill cannot be made perfectly recoverable, so do not leave inputs down longer than needed."#,
     )
 }
 
@@ -1369,6 +1379,9 @@ fn examples(tool: &str) -> std::result::Result<&'static str, DesktopError> {
 
 Type deterministic text without capturing:
 {"operations":[{"kind":"text_input","text":"Hello，世界 👋"},{"kind":"key_click","key":"enter"}]}
+
+Hold and release a modifier for a shortcut:
+{"operations":[{"kind":"key_down","key":"control"},{"kind":"key_click","key":"c"},{"kind":"key_up","key":"control"}]}
 
 Drag, wait, then capture a strict full-screen pixel region:
 {"operations":[{"kind":"mouse_move","x":800,"y":500},{"kind":"mouse_down"},{"kind":"mouse_move","x":1600,"y":500},{"kind":"mouse_up"},{"kind":"delay","delay_ms":500},{"kind":"capture","clip":{"x":800,"y":300,"width":1000,"height":700}}]}"#)
@@ -1547,6 +1560,12 @@ mod tests {
             input_schema("Play").unwrap()["properties"]["operations"]["minItems"],
             1
         );
+        let prompt = instructions("Play").unwrap();
+        assert!(prompt.contains("32768 UTF-8 bytes"));
+        assert!(prompt.contains("mouse_wheel"));
+        assert!(prompt.contains("`f1` through `f20`"));
+        assert!(prompt.contains("Windows does not support `fn`"));
+        assert!(examples("Play").unwrap().contains("\"key_down\""));
     }
 
     #[test]

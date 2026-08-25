@@ -67,7 +67,7 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
         "The current model does not support image input. Image.View will reject calls until an image-capable model is selected; Image.Info remains available."
     };
     let view_instructions = if image_input_supported {
-        "Loads the complete image binary from the supplied URL or local path, validates and identifies it, and stores it inside the conversation event database before exposing it to the model. The conversation remains replayable even if the original file or URL later disappears."
+        "Loads the complete image binary from the supplied URL or local path, validates and identifies it, and stores the complete image with the conversation before exposing it to the model. The conversation remains replayable even if the original file or URL later disappears."
     } else {
         "Unavailable with the current model because it does not accept image input. Select an image-capable model before calling this tool. The restriction is enforced by the runtime."
     };
@@ -82,7 +82,8 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
         "properties": {
             "url": {
                 "type": "string",
-                "description": "HTTP(S) URL, file URL, data URL, or local image path. Relative paths resolve from the workspace."
+                "minLength": 1,
+                "description": "Non-empty HTTP(S) URL, file URL, data URL, or local image path. Relative paths resolve from the workspace; whitespace-only values are invalid."
             }
         },
         "additionalProperties": false
@@ -464,6 +465,17 @@ mod tests {
         let (supported, brief) = catalog_parts(true);
         assert!(brief.1.contains("current model supports image input"));
         assert!(supported[1].route.contains("visual content"));
+        assert_eq!(
+            supported[0].input_schema["properties"]["url"]["minLength"],
+            1
+        );
+        assert!(
+            supported[0].input_schema["properties"]["url"]["description"]
+                .as_str()
+                .unwrap()
+                .contains("whitespace-only")
+        );
+        assert!(!supported[1].instructions.contains("event database"));
         let (unsupported, brief) = catalog_parts(false);
         assert!(brief.1.contains("does not support image input"));
         assert!(unsupported[1].route.contains("will reject"));

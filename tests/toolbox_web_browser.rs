@@ -307,7 +307,7 @@ fn generated_web_browser_describes_the_raw_snapshot_protocol_without_installing(
 
     let brief = toolbox.query("getBrief", None);
     let brief = brief["output"].as_str().unwrap();
-    assert!(brief.contains("ARIA accessibility tree verbatim"));
+    assert!(brief.contains("browser's raw ARIA accessibility tree"));
     assert!(brief.contains("sole page-content observation tool"));
     assert!(brief.contains("Create, Navigate, Snapshot(kind=text)"));
     assert!(brief.contains("refresh the text Snapshot after navigation"));
@@ -316,6 +316,9 @@ fn generated_web_browser_describes_the_raw_snapshot_protocol_without_installing(
     assert!(brief.contains("discard every previous page_id and element_id"));
     assert!(brief.contains("Google first"));
     assert!(brief.find("Google first") < brief.find("Baidu second"));
+    assert!(!brief.contains("Camoufox"));
+    assert!(!brief.contains("Playwright"));
+    assert!(!brief.contains("Browser dependencies"));
 
     for name in names {
         let name = name.as_str().unwrap();
@@ -414,7 +417,8 @@ fn generated_web_browser_describes_the_raw_snapshot_protocol_without_installing(
     let instructions = instructions["output"].as_str().unwrap();
     assert!(instructions.contains("fixed delay"));
     assert!(instructions.contains("not a stability heuristic"));
-    assert!(instructions.contains("verbatim"));
+    assert!(instructions.contains("browser's raw ARIA snapshot"));
+    assert!(!instructions.contains("Playwright"));
     assert!(instructions.contains("[ref=e"));
     assert!(instructions.contains("[box="));
     assert!(instructions.contains("only WebBrowser tool that returns page content"));
