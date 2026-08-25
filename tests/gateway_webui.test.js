@@ -213,6 +213,17 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(html).toContain('data-view="system-prompt" data-chatbot-only');
       expect(html).toContain('data-view="workmap" data-work-only');
       expect(html).toContain('id="system-prompt-input"');
+      expect(html).toContain("设置助手的角色、语气和回答方式。");
+      expect(html).toContain('aria-label="系统提示词内容"');
+      expect(html).toContain('id="system-prompt-status">已应用</span>');
+      expect(html).not.toContain("固定编排协议");
+      expect(html).not.toContain("工具契约");
+      expect(html).not.toContain("已与 EDB 同步");
+      expect(app).toContain("暂时无法确认是否应用成功，请稍候…");
+      expect(app).toContain("正在应用更改…");
+      expect(app).toContain("内容过长，请适当精简");
+      expect(app).not.toContain("命令结果未知，正在等待 EDB 确认…");
+      expect(app).not.toContain("命令已接受，正在等待 EDB 确认…");
       expect(app).toContain('querySelectorAll("[data-work-only]")');
       expect(app).toContain('command: "change_system_static_prompt"');
       expect(app).toContain("Number(value.id) > draft.pending.afterEventId");

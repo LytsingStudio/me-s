@@ -3016,13 +3016,13 @@ function renderSystemPromptEditor() {
   elements.systemPromptStatus.dataset.state = pending ? "pending" : draft.dirty ? "dirty" : "synced";
   elements.systemPromptStatus.textContent = pending
     ? pending.status === "unknown"
-      ? "命令结果未知，正在等待 EDB 确认…"
-      : "命令已接受，正在等待 EDB 确认…"
+      ? "暂时无法确认是否应用成功，请稍候…"
+      : "正在应用更改…"
     : draft.content.trim().length === 0
-      ? "自定义提示词不能为空"
+      ? "内容不能为空"
       : systemPromptContentBytes(draft.content) > SYSTEM_STATIC_PROMPT_MAX_BYTES
-        ? "内容超过 32 KiB"
-        : draft.dirty ? "有尚未应用的更改" : "已与 EDB 同步";
+        ? "内容过长，请适当精简"
+        : draft.dirty ? "有尚未应用的更改" : "已应用";
   elements.systemPromptApply.disabled = Boolean(pending) || !draft.dirty || !valid;
   elements.systemPromptRestore.disabled = Boolean(pending)
     || (saved.mode === "Default" && !draft.dirty);
@@ -3043,9 +3043,9 @@ async function submitSystemPromptChange(mode) {
   if (!workspaceId || !context || context.draft.pending) return;
   const content = mode === "Custom" ? context.draft.content : null;
   if (mode === "Custom") {
-    if (!content.trim()) return toast("自定义提示词不能为空", true);
+    if (!content.trim()) return toast("内容不能为空", true);
     if (systemPromptContentBytes(content) > SYSTEM_STATIC_PROMPT_MAX_BYTES) {
-      return toast("自定义提示词不能超过 32 KiB", true);
+      return toast("内容过长，请适当精简", true);
     }
   }
   context.draft.pending = {
