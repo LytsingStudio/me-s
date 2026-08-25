@@ -56,12 +56,26 @@ fn prepare(with_config: bool) -> (TempDirectory, PathBuf, PathBuf) {
 }
 
 fn spawn_gateway(root: &Path, config_home: &Path) -> (Child, String) {
+    spawn_gateway_with_me_s(
+        root,
+        config_home,
+        Path::new(env!("CARGO_BIN_EXE_me-s")),
+        Duration::from_secs(20),
+    )
+}
+
+fn spawn_gateway_with_me_s(
+    root: &Path,
+    config_home: &Path,
+    me_s: &Path,
+    startup_timeout: Duration,
+) -> (Child, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_me-gateway"))
         .arg("--webui-passkey")
         .arg("secret")
         .current_dir(root)
         .env("ME_CONFIG_HOME", config_home)
-        .env("ME_GATEWAY_ME_S", env!("CARGO_BIN_EXE_me-s"))
+        .env("ME_GATEWAY_ME_S", me_s)
         .env(
             "ME_GATEWAY_TEST_PORT",
             (42_000 + (std::process::id() % 10_000) as u16).to_string(),
@@ -84,7 +98,7 @@ fn spawn_gateway(root: &Path, config_home: &Path) -> (Child, String) {
             let _ = sender.send(line);
         }
     });
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + startup_timeout;
     let mut address = None;
     loop {
         if let Some(status) = child.try_wait().unwrap() {
@@ -193,6 +207,31 @@ fn stop_gateway(child: &mut Child) {
         assert!(Instant::now() < deadline, "me-gateway did not stop");
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+#[cfg(unix)]
+#[test]
+fn gateway_waits_for_one_slow_but_healthy_managed_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (temporary, root, config_home) = prepare(true);
+    let wrapper = temporary.0.join("delayed-me-s.sh");
+    let executable = env!("CARGO_BIN_EXE_me-s").replace('\'', "'\"'\"'");
+    fs::write(
+        &wrapper,
+        format!("#!/bin/sh\nsleep 16\nexec '{executable}' \"$@\"\n"),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&wrapper).unwrap().permissions();
+    permissions.set_mode(0o700);
+    fs::set_permissions(&wrapper, permissions).unwrap();
+
+    let started = Instant::now();
+    let (mut gateway, address) =
+        spawn_gateway_with_me_s(&root, &config_home, &wrapper, Duration::from_secs(30));
+    assert!(started.elapsed() >= Duration::from_secs(15));
+    let _cookie = login(&address);
+    stop_gateway(&mut gateway);
 }
 
 #[test]

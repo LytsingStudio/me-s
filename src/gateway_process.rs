@@ -22,7 +22,7 @@ use crate::{
 };
 
 const START_ATTEMPTS: usize = 5;
-const READY_TIMEOUT: Duration = Duration::from_secs(15);
+const START_TIMEOUT: Duration = Duration::from_secs(90);
 const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
@@ -48,9 +48,16 @@ impl ManagedProcess {
         if !canonical_workspace.is_dir() {
             return Err(format!("Workspace is not a directory: {}", workspace.display()).into());
         }
+        let deadline = Instant::now() + START_TIMEOUT;
         let mut last_error = None;
-        for _ in 0..START_ATTEMPTS {
-            match Self::start_once(me_s, &canonical_workspace) {
+        let mut attempts = 0;
+        while attempts < START_ATTEMPTS {
+            let ready_timeout = deadline.saturating_duration_since(Instant::now());
+            if ready_timeout.is_zero() {
+                break;
+            }
+            attempts += 1;
+            match Self::start_once(me_s, &canonical_workspace, ready_timeout) {
                 Ok(process) => return Ok(process),
                 Err(error) => {
                     last_error = Some(error);
@@ -58,16 +65,17 @@ impl ManagedProcess {
                 }
             }
         }
+        let attempt_label = if attempts == 1 { "attempt" } else { "attempts" };
         Err(format!(
-            "unable to start Workspace after {START_ATTEMPTS} attempts: {}",
+            "unable to start Workspace after {attempts} {attempt_label}: {}",
             last_error
                 .map(|error| error.to_string())
-                .unwrap_or_else(|| "unknown startup failure".into())
+                .unwrap_or_else(|| "startup deadline elapsed".into())
         )
         .into())
     }
 
-    fn start_once(me_s: &Path, workspace: &Path) -> Result<Self> {
+    fn start_once(me_s: &Path, workspace: &Path, ready_timeout: Duration) -> Result<Self> {
         let port = available_port()?;
         let launch = ManagedLaunchConfig {
             protocol_version: MANAGED_PROTOCOL_VERSION,
@@ -102,17 +110,17 @@ impl ManagedProcess {
             instance_nonce: launch.instance_nonce,
             workspace_path: workspace.to_owned(),
         };
-        process.wait_ready()?;
+        process.wait_ready(ready_timeout)?;
         Ok(process)
     }
 
-    fn wait_ready(&mut self) -> Result<()> {
+    fn wait_ready(&mut self, ready_timeout: Duration) -> Result<()> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
             .connect_timeout(Duration::from_millis(300))
             .timeout(Duration::from_millis(750))
             .build()?;
-        let deadline = Instant::now() + READY_TIMEOUT;
+        let deadline = Instant::now() + ready_timeout;
         loop {
             if let Some(status) = self.child.try_wait()? {
                 return Err(format!("managed me-s stopped during startup with {status}").into());
@@ -131,7 +139,11 @@ impl ManagedProcess {
                 return Ok(());
             }
             if Instant::now() >= deadline {
-                return Err("managed me-s readiness timed out".into());
+                return Err(format!(
+                    "managed me-s readiness timed out after {} seconds",
+                    ready_timeout.as_secs()
+                )
+                .into());
             }
             thread::sleep(Duration::from_millis(50));
         }
