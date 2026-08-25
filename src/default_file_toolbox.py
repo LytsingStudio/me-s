@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import subprocess
 import stat
 import sys
 import tempfile
@@ -41,6 +42,10 @@ LOCK_PATH = ROOT / ".me" / "file-toolbox.lock"
 HASH_PATTERN = re.compile(r"^[0-9a-f]{8}$")
 HUNK_PATTERN = re.compile(
     r"^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@(?: .*)?$"
+)
+SEARCH_TIMEOUT_SECONDS = 120
+SEARCH_TIMEOUT_TIP = (
+    "Search a smaller path, reduce depth, or use narrower globs."
 )
 MAX_EDIT_OPERATIONS = 128
 EDIT_TIP = (
@@ -917,7 +922,7 @@ ROUTES = {
     "EditBytes": "Atomically replace, delete, or insert one or more independently located byte ranges after inspecting them with File.ReadBytes.",
     "List": "Inspect directory contents without invoking a shell.",
     "Find": "Find filesystem paths by glob patterns with optional recursion depth.",
-    "Search": "Search text across filesystem files by literal text or regular expression with optional recursion depth.",
+    "Search": "Search text through me-s's integrated ripgrep engine with a fixed 120-second deadline.",
     "Stat": "Inspect existence, type, metadata, and current content hashes.",
     "MakeDirectory": "Create one explicit directory, optionally including its missing parent chain.",
     "Create": "Create a new text file in an explicit encoding, defaulting to UTF-8; never overwrite an existing file.",
@@ -939,7 +944,7 @@ INSTRUCTIONS = {
     ),
     "List": "Depth counts levels below path. Results are stable and symbolic-link directories are never traversed.",
     "Find": "Patterns match each reported normalized POSIX path and basename; exclusions match the reported path. Paths inside the workspace are reported relative to it, while paths outside are reported as normalized absolute paths. depth counts levels below path: 1 visits only direct children and 2 visits direct children plus their children. Omit depth for unlimited recursion. If path is a file, it alone is considered. Results are stable and symbolic-link directories are never traversed.",
-    "Search": "Literal search is the default. For a directory path, depth counts levels below it: 1 searches only direct child files and 2 also searches files in direct child directories. Omit depth for unlimited recursion. If path is a file, it alone is searched. Hidden entries and symbolic-link directories are always skipped. Source file size is not artificially capped; each candidate file is loaded into memory, and max_matches bounds the returned result. Each match returns before, match_text, and after as line-number-keyed objects using the same 1-based, minimally zero-padded keys and logical line text as File.Read; values never contain line terminators. The sole key in match_text is the matching file line; column is 1-based within that line. Example: {\"path\":\"src/main.rs\",\"column\":5,\"match_length\":7,\"before\":{\"041\":\"fn main() {\"},\"match_text\":{\"042\":\"    runtime.start();\"},\"after\":{\"043\":\"}\"}}. Search is only a locator: it never establishes editable_ranges. Before editing a located file, call File.Read for every target range. Never infer unseen edit boundaries from Search results. With top-level truncate:true, missing before or after keys are omitted context lines, and the sole match_text value may instead be a text_fragments object while its line key and match metadata remain intact. Text encoding is detected conservatively per file; binary and uncertain files are skipped.",
+    "Search": "Literal search is the default and uses me-s's integrated ripgrep engine; regex=true uses Rust/ripgrep linear-time regular-expression syntax, so unsupported constructs such as look-around and backreferences return invalid_regex instead of falling back to another engine. For a directory path, depth counts levels below it: 1 searches only direct child files and 2 also searches files in direct child directories. Omit depth for unlimited recursion. Directory searches obey .gitignore, .ignore, Git excludes, and global Git ignores; hidden entries are skipped and symbolic-link directories are never followed. If path explicitly names a file, that file is searched even when an ignore rule would exclude it. Source file size is not artificially capped, max_matches bounds the returned result, and the complete search has a hard 120-second deadline. A search_timeout error is non-retryable and tells you to search a smaller path, reduce depth, or use narrower globs. Each match returns before, match_text, and after as line-number-keyed objects using the same 1-based, minimally zero-padded keys and logical line text as File.Read; values never contain line terminators. The sole key in match_text is the matching file line; column and match_length count decoded Unicode characters, not bytes. Example: {\"path\":\"src/main.rs\",\"column\":5,\"match_length\":7,\"before\":{\"041\":\"fn main() {\"},\"match_text\":{\"042\":\"    runtime.start();\"},\"after\":{\"043\":\"}\"}}. Search is only a locator: it never establishes editable_ranges. Before editing a located file, call File.Read for every target range. Never infer unseen edit boundaries from Search results. With top-level truncate:true, missing before or after keys are omitted context lines, and the sole match_text value may instead be a text_fragments object while its line key and match metadata remain intact. Search supports strict UTF-8 plus ripgrep's BOM sniffing, does not perform File.Read's legacy encoding detection, and counts binary or unsupported-encoding files in skipped_binary. Use File.Read when exact encoding-aware content is required.",
     "Stat": "A missing path is a normal result. Content hashes are returned only for ordinary files, not directories or symbolic links.",
     "MakeDirectory": "parents defaults to false, requiring the immediate parent to exist. Set parents=true to create every missing directory in the path. The target itself must not already exist; existing files, directories, and symbolic links return already_exists.",
     "Create": "The parent directory must already exist. encoding defaults to utf-8 because a new file has no bytes to inspect; bom defaults to false and is allowed only for UTF encodings. Creation fails if the destination exists.",
@@ -1944,71 +1949,88 @@ def execute_search(data: dict[str, Any]) -> dict[str, Any]:
     context_before = int_arg(data, "context_before", 0, 0, 10000)
     context_after = int_arg(data, "context_after", 0, 0, 10000)
     max_matches = int_arg(data, "max_matches", 500, 1, 5000)
-    flags = 0 if case_sensitive else re.IGNORECASE
-    try:
-        pattern = re.compile(query if use_regex else re.escape(query), flags)
-    except re.error as exc:
-        raise ToolError(
-            "invalid_regex",
-            str(exc),
-            tip="Please correct the regular expression, or set regex=false for a literal text search.",
-        ) from exc
     start = existing_path(logical)
-    matches: list[dict[str, Any]] = []
-    skipped_binary = 0
-    for path in walk_files(start, False, depth):
-        relative = relative_path(path)
-        if globs and not (matches_any(relative, globs) or matches_any(path.name, globs)):
-            continue
-        try:
-            raw = path.read_bytes()
-            text = decode_text_bytes(raw, relative).text
-        except (ToolError, OSError):
-            skipped_binary += 1
-            continue
-        lines = split_text_file_lines(text)
-        line_number_width = max(1, len(str(len(lines))))
-        for line_index, exact_line in enumerate(lines):
-            searchable_line = line_without_ending(exact_line)
-            for found in pattern.finditer(searchable_line):
-                before_start = max(0, line_index - context_before)
-                after_end = min(len(lines), line_index + 1 + context_after)
-                matches.append(
-                    {
-                        "path": relative,
-                        "column": found.start() + 1,
-                        "match_length": found.end() - found.start(),
-                        "before": {
-                            str(index + 1).zfill(line_number_width): line_without_ending(lines[index])
-                            for index in range(before_start, line_index)
-                        },
-                        "match_text": {
-                            str(line_index + 1).zfill(line_number_width): searchable_line
-                        },
-                        "after": {
-                            str(index + 1).zfill(line_number_width): line_without_ending(lines[index])
-                            for index in range(line_index + 1, after_end)
-                        },
-                    }
-                )
-                if len(matches) >= max_matches:
-                    return {
-                        "path": relative_path(start),
-                        "matches": matches,
-                        "skipped_binary": skipped_binary,
-                        "returned": len(matches),
-                        "truncated": True,
-                    }
-    output = {
-        "path": relative_path(start),
-        "matches": matches,
-        "skipped_binary": skipped_binary,
-        "returned": len(matches),
-        "truncated": False,
+    host = os.environ.get("ME_TOOLBOX_HOST") or shutil.which("me-s")
+    if host is None:
+        raise ToolError(
+            "search_worker_unavailable",
+            "File.Search could not locate the integrated me-s search worker.",
+            tip="Run File.Search from a managed me-s File toolbox.",
+        )
+    payload = {
+        "path": str(start),
+        "query": query,
+        "regex": use_regex,
+        "case_sensitive": case_sensitive,
+        "globs": globs,
+        "depth": depth,
+        "context_before": context_before,
+        "context_after": context_after,
+        "max_matches": max_matches,
     }
-    if not matches:
-        output["tip"] = (
-            "No text matched. Check query, path, depth, globs, case_sensitive, and regex if you expected results."
+    process = subprocess.Popen(
+        [host, "__toolbox-file-search-worker"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+        errors="strict",
+    )
+    try:
+        stdout, stderr = process.communicate(
+            json.dumps(payload, ensure_ascii=False, separators=(",", ":")) + "\n",
+            timeout=SEARCH_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.communicate()
+        raise ToolError(
+            "search_timeout",
+            "File.Search timed out after 120 seconds.",
+            retryable=False,
+            tip=SEARCH_TIMEOUT_TIP,
+        ) from exc
+    if process.returncode != 0:
+        detail = stderr.strip()[:2000]
+        message = "The integrated File.Search worker failed."
+        if detail:
+            message = f"{message} {detail}"
+        raise ToolError(
+            "search_worker_error",
+            message,
+            tip="Retry with a smaller search scope. If the failure persists, inspect the me-s installation.",
+        )
+    try:
+        frame = json.loads(stdout)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ToolError(
+            "search_worker_error",
+            "The integrated File.Search worker returned an invalid response.",
+        ) from exc
+    if not isinstance(frame, dict) or not isinstance(frame.get("ok"), bool):
+        raise ToolError(
+            "search_worker_error",
+            "The integrated File.Search worker returned an invalid response.",
+        )
+    if not frame["ok"]:
+        detail = frame.get("error")
+        if not isinstance(detail, dict):
+            raise ToolError(
+                "search_worker_error",
+                "The integrated File.Search worker returned an invalid error response.",
+            )
+        raise ToolError(
+            str(detail.get("code", "search_worker_error")),
+            str(detail.get("message", "File.Search failed.")),
+            retryable=bool(detail.get("retryable", False)),
+            tip=detail.get("tip") if isinstance(detail.get("tip"), str) else None,
+        )
+    output = frame.get("output")
+    if not isinstance(output, dict):
+        raise ToolError(
+            "search_worker_error",
+            "The integrated File.Search worker returned an invalid result.",
         )
     return output
 
@@ -2916,7 +2938,7 @@ def handle(request: Any) -> None:
     if command == "getBrief":
         result(
             request_id,
-            "Read, search, copy, and safely mutate files and explicitly create directories. Relative paths resolve from the workspace; absolute paths and relative paths that resolve outside the workspace are supported. Paths inside the workspace are returned relative to it, while outside paths are returned as normalized absolute paths. PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION: obey the governing external-path safety rule before any modification outside the workspace. Source file size is not artificially capped; operations that need complete contents load them into memory, while bounded query parameters limit model-visible results. Line-oriented results and edits use logical lines without CR or LF; File preserves the file's detected line-ending convention automatically. Text operations conservatively detect common Unicode, East Asian, and Windows encodings, preserve the original encoding and BOM, and reject uncertain or lossy writes. File.Edit is limited to ranges actually returned by File.Read, clears those ranges after success, and validates the remembered file version internally. Binary operations use zero-based byte ranges and canonical hexadecimal data. Other mutations use an 8-character SHA-256-derived concurrency fingerprint. This short value detects stale edits; it is not a security integrity digest. Recoverable failures may include a short tip that states the next useful action in plain language.",
+            "Read, search, copy, and safely mutate files and explicitly create directories. Relative paths resolve from the workspace; absolute paths and relative paths that resolve outside the workspace are supported. Paths inside the workspace are returned relative to it, while outside paths are returned as normalized absolute paths. PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION: obey the governing external-path safety rule before any modification outside the workspace. Source file size is not artificially capped; operations that need complete contents load them into memory, while bounded query parameters limit model-visible results. Line-oriented results and edits use logical lines without CR or LF; File preserves the file's detected line-ending convention automatically. Exact text reads and writes conservatively detect common Unicode, East Asian, and Windows encodings, preserve the original encoding and BOM, and reject uncertain or lossy writes. File.Search instead uses me-s's integrated ripgrep engine for fast UTF-8/BOM-aware location, follows ignore rules, and has a fixed 120-second deadline. File.Edit is limited to ranges actually returned by File.Read, clears those ranges after success, and validates the remembered file version internally. Binary operations use zero-based byte ranges and canonical hexadecimal data. Other mutations use an 8-character SHA-256-derived concurrency fingerprint. This short value detects stale edits; it is not a security integrity digest. Recoverable failures may include a short tip that states the next useful action in plain language.",
         )
         return
     tool = request.get("tool")

@@ -11,6 +11,14 @@ use std::{
 
 use serde_json::{Value, json};
 
+#[cfg(unix)]
+use me::toolbox::{ToolboxExecutionError, ToolboxRuntime};
+#[cfg(unix)]
+use std::{
+    os::unix::fs::PermissionsExt,
+    time::{Duration, Instant},
+};
+
 fn python_312() -> Option<(OsString, Vec<OsString>)> {
     let mut candidates = Vec::new();
     candidates.push((OsString::from("python3.12"), Vec::new()));
@@ -172,6 +180,25 @@ impl ToolboxProcess {
     }
 
     fn start_with_io_encoding(workspace: &Path, script: &Path, io_encoding: Option<&str>) -> Self {
+        Self::start_with_options(
+            workspace,
+            script,
+            io_encoding,
+            Path::new(env!("CARGO_BIN_EXE_me-s")),
+        )
+    }
+
+    #[cfg(unix)]
+    fn start_with_search_host(workspace: &Path, script: &Path, host: &Path) -> Self {
+        Self::start_with_options(workspace, script, None, host)
+    }
+
+    fn start_with_options(
+        workspace: &Path,
+        script: &Path,
+        io_encoding: Option<&str>,
+        search_host: &Path,
+    ) -> Self {
         let Some((python, arguments)) = python_312() else {
             panic!("File toolbox integration test requires Python 3.12");
         };
@@ -180,6 +207,7 @@ impl ToolboxProcess {
             .args(arguments)
             .arg(script)
             .current_dir(workspace)
+            .env("ME_TOOLBOX_HOST", search_host)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit());
@@ -602,6 +630,13 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     assert!(search_instructions.contains("text_fragments"));
     assert!(search_instructions.contains("Source file size is not artificially capped"));
     assert!(!search_instructions.contains("oversized files are skipped"));
+    assert!(search_instructions.contains("integrated ripgrep engine"));
+    assert!(search_instructions.contains("Rust/ripgrep linear-time"));
+    assert!(search_instructions.contains(".gitignore"));
+    assert!(search_instructions.contains("hard 120-second deadline"));
+    assert!(search_instructions.contains("search_timeout"));
+    assert!(search_instructions.contains("decoded Unicode characters"));
+    assert!(search_instructions.contains("does not perform File.Read's legacy encoding detection"));
     let create_encodings = toolbox.query("getInputSchema", Some("Create"))["output"]["properties"]
         ["encoding"]["enum"]
         .as_array()
@@ -1953,6 +1988,294 @@ fn read_list_find_search_stat_and_bytes_have_stable_structured_results() {
 }
 
 #[test]
+fn integrated_search_honors_ripgrep_scope_and_match_semantics() {
+    let workspace = temporary_workspace();
+    let root = workspace.join("search-root");
+    fs::create_dir_all(root.join("sub")).unwrap();
+    fs::create_dir_all(root.join("ignored-dir")).unwrap();
+    fs::create_dir(root.join(".git")).unwrap();
+    fs::write(root.join(".gitignore"), "ignored.txt\nignored-dir/\n").unwrap();
+    fs::write(root.join(".ignore"), "custom.txt\n").unwrap();
+    fs::write(root.join("a.txt"), "before\n🙂前缀 Needle42 tail\nafter\n").unwrap();
+    fs::write(root.join("b.rs"), "needle7\n").unwrap();
+    fs::write(root.join("sub/c.rs"), "NEEDLE8\n").unwrap();
+    fs::write(root.join("ignored.txt"), "ignored-needle\n").unwrap();
+    fs::write(root.join("ignored-dir/nested.txt"), "ignored-needle\n").unwrap();
+    fs::write(root.join("custom.txt"), "ignored-needle\n").unwrap();
+    fs::write(root.join(".hidden.txt"), "ignored-needle\n").unwrap();
+    fs::write(root.join("binary.bin"), b"ignored-needle\0tail").unwrap();
+    fs::write(root.join("legacy.txt"), b"\xd6\xd0 ignored-needle\n").unwrap();
+    let mut bom = vec![0xef, 0xbb, 0xbf];
+    bom.extend_from_slice(b"bom needle\n");
+    fs::write(root.join("bom.txt"), bom).unwrap();
+    fs::write(
+        root.join("bom-utf16.txt"),
+        utf16_le("utf16 bom needle\n", true),
+    )
+    .unwrap();
+    let outside = workspace.join("outside-search-target");
+    fs::create_dir(&outside).unwrap();
+    fs::write(outside.join("linked.txt"), "outside-only\n").unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(&outside, root.join("linked-directory")).unwrap();
+
+    let script = generated_file_toolbox(&workspace);
+    let mut toolbox = ToolboxProcess::start(&workspace, &script);
+
+    let unicode = toolbox.execute(
+        "Search",
+        json!({
+            "path":"search-root",
+            "query":r"Needle\d+",
+            "regex":true,
+            "case_sensitive":false,
+            "globs":["**/*.txt"],
+            "context_before":1,
+            "context_after":1
+        }),
+    );
+    assert_eq!(unicode["type"], "result", "regex search failed: {unicode}");
+    assert_eq!(unicode["output"]["returned"], 1);
+    let matched = &unicode["output"]["matches"][0];
+    assert_eq!(matched["path"], "search-root/a.txt");
+    assert_eq!(matched["column"], 5);
+    assert_eq!(matched["match_length"], 8);
+    assert_eq!(matched["before"], json!({"1":"before"}));
+    assert_eq!(matched["match_text"], json!({"2":"🙂前缀 Needle42 tail"}));
+    assert_eq!(matched["after"], json!({"3":"after"}));
+
+    let ordered = toolbox.execute(
+        "Search",
+        json!({
+            "path":"search-root",
+            "query":r"needle\d+",
+            "regex":true,
+            "case_sensitive":false,
+            "globs":["*.rs"],
+            "max_matches":10
+        }),
+    );
+    assert_eq!(
+        ordered["output"]["matches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["path"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["search-root/b.rs", "search-root/sub/c.rs"]
+    );
+    let capped = toolbox.execute(
+        "Search",
+        json!({
+            "path":"search-root",
+            "query":r"needle\d+",
+            "regex":true,
+            "case_sensitive":false,
+            "globs":["*.rs"],
+            "max_matches":1
+        }),
+    );
+    assert_eq!(capped["output"]["returned"], 1);
+    assert_eq!(capped["output"]["truncated"], true);
+    assert_eq!(capped["output"]["matches"][0]["path"], "search-root/b.rs");
+
+    let ignored = toolbox.execute(
+        "Search",
+        json!({"path":"search-root", "query":"ignored-needle"}),
+    );
+    assert_eq!(ignored["output"]["returned"], 0);
+    assert_eq!(ignored["output"]["skipped_binary"], 2);
+    let explicit_ignored = toolbox.execute(
+        "Search",
+        json!({"path":"search-root/ignored.txt", "query":"ignored-needle"}),
+    );
+    assert_eq!(explicit_ignored["output"]["returned"], 1);
+    let explicit_hidden = toolbox.execute(
+        "Search",
+        json!({"path":"search-root/.hidden.txt", "query":"ignored-needle"}),
+    );
+    assert_eq!(explicit_hidden["output"]["returned"], 1);
+
+    let bom = toolbox.execute(
+        "Search",
+        json!({"path":"search-root/bom.txt", "query":"bom needle"}),
+    );
+    assert_eq!(bom["output"]["returned"], 1);
+    assert_eq!(bom["output"]["matches"][0]["column"], 1);
+    let utf16_bom = toolbox.execute(
+        "Search",
+        json!({"path":"search-root/bom-utf16.txt", "query":"utf16 bom needle"}),
+    );
+    assert_eq!(utf16_bom["output"]["returned"], 1);
+    assert_eq!(utf16_bom["output"]["matches"][0]["column"], 1);
+    let symlink = toolbox.execute(
+        "Search",
+        json!({"path":"search-root", "query":"outside-only"}),
+    );
+    assert_eq!(symlink["output"]["returned"], 0);
+
+    for query in [r"(?=Needle)", r"(Needle)\1"] {
+        let invalid = toolbox.execute(
+            "Search",
+            json!({"path":"search-root/a.txt", "query":query, "regex":true}),
+        );
+        assert_eq!(invalid["type"], "error");
+        assert_eq!(invalid["error"]["code"], "invalid_regex");
+        assert_eq!(invalid["error"]["retryable"], false);
+    }
+
+    toolbox.finish();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn search_timeout_is_non_retryable_reaps_worker_and_preserves_file_toolbox() {
+    let workspace = temporary_workspace();
+    fs::write(workspace.join("target.txt"), "needle\n").unwrap();
+    let script = generated_file_toolbox(&workspace);
+    let source = fs::read_to_string(&script).unwrap();
+    assert_eq!(source.matches("SEARCH_TIMEOUT_SECONDS = 120").count(), 1);
+    fs::write(
+        &script,
+        source.replacen(
+            "SEARCH_TIMEOUT_SECONDS = 120",
+            "SEARCH_TIMEOUT_SECONDS = 5",
+            1,
+        ),
+    )
+    .unwrap();
+
+    let marker = workspace.join("search-worker.pid");
+    let host = workspace.join("slow-search-host");
+    fs::write(
+        &host,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let mut toolbox = ToolboxProcess::start_with_search_host(&workspace, &script, &host);
+    let timed_out = toolbox.execute("Search", json!({"path":"target.txt", "query":"needle"}));
+    assert_eq!(timed_out["type"], "error");
+    assert_eq!(timed_out["error"]["code"], "search_timeout");
+    assert_eq!(timed_out["error"]["retryable"], false);
+    assert_eq!(
+        timed_out["error"]["message"],
+        "File.Search timed out after 120 seconds."
+    );
+    let tip = timed_out["error"]["tip"].as_str().unwrap();
+    assert!(tip.contains("smaller path"));
+    assert!(tip.contains("depth"));
+    assert!(tip.contains("globs"));
+
+    let worker_pid = fs::read_to_string(&marker).unwrap();
+    let worker_is_alive = Command::new("/bin/kill")
+        .args(["-0", worker_pid.trim()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(!worker_is_alive, "timed-out search worker was not reaped");
+
+    let recovered = toolbox.execute("Stat", json!({"paths":["target.txt"]}));
+    assert_eq!(recovered["type"], "result");
+    assert_eq!(recovered["output"]["entries"][0]["type"], "file");
+
+    toolbox.finish();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn cancelling_search_terminates_the_worker_tree_and_restarts_file_toolbox() {
+    let workspace = temporary_workspace();
+    fs::write(workspace.join("target.txt"), "needle\n").unwrap();
+    let script = generated_file_toolbox(&workspace);
+
+    let marker = workspace.join("cancelled-search-worker.pid");
+    let host = workspace.join("cancelled-search-host");
+    fs::write(
+        &host,
+        format!(
+            "#!/bin/sh\necho $$ > '{}'\nexec sleep 30\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&host, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let source = fs::read_to_string(&script).unwrap();
+    let host_assignment = format!("    host = {:?}", host.to_string_lossy().as_ref());
+    let modified = source
+        .replacen("# ME-S-MANAGED-TOOLBOX", "# TEST-CUSTOM-TOOLBOX", 1)
+        .replacen(
+            "    host = os.environ.get(\"ME_TOOLBOX_HOST\") or shutil.which(\"me-s\")",
+            &host_assignment,
+            1,
+        );
+    assert_ne!(modified, source);
+    fs::write(&script, modified).unwrap();
+    let tools = script.parent().unwrap();
+    for name in ["Terminal.py", "WebBrowser.py", "Desktop.py"] {
+        fs::remove_file(tools.join(name)).unwrap();
+    }
+    let runtime = ToolboxRuntime::load(&workspace).unwrap();
+
+    let started = Instant::now();
+    let mut cancellation_requested_at = None;
+    let cancelled = runtime
+        .execute_cancellable(
+            "File.Search",
+            r#"{"path":"target.txt","query":"needle"}"#,
+            |_| Ok(()),
+            || {
+                if marker.exists() {
+                    cancellation_requested_at = Some(Instant::now());
+                    true
+                } else {
+                    assert!(
+                        started.elapsed() < Duration::from_secs(10),
+                        "search worker did not start"
+                    );
+                    false
+                }
+            },
+        )
+        .unwrap_err();
+    assert!(matches!(cancelled, ToolboxExecutionError::Interrupted(_)));
+    assert!(
+        cancellation_requested_at.unwrap().elapsed() < Duration::from_secs(2),
+        "search cancellation did not promptly close"
+    );
+
+    let worker_pid = fs::read_to_string(&marker).unwrap();
+    let worker_is_alive = Command::new("/bin/kill")
+        .args(["-0", worker_pid.trim()])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        !worker_is_alive,
+        "cancelled search worker was not terminated"
+    );
+
+    let recovered = runtime
+        .execute("File.Stat", r#"{"paths":["target.txt"]}"#, |_| Ok(()))
+        .unwrap();
+    assert_eq!(recovered["entries"][0]["type"], "file");
+
+    drop(runtime);
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn search_accepts_ten_thousand_context_lines_on_each_side() {
     let workspace = temporary_workspace();
     let mut content = (1..=10_000)
@@ -2790,7 +3113,8 @@ fn text_mutations_preserve_detected_encoding_bom_and_original_line_endings() {
         b"\xbc\xf2\xcc\xe5\xd6\xd0\xce\xc4\r\n"
     );
     let search = toolbox.execute("Search", json!({"path":"legacy.txt", "query":"中文"}));
-    assert_eq!(search["output"]["matches"].as_array().unwrap().len(), 1);
+    assert_eq!(search["output"]["matches"].as_array().unwrap().len(), 0);
+    assert_eq!(search["output"]["skipped_binary"], 1);
 
     let unicode = toolbox.execute("Read", json!({"path":"unicode.txt"}));
     let unicode_edited = toolbox.execute(

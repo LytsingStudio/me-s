@@ -43,7 +43,15 @@ use crate::{
 };
 
 pub const AVAILABLE_ORCHESTRATORS: &[&str] = &["main-agent", "manager-agent", "chatbot"];
-pub const API_RETRY_LIMIT: u8 = 5;
+pub const API_RETRY_DELAYS: [Duration; 5] = [
+    Duration::from_secs(1),
+    Duration::from_secs(2),
+    Duration::from_secs(3),
+    Duration::from_secs(5),
+    Duration::from_secs(10),
+];
+pub const API_RETRY_LIMIT: u8 = API_RETRY_DELAYS.len() as u8;
+const API_RETRY_ABORT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 const EMPTY_MODEL_RESPONSE_ERROR: &str =
     "model completed without any assistant text characters or a valid tool call";
@@ -2116,7 +2124,7 @@ impl MainAgent {
                     on_event(edb)?;
                     return Ok(ModelRequestOutcome::Aborted);
                 }
-                if record_api_failure(
+                match record_api_failure(
                     edb,
                     api_call_id,
                     prompt_id,
@@ -2124,11 +2132,13 @@ impl MainAgent {
                     usage,
                     &error,
                     model_request_error_is_retryable(&error),
+                    &self.input_queue,
                     on_event,
                 )? {
-                    continue;
+                    ApiFailureOutcome::Retry => continue,
+                    ApiFailureOutcome::Aborted => return Ok(ModelRequestOutcome::Aborted),
+                    ApiFailureOutcome::Stop => return Ok(ModelRequestOutcome::Interrupted),
                 }
-                return Ok(ModelRequestOutcome::Interrupted);
             }
             if begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)? {
                 append_api_terminal_with_context_usage(
@@ -2157,7 +2167,7 @@ impl MainAgent {
             let tools = match response.complete_tools(catalog) {
                 Ok(tools) => tools,
                 Err(error) => {
-                    if record_api_failure(
+                    match record_api_failure(
                         edb,
                         api_call_id,
                         prompt_id,
@@ -2165,15 +2175,17 @@ impl MainAgent {
                         usage,
                         &error.to_string(),
                         true,
+                        &self.input_queue,
                         on_event,
                     )? {
-                        continue;
+                        ApiFailureOutcome::Retry => continue,
+                        ApiFailureOutcome::Aborted => return Ok(ModelRequestOutcome::Aborted),
+                        ApiFailureOutcome::Stop => return Ok(ModelRequestOutcome::Interrupted),
                     }
-                    return Ok(ModelRequestOutcome::Interrupted);
                 }
             };
             if tools.iter().any(|tool| tool.name == compact::TOOL_NAME) && tools.len() != 1 {
-                if record_api_failure(
+                match record_api_failure(
                     edb,
                     api_call_id,
                     prompt_id,
@@ -2181,14 +2193,16 @@ impl MainAgent {
                     usage,
                     "Compact must be the sole tool call in a model response",
                     true,
+                    &self.input_queue,
                     on_event,
                 )? {
-                    continue;
+                    ApiFailureOutcome::Retry => continue,
+                    ApiFailureOutcome::Aborted => return Ok(ModelRequestOutcome::Aborted),
+                    ApiFailureOutcome::Stop => return Ok(ModelRequestOutcome::Interrupted),
                 }
-                return Ok(ModelRequestOutcome::Interrupted);
             }
             if completed_response_is_empty(has_assistant_characters, !tools.is_empty()) {
-                if record_api_failure(
+                match record_api_failure(
                     edb,
                     api_call_id,
                     prompt_id,
@@ -2196,11 +2210,13 @@ impl MainAgent {
                     usage,
                     EMPTY_MODEL_RESPONSE_ERROR,
                     true,
+                    &self.input_queue,
                     on_event,
                 )? {
-                    continue;
+                    ApiFailureOutcome::Retry => continue,
+                    ApiFailureOutcome::Aborted => return Ok(ModelRequestOutcome::Aborted),
+                    ApiFailureOutcome::Stop => return Ok(ModelRequestOutcome::Interrupted),
                 }
-                return Ok(ModelRequestOutcome::Interrupted);
             }
 
             let mut tool_call_ids = Vec::new();
@@ -2450,7 +2466,7 @@ impl MainAgent {
                     on_event(edb)?;
                     return Ok(CompactStageRequestOutcome::Aborted);
                 }
-                if record_api_failure(
+                match record_api_failure(
                     edb,
                     api_call_id,
                     prompt_id,
@@ -2458,11 +2474,17 @@ impl MainAgent {
                     usage,
                     &error,
                     model_request_error_is_retryable(&error),
+                    &self.input_queue,
                     on_event,
                 )? {
-                    continue;
+                    ApiFailureOutcome::Retry => continue,
+                    ApiFailureOutcome::Aborted => {
+                        return Ok(CompactStageRequestOutcome::Aborted);
+                    }
+                    ApiFailureOutcome::Stop => {
+                        return Ok(CompactStageRequestOutcome::Failed(error));
+                    }
                 }
-                return Ok(CompactStageRequestOutcome::Failed(error));
             }
 
             if begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)? {
@@ -2494,7 +2516,7 @@ impl MainAgent {
                     .then(|| "Compact summary response is empty".to_owned())
             };
             if let Some(error) = failure {
-                if record_api_failure(
+                match record_api_failure(
                     edb,
                     api_call_id,
                     prompt_id,
@@ -2502,11 +2524,17 @@ impl MainAgent {
                     event_usage(response.usage()),
                     &error,
                     true,
+                    &self.input_queue,
                     on_event,
                 )? {
-                    continue;
+                    ApiFailureOutcome::Retry => continue,
+                    ApiFailureOutcome::Aborted => {
+                        return Ok(CompactStageRequestOutcome::Aborted);
+                    }
+                    ApiFailureOutcome::Stop => {
+                        return Ok(CompactStageRequestOutcome::Failed(error));
+                    }
                 }
-                return Ok(CompactStageRequestOutcome::Failed(error));
             }
 
             append_api_terminal_with_context_usage(
@@ -3097,7 +3125,7 @@ impl Orchestrator for Chatbot {
                             on_event(edb)?;
                             break;
                         }
-                        if record_api_failure(
+                        match record_api_failure(
                             edb,
                             api_call_id,
                             prompt_id,
@@ -3105,11 +3133,12 @@ impl Orchestrator for Chatbot {
                             usage,
                             &error,
                             model_request_error_is_retryable(&error),
+                            &self.input_queue,
                             on_event,
                         )? {
-                            continue;
+                            ApiFailureOutcome::Retry => continue,
+                            ApiFailureOutcome::Stop | ApiFailureOutcome::Aborted => break,
                         }
-                        break;
                     }
                     if begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)? {
                         append_api_terminal_with_context_usage(
@@ -3133,7 +3162,7 @@ impl Orchestrator for Chatbot {
                         on_event(edb)?;
                     }
                     if completed_response_is_empty(response.has_characters(), false) {
-                        if record_api_failure(
+                        match record_api_failure(
                             edb,
                             api_call_id,
                             prompt_id,
@@ -3141,11 +3170,12 @@ impl Orchestrator for Chatbot {
                             event_usage(response.usage()),
                             EMPTY_MODEL_RESPONSE_ERROR,
                             true,
+                            &self.input_queue,
                             on_event,
                         )? {
-                            continue;
+                            ApiFailureOutcome::Retry => continue,
+                            ApiFailureOutcome::Stop | ApiFailureOutcome::Aborted => break,
                         }
-                        break;
                     }
                     append_api_terminal_with_context_usage(
                         edb,
@@ -3223,6 +3253,13 @@ fn completed_response_is_empty(has_assistant_characters: bool, has_valid_tool_ca
     !has_assistant_characters && !has_valid_tool_call
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ApiFailureOutcome {
+    Retry,
+    Stop,
+    Aborted,
+}
+
 fn record_api_failure(
     edb: &mut EventDataBase,
     api_call_id: EventId,
@@ -3231,8 +3268,9 @@ fn record_api_failure(
     usage: Option<ApiUsage>,
     error: &str,
     retryable: bool,
+    input_queue: &OrchestratorInputQueue,
     on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
-) -> Result<bool> {
+) -> Result<ApiFailureOutcome> {
     edb.append_api_state_with_usage(api_call_id, prompt_id, ApiState::Error, usage, error)?;
     on_event(edb)?;
 
@@ -3240,7 +3278,23 @@ fn record_api_failure(
         let next_retry = retry_count + 1;
         edb.append_api_retrying(api_call_id, prompt_id, next_retry, API_RETRY_LIMIT, error)?;
         on_event(edb)?;
-        return Ok(true);
+        if wait_for_api_retry(
+            API_RETRY_DELAYS[usize::from(retry_count)],
+            input_queue,
+            prompt_id,
+            edb,
+            on_event,
+        )? {
+            edb.append_api_state(
+                api_call_id,
+                prompt_id,
+                ApiState::Interrupted,
+                "user requested turn abort during API retry wait",
+            )?;
+            on_event(edb)?;
+            return Ok(ApiFailureOutcome::Aborted);
+        }
+        return Ok(ApiFailureOutcome::Retry);
     }
 
     let detail = if retryable {
@@ -3253,7 +3307,27 @@ fn record_api_failure(
     };
     edb.append_api_state(api_call_id, prompt_id, ApiState::Interrupted, detail)?;
     on_event(edb)?;
-    Ok(false)
+    Ok(ApiFailureOutcome::Stop)
+}
+
+fn wait_for_api_retry(
+    delay: Duration,
+    input_queue: &OrchestratorInputQueue,
+    prompt_id: EventId,
+    edb: &mut EventDataBase,
+    on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
+) -> Result<bool> {
+    let started = Instant::now();
+    loop {
+        if begin_turn_abort_if_requested(input_queue, prompt_id, edb, on_event)? {
+            return Ok(true);
+        }
+        let remaining = delay.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Ok(false);
+        }
+        thread::sleep(remaining.min(API_RETRY_ABORT_POLL_INTERVAL));
+    }
 }
 
 fn model_request_error_is_retryable(error: &str) -> bool {
@@ -6186,7 +6260,7 @@ mod tests {
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::{
-            Arc,
+            Arc, Mutex,
             atomic::{AtomicBool, Ordering},
         },
         time::{Duration, Instant},
@@ -7882,12 +7956,161 @@ mod tests {
     }
 
     #[test]
-    fn runtime_retries_api_errors_and_commits_only_the_successful_stream() {
+    fn api_retry_schedule_is_exact_and_totals_twenty_one_seconds() {
+        assert_eq!(
+            API_RETRY_DELAYS.map(|delay| delay.as_secs()),
+            [1, 2, 3, 5, 10]
+        );
+        assert_eq!(usize::from(API_RETRY_LIMIT), API_RETRY_DELAYS.len());
+        assert_eq!(
+            API_RETRY_DELAYS.iter().copied().sum::<Duration>(),
+            Duration::from_secs(21)
+        );
+    }
+
+    #[test]
+    fn retry_wait_abort_is_prompt_and_closes_the_retrying_api_call() {
+        let mut edb = EventDataBase::new();
+        let agent = MainAgent::new(None);
+        initialize_main_for_test(&agent, &mut edb);
+        let prompt_id = edb.append_user_prompt("abort retry wait").unwrap();
+        let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
+        let abort_queue = agent.input_queue.clone();
+        let aborter = thread::spawn(move || {
+            thread::sleep(Duration::from_millis(100));
+            abort_queue.request_abort(prompt_id).unwrap();
+        });
+
+        let started = Instant::now();
+        let outcome = record_api_failure(
+            &mut edb,
+            api_call_id,
+            prompt_id,
+            0,
+            None,
+            "retryable failure",
+            true,
+            &agent.input_queue,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let elapsed = started.elapsed();
+        aborter.join().unwrap();
+
+        assert_eq!(outcome, ApiFailureOutcome::Aborted);
+        assert!(elapsed >= Duration::from_millis(100));
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "retry abort took {elapsed:?}"
+        );
+        assert_eq!(
+            edb.events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ApiStateUpdate(update) if update.state == ApiState::Requesting
+                ))
+                .count(),
+            1
+        );
+        assert!(edb.events().iter().any(|event| matches!(
+            event,
+            Event::UserTurnAborted(aborted) if aborted.prompt_id == prompt_id
+        )));
+        assert!(matches!(
+            edb.events().iter().rev().find(|event| matches!(
+                event,
+                Event::ApiStateUpdate(update) if update.api_call_id == api_call_id
+            )),
+            Some(Event::ApiStateUpdate(update)) if update.state == ApiState::Interrupted
+        ));
+    }
+
+    #[test]
+    fn compact_stage_uses_the_shared_retry_schedule() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().unwrap();
+                let _ = read_http_json_request(&mut stream);
+                if attempt == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 6\r\nConnection: close\r\n\r\nfailed",
+                        )
+                        .unwrap();
+                } else {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
+                              data: {\"choices\":[{\"delta\":{\"content\":\"summary\"}}]}\n\n\
+                              data: [DONE]\n\n",
+                        )
+                        .unwrap();
+                }
+                stream.flush().unwrap();
+            }
+        });
+
+        let mut model = test_model_config("local", &["unset"]);
+        model.base_url = format!("http://{address}");
+        model.timeout_seconds = 2;
+        let mut models = ModelRuntime::new(vec![model], "local").unwrap();
+        let mut edb = EventDataBase::new();
+        let mut agent = MainAgent::new(None);
+        agent.initialize(&mut edb, &models).unwrap();
+        agent.restore(&edb, &mut models).unwrap();
+        let prompt_id = edb.append_user_prompt("compact").unwrap();
+        let context = ModelContext {
+            messages: vec![json!({"role":"user", "content":"summarize"})],
+            tools: Vec::new(),
+        };
+
+        let started = Instant::now();
+        let outcome = agent
+            .request_compact_stage(prompt_id, &mut edb, &models, &context, &mut |_| Ok(()))
+            .unwrap();
+        let elapsed = started.elapsed();
+        server.join().unwrap();
+
+        assert!(matches!(
+            outcome,
+            CompactStageRequestOutcome::Completed(content) if content == "summary"
+        ));
+        assert!(elapsed >= API_RETRY_DELAYS[0]);
+        assert_eq!(
+            edb.events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ApiStateUpdate(update) if update.state == ApiState::Requesting
+                ))
+                .count(),
+            2
+        );
+        assert_eq!(
+            edb.events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ApiStateUpdate(update) if update.state == ApiState::Retrying
+                ))
+                .count(),
+            1
+        );
+    }
+
+    #[test]
+    fn runtime_retries_api_errors_and_commits_only_the_successful_stream() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let accepted_at = Arc::new(Mutex::new(Vec::new()));
+        let accepted_by_server = Arc::clone(&accepted_at);
+        let server = thread::spawn(move || {
             for attempt in 0..3 {
                 let (mut stream, _) = listener.accept().unwrap();
+                accepted_by_server.lock().unwrap().push(Instant::now());
                 stream
                     .set_read_timeout(Some(Duration::from_secs(2)))
                     .unwrap();
@@ -7934,6 +8157,9 @@ mod tests {
         runtime.submit_user_prompt("retry".into()).unwrap();
         wait_for_runtime_events(&mut runtime, 15);
         server.join().unwrap();
+        let accepted_at = accepted_at.lock().unwrap();
+        assert!(accepted_at[1].duration_since(accepted_at[0]) >= API_RETRY_DELAYS[0]);
+        assert!(accepted_at[2].duration_since(accepted_at[1]) >= API_RETRY_DELAYS[1]);
         runtime.poll_edb().unwrap();
 
         let events = runtime.edb_events();
@@ -8418,12 +8644,19 @@ data: [DONE]
         chatbot.restore(&edb, &mut models).unwrap();
         let mut runtime = AgentRuntime::new(edb, Box::new(chatbot), models);
 
+        let started = Instant::now();
         runtime
             .submit_user_prompt("retry until exhausted".into())
             .unwrap();
         let exhausted_event_count = 9 + usize::from(API_RETRY_LIMIT) * 3;
         wait_for_runtime_events(&mut runtime, exhausted_event_count);
         server.join().unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= API_RETRY_DELAYS.iter().copied().sum::<Duration>(),
+            "retries exhausted too early after {elapsed:?}"
+        );
+        assert!(elapsed < Duration::from_secs(30));
         runtime.poll_edb().unwrap();
 
         let events = runtime.edb_events();
@@ -8502,9 +8735,14 @@ data: [DONE]
         chatbot.restore(&edb, &mut models).unwrap();
         let mut runtime = AgentRuntime::new(edb, Box::new(chatbot), models);
 
+        let started = Instant::now();
         runtime.submit_user_prompt("too large".into()).unwrap();
         wait_for_runtime_events(&mut runtime, 9);
         server.join().unwrap();
+        assert!(
+            started.elapsed() < API_RETRY_DELAYS[0],
+            "HTTP 400 unexpectedly waited for a retry"
+        );
 
         let events = runtime.edb_events();
         assert_eq!(
@@ -11507,7 +11745,7 @@ for line in sys.stdin:
     }
 
     fn wait_for_runtime_events(runtime: &mut AgentRuntime, count: usize) {
-        let deadline = Instant::now() + Duration::from_secs(5);
+        let deadline = Instant::now() + Duration::from_secs(35);
         while runtime.edb_events().len() < count || runtime.is_advancing() {
             assert!(
                 Instant::now() < deadline,

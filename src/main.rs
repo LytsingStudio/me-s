@@ -13,7 +13,7 @@ use me::{
     },
     desktop_toolbox, diag,
     event::{EventBase, EventDataBase},
-    managed_child,
+    file_search, managed_child,
     model::{
         ModelApi, ModelContext, ModelRuntime, ModelUsage, OpenAiStreamEvent, openai_stream_event,
         openai_stream_usage,
@@ -60,6 +60,11 @@ fn run() -> Result<()> {
         let stdin = io::stdin();
         let stdout = io::stdout();
         return desktop_toolbox::run(stdin.lock(), stdout, &workspace);
+    }
+    if arguments.as_slice() == ["__toolbox-file-search-worker"] {
+        let stdin = io::stdin();
+        let stdout = io::stdout();
+        return file_search::run(stdin.lock(), stdout, &workspace);
     }
     if arguments.as_slice() == ["__gateway-child"] {
         return managed_child::run(&workspace);

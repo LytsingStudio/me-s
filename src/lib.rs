@@ -9,6 +9,7 @@ pub mod desktop_toolbox;
 pub mod diag;
 mod edb_migration;
 pub mod event;
+pub mod file_search;
 pub mod gateway;
 pub mod gateway_process;
 pub mod gateway_settings;
