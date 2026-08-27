@@ -18,3 +18,4 @@
 me-model-export-*
 me-diag-upload-*
 .DS_Store
+/me-gui.old/
