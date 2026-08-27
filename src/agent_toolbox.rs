@@ -14,7 +14,7 @@ use crate::{
         AgentTurnProjection, AgentTurnState, ApiState, Event, EventId, completed_compact_count,
         effective_conversation_events, latest_agent_turn, latest_context_usage,
     },
-    toolbox::{ToolboxExecutionError, ToolboxTool, api_safe_name},
+    toolbox::{DEFAULT_TOOL_RESULT_TOKEN_LIMIT, ToolboxExecutionError, ToolboxTool, api_safe_name},
     workspace::{AgentId, WorkspaceHandle},
 };
 
@@ -61,6 +61,7 @@ pub fn worker_catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 full_name,
                 input_schema: worker_input_schema(local_name),
                 output_schema: worker_output_schema(local_name),
+                result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
                 instructions: worker_instructions(local_name).into(),
                 route: worker_route(local_name).into(),
                 examples: worker_examples(local_name).into(),
@@ -253,6 +254,7 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 full_name,
                 input_schema: input_schema(local_name),
                 output_schema: output_schema(local_name),
+                result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
                 instructions: instructions(local_name).into(),
                 route: route(local_name).into(),
                 examples: examples(local_name).into(),

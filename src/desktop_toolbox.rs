@@ -321,6 +321,9 @@ fn metadata_response(request: &WorkerRequest) -> Value {
         "getBrief" => Ok(Value::String(brief().into())),
         "getInputSchema" => metadata_tool(request).and_then(input_schema),
         "getOutputSchema" => metadata_tool(request).and_then(output_schema),
+        "getResultTokenLimit" => {
+            metadata_tool(request).map(|_| json!(crate::toolbox::DEFAULT_TOOL_RESULT_TOKEN_LIMIT))
+        }
         "getInstructions" => metadata_tool(request)
             .and_then(instructions)
             .map(|value| Value::String(value.into())),
@@ -1777,7 +1780,8 @@ mod tests {
             json!({"id":1,"cmd":"getTools"}),
             json!({"id":2,"cmd":"getInputSchema","tool":"Play"}),
             json!({"id":3,"cmd":"getOutputSchema","tool":"Play"}),
-            json!({"id":4,"cmd":"getInstructions","tool":"Play"}),
+            json!({"id":4,"cmd":"getResultTokenLimit","tool":"Play"}),
+            json!({"id":5,"cmd":"getInstructions","tool":"Play"}),
         ]
         .into_iter()
         .map(|value| value.to_string())
@@ -1790,10 +1794,14 @@ mod tests {
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(frames.len(), 4);
+        assert_eq!(frames.len(), 5);
         assert!(frames.iter().all(|frame| frame["type"] == "result"));
+        assert_eq!(
+            frames[3]["output"],
+            crate::toolbox::DEFAULT_TOOL_RESULT_TOKEN_LIMIT
+        );
         assert!(
-            frames[3]["output"]
+            frames[4]["output"]
                 .as_str()
                 .unwrap()
                 .contains("screen_permission_required")

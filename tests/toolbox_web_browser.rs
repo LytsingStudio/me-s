@@ -325,6 +325,7 @@ fn generated_web_browser_describes_the_raw_snapshot_protocol_without_installing(
         for command in [
             "getInputSchema",
             "getOutputSchema",
+            "getResultTokenLimit",
             "getInstructions",
             "getRoute",
             "getExamples",
@@ -333,6 +334,8 @@ fn generated_web_browser_describes_the_raw_snapshot_protocol_without_installing(
             assert_eq!(frame["type"], "result", "{command} failed for {name}");
             if command.contains("Schema") {
                 assert_eq!(frame["output"]["type"], "object");
+            } else if command == "getResultTokenLimit" {
+                assert_eq!(frame["output"], 32 * 1024);
             } else {
                 assert!(!frame["output"].as_str().unwrap().is_empty());
             }

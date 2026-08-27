@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 use crate::{
     Result,
     event::{Event, EventDataBase, EventId, WorkMapMutationEvent},
-    toolbox::{ToolboxExecutionError, ToolboxTool, api_safe_name},
+    toolbox::{DEFAULT_TOOL_RESULT_TOKEN_LIMIT, ToolboxExecutionError, ToolboxTool, api_safe_name},
 };
 
 pub const WORKMAP_TOOLBOX_NAME: &str = "WorkMap";
@@ -20,6 +20,8 @@ pub const ADD_PLAN: &str = "WorkMap.AddPlan";
 pub const CLOSE_OBJECTIVE: &str = "WorkMap.CloseObjective";
 pub const ADD_MEMORY: &str = "WorkMap.AddMemory";
 pub const INVALIDATE_MEMORY: &str = "WorkMap.InvalidateMemory";
+
+const READ_RESULT_TOKEN_LIMIT: usize = 16 * 1024;
 
 const LOCAL_TOOLS: [&str; 10] = [
     "Read",
@@ -121,6 +123,11 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 full_name,
                 input_schema: input_schema(local_name),
                 output_schema: output_schema(local_name),
+                result_token_limit: if local_name == "Read" {
+                    READ_RESULT_TOKEN_LIMIT
+                } else {
+                    DEFAULT_TOOL_RESULT_TOKEN_LIMIT
+                },
                 instructions: instructions(local_name).into(),
                 route: route(local_name).into(),
                 examples: examples(local_name).into(),

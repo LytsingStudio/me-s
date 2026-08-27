@@ -1,7 +1,7 @@
 use chrono::{DateTime, Local, SecondsFormat, Utc};
 use serde_json::{Value, json};
 
-use crate::toolbox::{ToolboxExecutionError, ToolboxTool};
+use crate::toolbox::{DEFAULT_TOOL_RESULT_TOKEN_LIMIT, ToolboxExecutionError, ToolboxTool};
 
 pub const TOOL_NAME: &str = "CurrentTime";
 pub const TOOLBOX_NAME: &str = "CurrentTime";
@@ -44,6 +44,7 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 },
                 "additionalProperties": false
             }),
+            result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
             instructions: INSTRUCTIONS.into(),
             route: ROUTE.into(),
             examples: EXAMPLES.into(),

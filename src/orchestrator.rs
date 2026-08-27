@@ -2689,6 +2689,7 @@ impl MainAgent {
             let execution_arguments = if call.name == "File.Edit" {
                 file_edit_execution_arguments(
                     edb,
+                    self.toolboxes.catalog(),
                     &self.workspace,
                     &call.arguments,
                     call.api_call_id,
@@ -2728,7 +2729,7 @@ impl MainAgent {
         match execution {
             Ok(mut output) => {
                 if call.name == "File.Read" {
-                    let mut projection = projected_file_edit_scopes(edb)?;
+                    let mut projection = projected_file_edit_scopes(edb, self.toolboxes.catalog())?;
                     let mut raw_for_projection = output.clone();
                     if let Some(object) = raw_for_projection.as_object_mut() {
                         object.remove("editable_ranges");
@@ -2741,8 +2742,12 @@ impl MainAgent {
                         exit_code: None,
                         detail: serde_json::to_string(&raw_for_projection)?,
                     };
-                    let mut visible =
-                        structured_tool_result_value(&call.name, Vec::new(), &synthetic)?;
+                    let mut visible = structured_tool_result_value(
+                        self.toolboxes.catalog(),
+                        &call.name,
+                        Vec::new(),
+                        &synthetic,
+                    )?;
                     projection.apply_result(call, &synthetic, &mut visible);
                     let path = output
                         .get("path")
@@ -6058,7 +6063,7 @@ fn chatbot_model_context(
                 context.push_value(json!({
                     "role": "tool",
                     "tool_call_id": call.provider_call_id,
-                    "content": structured_tool_result(&call.name, Vec::new(), result)?,
+                    "content": structured_tool_result(catalog, &call.name, Vec::new(), result)?,
                 }));
             }
             Event::CompactStateUpdate(update) => match update.state {
@@ -6152,7 +6157,7 @@ fn preserve_chatbot_title_exchange_after_context_boundary(
     context.push_value(json!({
         "role": "tool",
         "tool_call_id": call.provider_call_id,
-        "content": structured_tool_result(&call.name, Vec::new(), &normalized_result)?,
+        "content": structured_tool_result(catalog, &call.name, Vec::new(), &normalized_result)?,
     }));
     Ok(())
 }
@@ -6319,6 +6324,7 @@ fn main_model_context_with_toolboxes_and_environment(
                     .into());
                 };
                 let mut content = structured_tool_result_value(
+                    catalog,
                     &call.name,
                     outputs.remove(&result.tool_call_id).unwrap_or_default(),
                     result,
@@ -6494,7 +6500,7 @@ fn preserve_title_exchange_after_context_boundary(
     context.push_value(json!({
         "role": "tool",
         "tool_call_id": call.provider_call_id,
-        "content": structured_tool_result(&call.name, Vec::new(), &normalized_result)?,
+        "content": structured_tool_result(catalog, &call.name, Vec::new(), &normalized_result)?,
     }));
     Ok(())
 }
@@ -6692,12 +6698,16 @@ fn tool_call_path(arguments: &str) -> Option<String> {
         .map(|path| path.replace('\\', "/").trim_start_matches("./").to_owned())
 }
 
-fn projected_file_edit_scopes(edb: &EventDataBase) -> Result<FileEditScopeProjection> {
-    projected_file_edit_scopes_with_hidden_read_batch(edb, None)
+fn projected_file_edit_scopes(
+    edb: &EventDataBase,
+    catalog: &ToolboxCatalog,
+) -> Result<FileEditScopeProjection> {
+    projected_file_edit_scopes_with_hidden_read_batch(edb, catalog, None)
 }
 
 fn projected_file_edit_scopes_with_hidden_read_batch(
     edb: &EventDataBase,
+    catalog: &ToolboxCatalog,
     hidden_read_api_call_id: Option<EventId>,
 ) -> Result<FileEditScopeProjection> {
     let mut projection = FileEditScopeProjection::default();
@@ -6718,7 +6728,7 @@ fn projected_file_edit_scopes_with_hidden_read_batch(
         if call.name == "File.Read" && hidden_read_api_call_id == Some(call.api_call_id) {
             continue;
         }
-        let mut visible = structured_tool_result_value(&call.name, Vec::new(), result)?;
+        let mut visible = structured_tool_result_value(catalog, &call.name, Vec::new(), result)?;
         projection.apply_result(call, result, &mut visible);
     }
     Ok(projection)
@@ -6748,6 +6758,7 @@ fn normalized_file_tool_path(workspace: &Path, logical: &str) -> Option<String> 
 
 fn file_edit_execution_arguments(
     edb: &EventDataBase,
+    catalog: &ToolboxCatalog,
     workspace: &Path,
     arguments: &str,
     current_api_call_id: EventId,
@@ -6766,23 +6777,26 @@ fn file_edit_execution_arguments(
             .trim_start_matches("./")
             .to_owned()
     });
-    let scope = projected_file_edit_scopes_with_hidden_read_batch(edb, Some(current_api_call_id))?
-        .scope_value(&path);
+    let scope =
+        projected_file_edit_scopes_with_hidden_read_batch(edb, catalog, Some(current_api_call_id))?
+            .scope_value(&path);
     object.insert("_edit_scope".into(), scope);
     Ok(serde_json::to_string(&input)?)
 }
 
 fn structured_tool_result(
+    catalog: &ToolboxCatalog,
     tool_name: &str,
     updates: Vec<ModelToolUpdate>,
     result: &ToolCallResultEvent,
 ) -> Result<String> {
     Ok(serde_json::to_string(&structured_tool_result_value(
-        tool_name, updates, result,
+        catalog, tool_name, updates, result,
     )?)?)
 }
 
 fn structured_tool_result_value(
+    catalog: &ToolboxCatalog,
     tool_name: &str,
     updates: Vec<ModelToolUpdate>,
     result: &ToolCallResultEvent,
@@ -6826,7 +6840,11 @@ fn structured_tool_result_value(
                 .expect("terminal tool result is an object")
                 .insert("other_updates".into(), Value::Array(other));
         }
-        return Ok(tool_result_truncation::truncate_for_model(tool_name, value));
+        return Ok(tool_result_truncation::truncate_for_model(
+            tool_name,
+            value,
+            catalog.result_token_limit(tool_name),
+        ));
     }
 
     let mut value = json!({"result": result_value});
@@ -6836,7 +6854,11 @@ fn structured_tool_result_value(
     if !other.is_empty() {
         object.insert("updates".into(), Value::Array(other));
     }
-    Ok(tool_result_truncation::truncate_for_model(tool_name, value))
+    Ok(tool_result_truncation::truncate_for_model(
+        tool_name,
+        value,
+        catalog.result_token_limit(tool_name),
+    ))
 }
 
 fn resolve_main_system_prompt(
@@ -7185,7 +7207,7 @@ mod tests {
             ToolResultState::Succeeded,
         );
 
-        let projection = projected_file_edit_scopes(&edb).unwrap();
+        let projection = projected_file_edit_scopes(&edb, &ToolboxCatalog::default()).unwrap();
         assert_eq!(
             projection.scope_value("scoped.txt"),
             json!({
@@ -7214,7 +7236,7 @@ mod tests {
             ToolResultState::Succeeded,
         );
         assert_ne!(
-            projected_file_edit_scopes(&edb)
+            projected_file_edit_scopes(&edb, &ToolboxCatalog::default())
                 .unwrap()
                 .scope_value("scoped.txt"),
             Value::Null,
@@ -7229,7 +7251,7 @@ mod tests {
             ToolResultState::Succeeded,
         );
         assert_eq!(
-            projected_file_edit_scopes(&edb)
+            projected_file_edit_scopes(&edb, &ToolboxCatalog::default())
                 .unwrap()
                 .scope_value("scoped.txt"),
             Value::Null
@@ -7264,7 +7286,7 @@ mod tests {
             ToolResultState::Succeeded,
         );
 
-        let projection = projected_file_edit_scopes(&edb).unwrap();
+        let projection = projected_file_edit_scopes(&edb, &ToolboxCatalog::default()).unwrap();
         let scope = projection.files.get("large.txt").unwrap();
         assert!(scope.ranges.iter().any(|(start, _)| *start == 1));
         assert!(scope.ranges.iter().any(|(_, end)| *end == 240));
@@ -7312,6 +7334,7 @@ mod tests {
         let mut edb = EventDataBase::open(&edb_path).unwrap();
         let same_response_arguments = file_edit_execution_arguments(
             &edb,
+            &ToolboxCatalog::default(),
             &directory,
             r#"{"path":"target.txt","edits":[{"operation":"delete","start_line":2,"end_line":2}]}"#,
             0,
@@ -7326,6 +7349,7 @@ mod tests {
         );
         let arguments = file_edit_execution_arguments(
             &edb,
+            &ToolboxCatalog::default(),
             &directory,
             r#"{"path":"target.txt","edits":[{"operation":"delete","start_line":2,"end_line":2}]}"#,
             1,
@@ -7340,6 +7364,7 @@ mod tests {
         edb.append_context_cleared().unwrap();
         let arguments = file_edit_execution_arguments(
             &edb,
+            &ToolboxCatalog::default(),
             &directory,
             r#"{"path":"target.txt","edits":[{"operation":"delete","start_line":2,"end_line":2}]}"#,
             1,
@@ -7397,6 +7422,7 @@ mod tests {
         );
         let arguments = file_edit_execution_arguments(
             &edb,
+            &ToolboxCatalog::default(),
             &workspace,
             &serde_json::to_string(&json!({
                 "path":relative_request,
@@ -13046,6 +13072,59 @@ for line in sys.stdin:
             })
             .unwrap();
         assert_eq!(persisted.detail, raw_detail);
+    }
+
+    #[test]
+    fn model_context_uses_each_tools_result_token_limit() {
+        let notes = (0..700)
+            .map(|index| {
+                json!({
+                    "id": format!("note-{index:08x}"),
+                    "plan_id": "plan-00000001",
+                    "created_at_ms": index,
+                    "content": "x".repeat(100),
+                })
+            })
+            .collect::<Vec<_>>();
+        let detail = json!({
+            "memory": {"facts": [], "agreements": []},
+            "current": {
+                "objective": {
+                    "id": "objective-00000001",
+                    "state": "active",
+                    "title": "test",
+                },
+                "plans": [{
+                    "plan": {
+                        "id": "plan-00000001",
+                        "objective_id": "objective-00000001",
+                        "state": "active",
+                        "title": "plan",
+                    },
+                    "notes": notes,
+                }],
+            },
+        });
+        let result = ToolCallResultEvent {
+            id: 1,
+            timestamp_ms: 1,
+            tool_call_id: 1,
+            state: ToolResultState::Succeeded,
+            exit_code: None,
+            detail: serde_json::to_string(&detail).unwrap(),
+        };
+        let catalog = ToolboxCatalog::native_for_test();
+        let read =
+            structured_tool_result_value(&catalog, workmap::READ, Vec::new(), &result).unwrap();
+        let history =
+            structured_tool_result_value(&catalog, workmap::READ_HISTORY, Vec::new(), &result)
+                .unwrap();
+
+        assert_eq!(read["truncate"], true);
+        assert_eq!(history["truncate"], false);
+        let original_tokens = read["truncate_info"]["original_tokens"].as_u64().unwrap();
+        assert!(original_tokens > 16 * 1024);
+        assert!(original_tokens <= 32 * 1024);
     }
 
     #[test]

@@ -82,9 +82,10 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         json!({"id": 2, "cmd": "getBrief"}),
         json!({"id": 3, "cmd": "getInputSchema", "tool": "Create"}),
         json!({"id": 4, "cmd": "getOutputSchema", "tool": "Create"}),
-        json!({"id": 5, "cmd": "getInstructions", "tool": "Create"}),
-        json!({"id": 6, "cmd": "getRoute", "tool": "Create"}),
-        json!({"id": 7, "cmd": "getExamples", "tool": "Create"}),
+        json!({"id": 5, "cmd": "getResultTokenLimit", "tool": "Create"}),
+        json!({"id": 6, "cmd": "getInstructions", "tool": "Create"}),
+        json!({"id": 7, "cmd": "getRoute", "tool": "Create"}),
+        json!({"id": 8, "cmd": "getExamples", "tool": "Create"}),
     ];
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
@@ -118,7 +119,7 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         .read_to_string(&mut stderr)
         .unwrap();
     assert!(status.success(), "Terminal.py failed: {}", stderr);
-    assert_eq!(frames.len(), 7);
+    assert_eq!(frames.len(), 8);
     assert!(
         frames
             .iter()
@@ -134,8 +135,9 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
     );
     assert_eq!(frames[2]["output"]["type"], "object");
     assert_eq!(frames[3]["output"]["type"], "object");
-    assert!(frames[4]["output"].is_string());
+    assert_eq!(frames[4]["output"], 32 * 1024);
     assert!(frames[5]["output"].is_string());
     assert!(frames[6]["output"].is_string());
+    assert!(frames[7]["output"].is_string());
     fs::remove_dir_all(workspace).unwrap();
 }

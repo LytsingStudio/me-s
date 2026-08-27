@@ -3024,6 +3024,8 @@ def handle(request: Any) -> None:
         result(request_id, INPUT_SCHEMAS[tool])
     elif command == "getOutputSchema":
         result(request_id, OUTPUT_SCHEMAS[tool])
+    elif command == "getResultTokenLimit":
+        result(request_id, 32 * 1024)
     elif command == "getInstructions":
         result(request_id, INSTRUCTIONS[tool])
     elif command == "getRoute":

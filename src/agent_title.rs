@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 
 use crate::{
     event::{AgentTitleChangedEvent, Event, EventDataBase, EventId},
-    toolbox::{ToolboxExecutionError, ToolboxTool},
+    toolbox::{DEFAULT_TOOL_RESULT_TOKEN_LIMIT, ToolboxExecutionError, ToolboxTool},
 };
 
 pub const TOOL_NAME: &str = "SetTitle";
@@ -55,6 +55,7 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 "type": "string",
                 "description": SUCCESS_MESSAGE
             }),
+            result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
             instructions: INSTRUCTIONS.into(),
             route: ROUTE.into(),
             examples: EXAMPLES.into(),

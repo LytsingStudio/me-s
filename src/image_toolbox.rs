@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use crate::{
     event::image_content_sha256,
-    toolbox::{ToolboxExecutionError, ToolboxTool, api_safe_name},
+    toolbox::{DEFAULT_TOOL_RESULT_TOKEN_LIMIT, ToolboxExecutionError, ToolboxTool, api_safe_name},
 };
 
 pub const TOOLBOX_NAME: &str = "Image";
@@ -113,6 +113,7 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
         api_name: api_safe_name(INFO_TOOL_NAME),
         input_schema: schema.clone(),
         output_schema: metadata_schema.clone(),
+        result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
         instructions: "Reads and decodes the image only far enough to return reliable metadata. It does not add image content to model context.".into(),
         route: info_route.into(),
         examples: r#"{"url":"./diagram.png"}
@@ -133,6 +134,7 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
             },
             "additionalProperties": false
         }),
+        result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
         instructions: view_instructions.into(),
         route: view_route.into(),
         examples: r#"{"url":"./web-snapshot-a1b2c3d.png"}

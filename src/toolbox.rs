@@ -33,6 +33,7 @@ pub const TOOLBOX_DIRECTORY: &str = ".me/tools";
 pub const WORKSPACE_TEMP_DIRECTORY: &str = ".me/tmp";
 pub const DEFAULT_PYTHON_MAJOR: u8 = 3;
 pub const DEFAULT_PYTHON_MINOR: u8 = 12;
+pub const DEFAULT_TOOL_RESULT_TOKEN_LIMIT: usize = 32 * 1024;
 pub(crate) const DISABLED_FILE_APPLY_PATCH: &str = "File.ApplyPatch";
 const DISABLED_FILE_APPLY_PATCH_API: &str = "File_ApplyPatch";
 const DEFAULT_TERMINAL_FILE: &str = "Terminal.py";
@@ -69,9 +70,14 @@ pub struct ToolboxTool {
     pub instructions: String,
     pub route: String,
     pub examples: String,
+    pub(crate) result_token_limit: usize,
 }
 
 impl ToolboxTool {
+    pub fn result_token_limit(&self) -> usize {
+        self.result_token_limit
+    }
+
     fn model_definition(&self) -> Value {
         json!({
             "type": "function",
@@ -95,6 +101,14 @@ pub struct ToolboxCatalog {
 impl ToolboxCatalog {
     pub fn tools(&self) -> &[ToolboxTool] {
         &self.tools
+    }
+
+    pub fn result_token_limit(&self, full_name: &str) -> usize {
+        self.tools
+            .iter()
+            .find(|tool| tool.full_name == full_name)
+            .map(ToolboxTool::result_token_limit)
+            .unwrap_or(DEFAULT_TOOL_RESULT_TOKEN_LIMIT)
     }
 
     pub fn prompt(&self) -> &str {
@@ -207,6 +221,7 @@ impl ToolboxCatalog {
                     full_name,
                     input_schema: terminal_input_schema(local_name).unwrap(),
                     output_schema: terminal_output_schema(local_name).unwrap(),
+                    result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
                     instructions: terminal_instructions(local_name).unwrap().into(),
                     route: terminal_route(local_name).unwrap().into(),
                     examples: terminal_examples(local_name).unwrap().into(),
@@ -382,6 +397,11 @@ impl ToolboxRuntime {
                     &full_name,
                     "getOutputSchema",
                 )?;
+                let result_token_limit = required_result_token_limit(
+                    client.query("getResultTokenLimit", Some(&local_name))?,
+                    &full_name,
+                    "getResultTokenLimit",
+                )?;
                 let instructions = required_string(
                     client.query("getInstructions", Some(&local_name))?,
                     &full_name,
@@ -404,6 +424,7 @@ impl ToolboxRuntime {
                     api_name,
                     input_schema,
                     output_schema,
+                    result_token_limit,
                     instructions,
                     route,
                     examples,
@@ -1533,6 +1554,18 @@ fn required_string(value: Value, owner: &str, cmd: &str) -> Result<String> {
         .ok_or_else(|| format!("{owner} {cmd} did not return a string").into())
 }
 
+fn required_result_token_limit(value: Value, owner: &str, cmd: &str) -> Result<usize> {
+    let raw = value
+        .as_u64()
+        .ok_or_else(|| format!("{owner} {cmd} did not return a positive integer"))?;
+    let limit = usize::try_from(raw)
+        .map_err(|_| format!("{owner} {cmd} returned an unsupported integer"))?;
+    if limit == 0 {
+        return Err(format!("{owner} {cmd} returned zero").into());
+    }
+    Ok(limit)
+}
+
 fn required_string_array(value: Value, owner: &str, cmd: &str) -> Result<Vec<String>> {
     let values = value
         .as_array()
@@ -1768,6 +1801,9 @@ fn terminal_metadata_response(request: &WorkerRequest) -> Value {
         ))),
         "getInputSchema" => metadata_tool(request).and_then(terminal_input_schema),
         "getOutputSchema" => metadata_tool(request).and_then(terminal_output_schema),
+        "getResultTokenLimit" => {
+            metadata_tool(request).map(|_| json!(DEFAULT_TOOL_RESULT_TOKEN_LIMIT))
+        }
         "getInstructions" => metadata_tool(request)
             .and_then(terminal_instructions)
             .map(|value| Value::String(value.into())),
@@ -2393,9 +2429,10 @@ for line in sys.stdin:
             json!({"id":2,"cmd":"getBrief"}),
             json!({"id":3,"cmd":"getInputSchema","tool":"Create"}),
             json!({"id":4,"cmd":"getOutputSchema","tool":"Create"}),
-            json!({"id":5,"cmd":"getInstructions","tool":"Create"}),
-            json!({"id":6,"cmd":"getRoute","tool":"Create"}),
-            json!({"id":7,"cmd":"getExamples","tool":"Create"}),
+            json!({"id":5,"cmd":"getResultTokenLimit","tool":"Create"}),
+            json!({"id":6,"cmd":"getInstructions","tool":"Create"}),
+            json!({"id":7,"cmd":"getRoute","tool":"Create"}),
+            json!({"id":8,"cmd":"getExamples","tool":"Create"}),
         ]
         .into_iter()
         .map(|value| value.to_string())
@@ -2409,7 +2446,7 @@ for line in sys.stdin:
             .lines()
             .map(|line| serde_json::from_str::<Value>(line).unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(frames.len(), 7);
+        assert_eq!(frames.len(), 8);
         assert_eq!(frames[0]["output"][0], "Create");
         assert!(
             frames[1]["output"]
@@ -2419,19 +2456,20 @@ for line in sys.stdin:
         );
         assert_eq!(frames[2]["output"]["type"], "object");
         assert_eq!(frames[3]["output"]["type"], "object");
+        assert_eq!(frames[4]["output"], DEFAULT_TOOL_RESULT_TOKEN_LIMIT);
         assert!(
-            frames[4]["output"]
+            frames[5]["output"]
                 .as_str()
                 .unwrap()
                 .contains("fixed PTY size")
         );
         assert!(
-            frames[5]["output"]
+            frames[6]["output"]
                 .as_str()
                 .unwrap()
                 .contains("persistent PTY")
         );
-        assert!(frames[6]["output"].as_str().unwrap().contains("\"width\""));
+        assert!(frames[7]["output"].as_str().unwrap().contains("\"width\""));
         fs::remove_dir_all(workspace).unwrap();
     }
 
@@ -2460,6 +2498,14 @@ for line in sys.stdin:
                 .contains("stable names such as `File.Read`")
         );
         assert!(catalog.prompt().contains("`File_Read`"));
+        assert_eq!(
+            catalog.result_token_limit("Terminal.Create"),
+            DEFAULT_TOOL_RESULT_TOKEN_LIMIT
+        );
+        assert_eq!(
+            catalog.result_token_limit("Removed.HistoricalTool"),
+            DEFAULT_TOOL_RESULT_TOKEN_LIMIT
+        );
     }
 
     #[test]
@@ -2504,6 +2550,11 @@ for line in sys.stdin:
         for api_name in agent_api_names {
             assert!(catalog.resolve_api_name(&api_name).is_none());
         }
+        assert_eq!(catalog.result_token_limit(workmap::READ), 16 * 1024);
+        assert_eq!(
+            catalog.result_token_limit(workmap::READ_HISTORY),
+            DEFAULT_TOOL_RESULT_TOKEN_LIMIT
+        );
     }
 
     #[test]
@@ -2655,6 +2706,8 @@ for line in sys.stdin:
         send({"id": request["id"], "type": "result", "output": "Probe toolbox"})
     elif cmd in ("getInputSchema", "getOutputSchema"):
         send({"id": request["id"], "type": "result", "output": {"type": "object"}})
+    elif cmd == "getResultTokenLimit":
+        send({"id": request["id"], "type": "result", "output": 32768})
     elif cmd in ("getInstructions", "getRoute", "getExamples"):
         send({"id": request["id"], "type": "result", "output": cmd + ":" + request["tool"]})
     elif cmd == "execute":
@@ -2670,6 +2723,10 @@ for line in sys.stdin:
         let runtime =
             Arc::new(ToolboxRuntime::load_with_python(&workspace, vec![script], python).unwrap());
         assert_eq!(runtime.catalog().tools().len(), 19);
+        assert_eq!(
+            runtime.catalog().result_token_limit("Probe.Echo"),
+            DEFAULT_TOOL_RESULT_TOKEN_LIMIT
+        );
         assert!(runtime.catalog().resolve_api_name("Agent_Create").is_none());
         assert!(runtime.catalog().resolve_api_name("Agent_Stop").is_none());
         assert!(
@@ -2864,6 +2921,8 @@ for line in sys.stdin:
         send({"id": request["id"], "type": "result", "output": "Stuck toolbox"})
     elif command in ("getInputSchema", "getOutputSchema"):
         send({"id": request["id"], "type": "result", "output": {"type": "object"}})
+    elif command == "getResultTokenLimit":
+        send({"id": request["id"], "type": "result", "output": 32768})
     elif command in ("getInstructions", "getRoute", "getExamples"):
         send({"id": request["id"], "type": "result", "output": "Hang until the host shuts down."})
     elif command == "execute":

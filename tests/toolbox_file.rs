@@ -380,6 +380,7 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
         for command in [
             "getInputSchema",
             "getOutputSchema",
+            "getResultTokenLimit",
             "getInstructions",
             "getRoute",
             "getExamples",
@@ -389,6 +390,8 @@ fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
             assert!(!frame["output"].is_null());
             if matches!(command, "getInputSchema" | "getOutputSchema") {
                 assert_eq!(frame["output"]["type"], "object");
+            } else if command == "getResultTokenLimit" {
+                assert_eq!(frame["output"], 32 * 1024);
             } else {
                 assert!(!frame["output"].as_str().unwrap().is_empty());
             }

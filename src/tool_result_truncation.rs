@@ -4,12 +4,11 @@ use serde_json::{Map, Value, json};
 use tiktoken_rs::o200k_base_singleton;
 use unicode_segmentation::UnicodeSegmentation;
 
-pub const DEFAULT_TOOL_RESULT_TOKEN_LIMIT: usize = 32 * 1024;
 const METADATA_TOKEN_RESERVE: usize = 512;
 const MAX_STALLED_ATTEMPTS: usize = 100;
 
-pub fn truncate_for_model(tool_name: &str, value: Value) -> Value {
-    truncate_for_model_with_limit(tool_name, value, DEFAULT_TOOL_RESULT_TOKEN_LIMIT)
+pub fn truncate_for_model(tool_name: &str, value: Value, limit: usize) -> Value {
+    truncate_for_model_with_limit(tool_name, value, limit)
 }
 
 fn truncate_for_model_with_limit(tool_name: &str, mut value: Value, limit: usize) -> Value {
@@ -2531,9 +2530,10 @@ mod tests {
             wrapper(
                 json!({"lines":numbered_lines(lines, 1),"start_line":1,"end_line":50_000,"total_lines":50_000}),
             ),
+            crate::toolbox::DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
         );
         assert_eq!(result["truncate"], true);
-        assert!(estimate_tokens(&result) <= DEFAULT_TOOL_RESULT_TOKEN_LIMIT);
+        assert!(estimate_tokens(&result) <= crate::toolbox::DEFAULT_TOOL_RESULT_TOKEN_LIMIT);
     }
 
     #[test]
