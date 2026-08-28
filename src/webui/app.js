@@ -84,6 +84,7 @@ const state = {
   authenticated: false,
   connected: false,
   connecting: false,
+  startupPending: true,
   snapshotInitialized: false,
   edbCacheInitialized: false,
   syncGeneration: 0,
@@ -392,6 +393,7 @@ async function hydrateEdbCache(snapshot) {
   state.snapshot = snapshot;
   state.snapshotInitialized = true;
   reconcileAgents();
+  renderAgents();
   const scope = edbCacheScope(snapshot);
   const entries = scope ? await edbCache.loadScope(scope) : [];
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
@@ -490,6 +492,8 @@ function showApplication() {
   elements.loginScreen.classList.add("hidden");
   elements.app.classList.remove("hidden");
   elements.loginError.textContent = "";
+  elements.addAgent.disabled = sessionStartupLocked();
+  renderAgents();
 }
 
 async function initializeAuthentication() {
@@ -965,11 +969,12 @@ function applySyncState(payload) {
     responseMatchesSelection,
     responseMatchesSelection && !payload.more_events,
   );
+  const startupCompleted = noteStartupProgress(payload.more_events, responseMatchesSelection);
   const connectionChanged = phaseBefore !== state.connectionPhase;
   requestRender({
     full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged),
     connection: connectionChanged,
-    agents: presentationChanged || agentSummaryChanged,
+    agents: presentationChanged || agentSummaryChanged || startupCompleted,
     tabs: presentationChanged || terminalChanged,
     currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged,
     workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged,
@@ -1089,6 +1094,17 @@ function syncApiActivity(next) {
     || state.apiActivity.receivedSseEvents !== normalized.receivedSseEvents;
   state.apiActivity = normalized;
   return changed;
+}
+
+function sessionStartupLocked() {
+  return state.startupPending;
+}
+
+function noteStartupProgress(moreEvents, responseMatchesSelection) {
+  if (!state.startupPending || !state.edbCacheInitialized
+      || Boolean(moreEvents) || !responseMatchesSelection) return false;
+  state.startupPending = false;
+  return true;
 }
 
 function requestRender(update) {
@@ -2121,17 +2137,23 @@ function renderConnection() {
 
 function renderAgents() {
   const agents = state.snapshot.agents;
+  const startupLoading = sessionStartupLocked();
+  elements.addAgent.disabled = startupLoading;
   if (!agents.length) {
-    if (!elements.agents.querySelector(":scope > .empty-state")) {
-      elements.agents.innerHTML = `<div class="empty-state">暂无会话</div>`;
+    const label = startupLoading && !state.snapshot.environment ? "正在加载会话" : "暂无会话";
+    let empty = elements.agents.querySelector(":scope > .empty-state");
+    if (!empty) {
+      elements.agents.innerHTML = `<div class="empty-state"></div>`;
+      empty = elements.agents.querySelector(":scope > .empty-state");
     }
+    if (empty.textContent !== label) empty.textContent = label;
     return;
   }
   if (elements.agents.querySelector(":scope > .empty-state")) replaceElementChildren(elements.agents);
   for (let index = 0; index < agents.length; index += 1) {
     const agent = agents[index];
     const summary = state.stores.get(agent.id)?.summary;
-    const active = sidebarAgentActive(summary);
+    const active = !startupLoading && sidebarAgentActive(summary);
     const label = agent.title || agent.id;
     let row = elements.agents.children[index];
     if (!row || row.dataset.agentRow !== agent.id) {
@@ -2139,13 +2161,21 @@ function renderAgents() {
       row = createAgentRow(agent);
       elements.agents.append(row);
     }
-    row.classList.toggle("active", agent.id === state.selectedAgent);
-    row.querySelector(".agent-dot").classList.toggle("active", active);
+    row.classList.toggle("startup-loading", startupLoading);
+    row.classList.toggle("active", !startupLoading && agent.id === state.selectedAgent);
+    row.setAttribute("aria-busy", String(startupLoading));
+    const item = row.querySelector(".agent-item");
+    item.disabled = startupLoading;
+    item.title = startupLoading ? "正在加载会话" : "";
+    const dot = row.querySelector(".agent-dot");
+    dot.classList.toggle("startup-loading", startupLoading);
+    dot.classList.toggle("active", active);
     const title = row.querySelector(".agent-label");
     if (title.textContent !== label) title.textContent = label;
     const deleteButton = row.querySelector(".agent-delete");
-    deleteButton.setAttribute("aria-label", `删除 ${label}`);
-    deleteButton.title = `删除 ${label}`;
+    deleteButton.disabled = startupLoading;
+    deleteButton.setAttribute("aria-label", startupLoading ? `${label} 正在加载` : `删除 ${label}`);
+    deleteButton.title = startupLoading ? "正在加载会话" : `删除 ${label}`;
   }
   while (elements.agents.children.length > agents.length) elements.agents.lastElementChild.remove();
 }
@@ -2172,6 +2202,7 @@ function createAgentRow(agent) {
 }
 
 function selectAgent(id) {
+  if (sessionStartupLocked()) return;
   closeContextDrawer();
   closeMobileSidebar();
   closeUserMessageMenu();
@@ -4072,7 +4103,7 @@ elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", retryConnectionNow);
-elements.addAgent.addEventListener("click", () => { closeMobileSidebar(); openAddAgent(); });
+elements.addAgent.addEventListener("click", () => { if (!sessionStartupLocked()) { closeMobileSidebar(); openAddAgent(); } });
 elements.openSettings.addEventListener("click", () => { closeMobileSidebar(); openEdbCacheSettings(); });
 elements.mobileSidebarToggle.addEventListener("click", openMobileSidebar);
 elements.mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);

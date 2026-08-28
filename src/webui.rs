@@ -3558,16 +3558,13 @@ mod tests {
     #[test]
     fn sidebar_agent_uses_turn_lifecycle_and_stronger_three_second_sweep() {
         assert!(APP_JS.contains("if (kind === \"AgentTurn\") summary.turnState = value.state;"));
-        assert!(APP_JS.contains("const active = sidebarAgentActive(summary);"));
+        assert!(APP_JS.contains("const active = !startupLoading && sidebarAgentActive(summary);"));
         assert!(!APP_JS.contains("const active = API_ACTIVE.has(summary?.apiState);"));
         assert!(
             !APP_JS
                 .contains("else if (kind === \"ApiStateUpdate\") summary.apiState = value.state;")
         );
-        assert!(
-            APP_JS
-                .contains("row.querySelector(\".agent-dot\").classList.toggle(\"active\", active)")
-        );
+        assert!(APP_JS.contains("dot.classList.toggle(\"active\", active)"));
         assert_eq!(
             APP_JS
                 .matches("<span class=\"agent-dot\" aria-hidden=\"true\"></span>")
@@ -3591,8 +3588,16 @@ mod tests {
             "@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }"
         ));
         assert!(STYLE_CSS.contains(
-            "@media (prefers-reduced-motion: reduce) { .agent-dot.active { animation: none; } .agent-dot.active + .agent-label { color: inherit; background: none;"
+            "@media (prefers-reduced-motion: reduce) { .agent-dot.startup-loading, .agent-dot.active { animation: none; }"
         ));
+        assert!(APP_JS.contains("row.classList.toggle(\"startup-loading\", startupLoading)"));
+        assert!(APP_JS.contains("item.disabled = startupLoading"));
+        assert!(APP_JS.contains("deleteButton.disabled = startupLoading"));
+        assert!(STYLE_CSS.contains("animation: agent-startup-spin .8s linear infinite"));
+        assert!(
+            STYLE_CSS
+                .contains("@keyframes agent-startup-spin { to { transform: rotate(360deg); } }")
+        );
         assert!(
             THEME_CSS.contains("--activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));")
         );

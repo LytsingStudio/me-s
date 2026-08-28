@@ -23,6 +23,11 @@ function loadRuntime(relative) {
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
       eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
       eventRecoveryMatches, selectedEventRecoveryReady, httpSyncProgressSignature, isIosWebKit,
+      sessionStartupLocked: typeof sessionStartupLocked === "function" ? sessionStartupLocked : null,
+      noteStartupProgress: typeof noteStartupProgress === "function" ? noteStartupProgress : null,
+      gatewayStartupReady: typeof gatewayStartupReady === "function" ? gatewayStartupReady : null,
+      noteGatewayStartupProgress: typeof noteGatewayStartupProgress === "function" ? noteGatewayStartupProgress : null,
+      applyGatewayStartupMetadata: typeof applyGatewayStartupMetadata === "function" ? applyGatewayStartupMetadata : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
@@ -486,6 +491,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
+  if (sessionStartupLocked()) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -677,6 +683,47 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
+
+  test("keeps every session disabled until the initial raw EDB startup finishes", () => {
+    const direct = loadRuntime("../src/webui/app.js");
+    expect(direct.sessionStartupLocked()).toBe(true);
+    direct.state.edbCacheInitialized = true;
+    expect(direct.noteStartupProgress(true, true)).toBe(false);
+    expect(direct.noteStartupProgress(false, false)).toBe(false);
+    expect(direct.noteStartupProgress(false, true)).toBe(true);
+    expect(direct.sessionStartupLocked()).toBe(false);
+
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    gateway.state.gateway.workspaces = [{ id: "chat" }, { id: "w-one" }];
+    gateway.state.workspaceId = "chat";
+    gateway.state.edbCacheInitialized = true;
+    gateway.state.activeCatchUpPending = false;
+    const inactive = gateway.emptyGatewayWorkspaceState();
+    inactive.edbCacheInitialized = true;
+    inactive.catchUpPending = true;
+    gateway.state.workspaceStates.set("w-one", inactive);
+    expect(gateway.gatewayStartupReady()).toBe(false);
+    inactive.catchUpPending = false;
+    expect(gateway.gatewayStartupReady()).toBe(true);
+    expect(gateway.noteGatewayStartupProgress()).toBe(true);
+    expect(gateway.sessionStartupLocked()).toBe(false);
+  });
+
+  test("stores lightweight Gateway session metadata before raw EDB hydration", () => {
+    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const workspace = gateway.emptyGatewayWorkspaceState();
+    gateway.state.workspaceStates.set("w-one", workspace);
+    const snapshot = {
+      revision: 7, environment: { workspace: "/workspace-one" },
+      agents: [{ id: "main", title: "Visible immediately" }],
+      models: [], orchestrators: [], default_orchestrator: null,
+    };
+    gateway.applyGatewayStartupMetadata("w-one", snapshot);
+    expect(workspace.snapshot).toBe(snapshot);
+    expect(workspace.selectedAgent).toBe("main");
+    expect(workspace.snapshotInitialized).toBe(false);
+    expect(workspace.edbCacheInitialized).toBe(false);
+  });
   test("keeps Gateway Workspace disclosure as an origin-local browser preference", () => {
     const gateway = loadRuntime("../src/gateway_webui/app.js");
     const values = new Map();
@@ -917,8 +964,13 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('class="agent-delete"');
       expect(source).toContain('void openDeleteAgent(agent.id)');
       expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
-      expect(source).toContain("const active = sidebarAgentActive(summary);");
+      expect(source).toContain("const active = !startupLoading && sidebarAgentActive(summary);");
       expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
+      expect(source).toContain("startupPending: true");
+      expect(source).toContain('row.classList.toggle("startup-loading", startupLoading)');
+      expect(source).toContain("item.disabled = startupLoading");
+      expect(source).toContain("deleteButton.disabled = startupLoading");
+      expect(source).toContain("if (sessionStartupLocked()) return;");
       expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
       expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
       expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
@@ -931,6 +983,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(styles).toContain("animation: agent-label-sweep 3s ease-in-out infinite;");
       expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
       expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
+      expect(styles).toContain(".agent-row.startup-loading { opacity: .52; }");
+      expect(styles).toContain(".agent-dot.startup-loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
+      expect(styles).toContain("animation: agent-startup-spin .8s linear infinite;");
+      expect(styles).toContain("@keyframes agent-startup-spin { to { transform: rotate(360deg); } }");
       expect(styles).toContain(".statusbar { contain: layout paint style;");
       expect(styles).toContain("font-weight: 700; white-space: nowrap;");
       expect(styles).toContain(".status-model-icon {");

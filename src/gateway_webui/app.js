@@ -55,6 +55,8 @@ const state = {
   backgroundSyncDueAt: null,
   backgroundSyncOperation: null,
   backgroundSyncCursor: 0,
+  startupPending: true,
+  startupMetadataPending: false,
   activeCatchUpPending: true,
   snapshot: {
     revision: 0, environment: null, agents: [], models: [], orchestrators: [], default_orchestrator: null,
@@ -477,6 +479,7 @@ async function hydrateEdbCache(snapshot) {
   state.snapshot = snapshot;
   state.snapshotInitialized = true;
   reconcileAgents();
+  renderAgents();
   const scope = edbCacheScope(snapshot);
   const entries = scope ? await edbCache.loadScope(scope) : [];
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
@@ -723,6 +726,7 @@ function backgroundSyncRequestBody(workspace) {
 
 function backgroundSyncCanRun() {
   return !state.pageClosing
+    && !state.startupMetadataPending
     && (!state.authRequired || state.authenticated)
     && state.connectionPhase === "connected"
     && !state.activeCatchUpPending;
@@ -844,10 +848,14 @@ function reconcileBackgroundAgents(workspace, snapshot) {
 
 async function hydrateBackgroundEdbCache(operation, snapshot) {
   if (!snapshot) throw new Error("同步响应未提供缓存元数据");
+  if (!backgroundSyncOperationCurrent(operation)) return false;
+  const workspace = operation.workspace;
+  workspace.snapshot = snapshot;
+  reconcileBackgroundAgents(workspace, snapshot);
+  renderAgents();
   const scope = edbCacheScope(snapshot);
   const entries = scope ? await edbCache.loadScope(scope) : [];
   if (!backgroundSyncOperationCurrent(operation)) return false;
-  const workspace = operation.workspace;
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
   for (const entry of entries) {
     if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key);
@@ -967,7 +975,8 @@ async function requestBackgroundWorkspaceSync() {
       candidate.workspace.backgroundNextSyncAt = message.more_events && madeProgress
         ? 0 : Date.now() + (message.more_events ? HTTP_SYNC_ACTIVE_MS : BACKGROUND_SYNC_IDLE_MS);
     }
-    if (sidebarChanged) renderAgents();
+    const startupCompleted = noteGatewayStartupProgress();
+    if (sidebarChanged || startupCompleted) renderAgents();
   } catch (error) {
     if (!backgroundSyncOperationCurrent(operation)) return;
     if (error.status === 401) {
@@ -1003,6 +1012,7 @@ function applyGatewaySnapshot(snapshot) {
     cancelBackgroundWorkspaceSync(id);
     state.workspaceStates.delete(id);
   }
+  noteGatewayStartupProgress();
   renderAgents();
 }
 
@@ -1020,13 +1030,73 @@ async function refreshGatewayState() {
   }
 }
 
+function sessionStartupLocked() {
+  return state.startupPending;
+}
+
+function gatewayStartupReady() {
+  if (!state.startupPending) return true;
+  if (state.startupMetadataPending || !state.edbCacheInitialized || state.activeCatchUpPending) return false;
+  return (state.gateway.workspaces || []).every((workspace) => {
+    if (workspace.id === state.workspaceId) return true;
+    const bucket = state.workspaceStates.get(workspace.id);
+    return Boolean(bucket?.edbCacheInitialized) && !bucket.catchUpPending;
+  });
+}
+
+function noteGatewayStartupProgress() {
+  if (!state.startupPending || !gatewayStartupReady()) return false;
+  state.startupPending = false;
+  return true;
+}
+
+function applyGatewayStartupMetadata(workspaceId, snapshot) {
+  const workspace = gatewayWorkspaceState(workspaceId);
+  if (workspace.edbCacheInitialized) return;
+  workspace.snapshot = snapshot;
+  const ids = new Set((snapshot.agents || []).map((agent) => agent.id));
+  if (!workspace.selectedAgent || !ids.has(workspace.selectedAgent)) {
+    workspace.selectedAgent = (snapshot.agents || []).find((agent) => agent.id === "main")?.id
+      || snapshot.agents?.[0]?.id || null;
+  }
+}
+
+async function loadGatewayStartupMetadata(activeWorkspaceId) {
+  state.startupMetadataPending = true;
+  try {
+    const workspaceIds = (state.gateway.workspaces || [])
+      .map((workspace) => workspace.id)
+      .filter((workspaceId) => workspaceId !== activeWorkspaceId);
+    for (const workspaceId of workspaceIds) {
+      if (state.pageClosing || !state.authenticated) break;
+      try {
+        const snapshot = await api("/api/snapshot", {}, workspaceId);
+        if (workspaceId === state.workspaceId
+            || !(state.gateway.workspaces || []).some((workspace) => workspace.id === workspaceId)) continue;
+        applyGatewayStartupMetadata(workspaceId, snapshot);
+        renderAgents();
+      } catch (error) {
+        if (error.status === 401) {
+          showLogin("登录已失效，请重新登录");
+          return;
+        }
+      }
+    }
+  } finally {
+    state.startupMetadataPending = false;
+    if (noteGatewayStartupProgress()) renderAgents();
+    scheduleBackgroundWorkspaceSync(0);
+  }
+}
+
 async function initializeGateway() {
   const snapshot = await api("/api/gateway/state");
   applyGatewaySnapshot(snapshot);
   const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
   const workspaceId = ids.has(snapshot.selected_workspace_id) ? snapshot.selected_workspace_id : "chat";
   activateWorkspace(workspaceId, snapshot.selected_agent_id, false);
-  scheduleBackgroundWorkspaceSync(0);
+  if (state.startupPending) void loadGatewayStartupMetadata(workspaceId);
+  else scheduleBackgroundWorkspaceSync(0);
 }
 
 function showLogin(message = "") {
@@ -1052,6 +1122,7 @@ function showApplication() {
   elements.loginScreen.classList.add("hidden");
   elements.app.classList.remove("hidden");
   elements.loginError.textContent = "";
+  elements.addAgent.disabled = sessionStartupLocked();
 }
 
 async function initializeAuthentication() {
@@ -1457,6 +1528,7 @@ async function requestHttpSync() {
     }
     state.activeCatchUpPending = Boolean(message.more_events)
       || (message.selected_agent ?? null) !== state.selectedAgent;
+    if (noteGatewayStartupProgress()) renderAgents();
     if (!state.activeCatchUpPending) scheduleBackgroundWorkspaceSync(0);
     const madeProgress = progressBefore !== httpSyncProgressSignature();
     const delay = state.connectionPhase === "stabilizing"
@@ -2697,6 +2769,8 @@ function renderConnection() {
 
 function renderAgents() {
   const workspaces = state.gateway.workspaces || [];
+  const startupLoading = sessionStartupLocked();
+  elements.addAgent.disabled = startupLoading;
   const chat = workspaces.find((workspace) => workspace.builtin);
   const external = workspaces.filter((workspace) => !workspace.builtin);
   const externalIds = new Set(external.map((workspace) => workspace.id));
@@ -2754,6 +2828,7 @@ function createWorkspaceGroup(workspace) {
     updateWorkspaceGroup(group, workspace);
   });
   group.querySelector("[data-workspace-add]").addEventListener("click", () => {
+    if (sessionStartupLocked()) return;
     activateWorkspace(workspace.id);
     openAddAgent();
   });
@@ -2766,6 +2841,7 @@ function createWorkspaceGroup(workspace) {
 
 function updateWorkspaceGroup(group, workspace) {
   const expanded = workspaceExpanded(workspace.id);
+  const startupLoading = sessionStartupLocked();
   group.classList.toggle("expanded", expanded);
   const select = group.querySelector("[data-workspace-select]");
   const add = group.querySelector("[data-workspace-add]");
@@ -2777,8 +2853,9 @@ function updateWorkspaceGroup(group, workspace) {
   select.setAttribute("aria-label", `${expanded ? "折叠" : "展开"} ${workspace.name}`);
   select.title = `${expanded ? "折叠" : "展开"} ${workspace.name}`;
   agents.hidden = !expanded;
+  add.disabled = startupLoading;
   add.setAttribute("aria-label", `在 ${workspace.name}中新建会话`);
-  add.title = `在 ${workspace.name}中新建会话`;
+  add.title = startupLoading ? "正在加载会话" : `在 ${workspace.name}中新建会话`;
   actions.setAttribute("aria-label", `打开 ${workspace.name} 的工作区选项`);
   actions.title = `打开 ${workspace.name} 的工作区选项`;
 }
@@ -2788,7 +2865,13 @@ function renderWorkspaceAgentRows(container, workspaceId) {
   const bucket = workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
   const agents = bucket.snapshot?.agents || [];
   if (!agents.length) {
-    if (!container.querySelector(":scope > .empty-state")) container.innerHTML = `<div class="empty-state">暂无会话</div>`;
+    const label = state.startupPending && !bucket.snapshot?.environment ? "正在加载会话" : "暂无会话";
+    let empty = container.querySelector(":scope > .empty-state");
+    if (!empty) {
+      container.innerHTML = `<div class="empty-state"></div>`;
+      empty = container.querySelector(":scope > .empty-state");
+    }
+    if (empty.textContent !== label) empty.textContent = label;
     return;
   }
   if (container.querySelector(":scope > .empty-state")) replaceElementChildren(container);
@@ -2806,16 +2889,26 @@ function renderWorkspaceAgentRows(container, workspaceId) {
 }
 
 function updateAgentRow(row, agent, workspaceId, bucket) {
+  const startupLoading = sessionStartupLocked();
   const summary = bucket.stores.get(agent.id)?.summary;
-  const active = sidebarAgentActive(summary);
+  const active = !startupLoading && sidebarAgentActive(summary);
   const label = agent.title || agent.id;
-  row.classList.toggle("active", workspaceId === state.workspaceId && agent.id === state.selectedAgent);
-  row.querySelector(".agent-dot").classList.toggle("active", active);
+  row.classList.toggle("startup-loading", startupLoading);
+  row.classList.toggle("active", !startupLoading
+    && workspaceId === state.workspaceId && agent.id === state.selectedAgent);
+  row.setAttribute("aria-busy", String(startupLoading));
+  const item = row.querySelector(".agent-item");
+  item.disabled = startupLoading;
+  item.title = startupLoading ? "正在加载会话" : "";
+  const dot = row.querySelector(".agent-dot");
+  dot.classList.toggle("startup-loading", startupLoading);
+  dot.classList.toggle("active", active);
   const title = row.querySelector(".agent-label");
   if (title.textContent !== label) title.textContent = label;
   const deleteButton = row.querySelector(".agent-delete");
-  deleteButton.setAttribute("aria-label", `删除 ${label}`);
-  deleteButton.title = `删除 ${label}`;
+  deleteButton.disabled = startupLoading;
+  deleteButton.setAttribute("aria-label", startupLoading ? `${label} 正在加载` : `删除 ${label}`);
+  deleteButton.title = startupLoading ? "正在加载会话" : `删除 ${label}`;
 }
 
 function createAgentRow(agent, workspaceId = state.workspaceId) {
@@ -2840,12 +2933,14 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
 }
 
 function selectWorkspaceAgent(workspaceId, agentId) {
+  if (sessionStartupLocked()) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
 }
 
 function selectAgent(id) {
+  if (sessionStartupLocked()) return;
   closeContextDrawer();
   closeMobileSidebar();
   closeUserMessageMenu();
@@ -5318,7 +5413,7 @@ elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", retryConnectionNow);
-elements.addAgent.addEventListener("click", () => { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); });
+elements.addAgent.addEventListener("click", () => { if (!sessionStartupLocked()) { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); } });
 elements.createWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("create"); });
 elements.openWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("open"); });
 elements.openSettings.addEventListener("click", () => { closeMobileSidebar(); void openGatewaySettings(); });

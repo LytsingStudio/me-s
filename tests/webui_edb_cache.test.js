@@ -98,7 +98,20 @@ describe("browser-local raw EDB cache", () => {
       expect(source).toContain("if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key)");
       expect(source).toContain("if (payload.reset || payload.events.length > 0) {");
       expect(source).toContain("persistAgentEdb(meta, store, Boolean(payload.reset))");
+      const hydrationStart = source.indexOf("async function hydrateEdbCache(snapshot) {");
+      const hydrationEnd = source.indexOf("\nfunction persistAgentEdb(", hydrationStart);
+      const hydration = source.slice(hydrationStart, hydrationEnd);
+      expect(hydration.indexOf("renderAgents();")).toBeGreaterThan(-1);
+      expect(hydration.indexOf("renderAgents();"))
+        .toBeLessThan(hydration.indexOf("await edbCache.loadScope(scope)"));
+      expect(source).toContain("startupPending: true");
+      expect(source).toContain("item.disabled = startupLoading");
+      expect(source).toContain("deleteButton.disabled = startupLoading");
     }
+
+    expect(gatewaySource).toContain('api("/api/snapshot", {}, workspaceId)');
+    expect(gatewaySource).toContain("function gatewayStartupReady()");
+    expect(gatewaySource).toContain("state.startupMetadataPending = true");
 
     for (const index of [directIndex, gatewayIndex]) {
       expect(index.indexOf('<script src="/edb-cache.js"></script>')).toBeGreaterThan(-1);
