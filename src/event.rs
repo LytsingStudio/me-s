@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as FmtWrite,
     fs::{self, File, OpenOptions},
     io::Write,
     path::{Path, PathBuf},
@@ -29,6 +30,8 @@ const MAX_RECORD_SIZE: usize = 64 * 1024 * 1024;
 
 pub type EventId = u64;
 pub type EventOrder = usize;
+pub const EDB_ID_BYTES: usize = 32;
+pub const EDB_ID_HEX_LENGTH: usize = EDB_ID_BYTES * 2;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EdbMutation {
@@ -49,6 +52,7 @@ pub const HOST_AGENT_TITLE_CHANGE: EventId = EventId::MAX;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EventKind {
+    EdbIdGeneration,
     AgentKindDef,
     AgentTurn,
     SystemPrompt,
@@ -81,6 +85,7 @@ pub enum EventKind {
 impl std::fmt::Display for EventKind {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
+            Self::EdbIdGeneration => "edb-id-generation",
             Self::AgentKindDef => "agent-kind-def",
             Self::AgentTurn => "agent-turn",
             Self::SystemPrompt => "system-prompt",
@@ -568,6 +573,13 @@ pub trait EventBase {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct EdbIdGenerationEvent {
+    pub id: EventId,
+    pub timestamp_ms: u64,
+    pub edb_id: String,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct AgentKindDefEvent {
     pub id: EventId,
     pub timestamp_ms: u64,
@@ -1050,6 +1062,7 @@ pub struct ImageContentEvent {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub enum Event {
+    EdbIdGeneration(EdbIdGenerationEvent),
     AgentKindDef(AgentKindDefEvent),
     AgentTurn(AgentTurnEvent),
     SystemPrompt(SystemPromptEvent),
@@ -1095,6 +1108,7 @@ impl Event {
 
     pub fn id(&self) -> EventId {
         match self {
+            Self::EdbIdGeneration(event) => event.id,
             Self::AgentKindDef(event) => event.id,
             Self::AgentTurn(event) => event.id,
             Self::SystemPrompt(event) => event.id,
@@ -1127,6 +1141,7 @@ impl Event {
 
     pub fn kind(&self) -> EventKind {
         match self {
+            Self::EdbIdGeneration(_) => EventKind::EdbIdGeneration,
             Self::AgentKindDef(_) => EventKind::AgentKindDef,
             Self::AgentTurn(_) => EventKind::AgentTurn,
             Self::SystemPrompt(_) => EventKind::SystemPrompt,
@@ -1159,6 +1174,7 @@ impl Event {
 
     pub fn timestamp_ms(&self) -> u64 {
         match self {
+            Self::EdbIdGeneration(event) => event.timestamp_ms,
             Self::AgentKindDef(event) => event.timestamp_ms,
             Self::AgentTurn(event) => event.timestamp_ms,
             Self::SystemPrompt(event) => event.timestamp_ms,
@@ -1187,6 +1203,41 @@ impl Event {
             Self::CloneCompleted(event) => event.timestamp_ms,
             Self::ImageContent(event) => event.timestamp_ms,
         }
+    }
+}
+
+#[allow(non_snake_case)]
+impl EventBase for EdbIdGenerationEvent {
+    fn getID(&self) -> EventId {
+        self.id
+    }
+
+    fn getTimestamp(&self) -> u64 {
+        self.timestamp_ms
+    }
+
+    fn getEventKind(&self) -> EventKind {
+        EventKind::EdbIdGeneration
+    }
+
+    fn getHash(&self) -> String {
+        stable_hash(self.id, self.timestamp_ms, 28, &[], &[], &[&self.edb_id])
+    }
+
+    fn getBriefString(&self) -> String {
+        format!(
+            "EdbIdGenerationEvent(edb_id={})",
+            abbreviated(&self.edb_id, 12)
+        )
+    }
+
+    fn getDetailString(&self) -> String {
+        format!(
+            "EdbIdGenerationEvent(id={}, timestamp_ms={}, edb_id={})",
+            self.id,
+            self.timestamp_ms,
+            quoted(&self.edb_id)
+        )
     }
 }
 
@@ -2428,6 +2479,7 @@ impl EventBase for ImageContentEvent {
 impl EventBase for Event {
     fn getID(&self) -> EventId {
         match self {
+            Self::EdbIdGeneration(event) => event.getID(),
             Self::AgentKindDef(event) => event.getID(),
             Self::AgentTurn(event) => event.getID(),
             Self::SystemPrompt(event) => event.getID(),
@@ -2464,6 +2516,7 @@ impl EventBase for Event {
 
     fn getEventKind(&self) -> EventKind {
         match self {
+            Self::EdbIdGeneration(event) => event.getEventKind(),
             Self::AgentKindDef(event) => event.getEventKind(),
             Self::AgentTurn(event) => event.getEventKind(),
             Self::SystemPrompt(event) => event.getEventKind(),
@@ -2496,6 +2549,7 @@ impl EventBase for Event {
 
     fn getHash(&self) -> String {
         match self {
+            Self::EdbIdGeneration(event) => event.getHash(),
             Self::AgentKindDef(event) => event.getHash(),
             Self::AgentTurn(event) => event.getHash(),
             Self::SystemPrompt(event) => event.getHash(),
@@ -2528,6 +2582,7 @@ impl EventBase for Event {
 
     fn getBriefString(&self) -> String {
         match self {
+            Self::EdbIdGeneration(event) => event.getBriefString(),
             Self::AgentKindDef(event) => event.getBriefString(),
             Self::AgentTurn(event) => event.getBriefString(),
             Self::SystemPrompt(event) => event.getBriefString(),
@@ -2560,6 +2615,7 @@ impl EventBase for Event {
 
     fn getDetailString(&self) -> String {
         match self {
+            Self::EdbIdGeneration(event) => event.getDetailString(),
             Self::AgentKindDef(event) => event.getDetailString(),
             Self::AgentTurn(event) => event.getDetailString(),
             Self::SystemPrompt(event) => event.getDetailString(),
@@ -2591,7 +2647,6 @@ impl EventBase for Event {
     }
 }
 
-#[derive(Default)]
 pub struct EventDataBase {
     events: Vec<Event>,
     file: Option<File>,
@@ -2602,9 +2657,27 @@ pub struct EventDataBase {
     last_mutation: Option<EdbMutation>,
 }
 
+impl Default for EventDataBase {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl EventDataBase {
     pub fn new() -> Self {
-        Self::default()
+        let identity = new_edb_id_event(
+            current_timestamp_ms().expect("system time must be available for an in-memory EDB"),
+        )
+        .expect("OS randomness must be available for an in-memory EDB");
+        Self {
+            events: vec![identity],
+            file: None,
+            path: None,
+            persisted_size_bytes: 0,
+            next_event_id: 1,
+            mutation_revision: 0,
+            last_mutation: None,
+        }
     }
 
     pub fn open(path: &Path) -> Result<Self> {
@@ -2623,6 +2696,7 @@ impl EventDataBase {
             }
             let (events, valid_len, _) = decode_file(&migration.bytes)?;
             validate_event_ids(&events)?;
+            validate_edb_identity(&events)?;
             migration.bytes.truncate(valid_len);
             edb_migration::commit(path, &migration.bytes)?;
             bytes = migration.bytes;
@@ -2632,6 +2706,7 @@ impl EventDataBase {
 
         let (events, valid_len, persisted_next_event_id) = decode_file(&bytes)?;
         validate_event_ids(&events)?;
+        validate_edb_identity(&events)?;
         if valid_len < bytes.len() {
             let recovery_file = OpenOptions::new().write(true).open(path)?;
             recovery_file.set_len(valid_len as u64)?;
@@ -2679,7 +2754,7 @@ impl EventDataBase {
         system_prompt: Option<String>,
     ) -> Result<EventId> {
         if !self.is_empty() {
-            return Err("AgentKindDefEvent must be the first EDB event".into());
+            return Err("AgentKindDefEvent must immediately follow EdbIdGenerationEvent".into());
         }
         let orchestrator = orchestrator.into();
         if orchestrator.is_empty() {
@@ -3803,8 +3878,9 @@ impl EventDataBase {
             .order_of(final_answer_event_id)
             .ok_or_else(|| format!("final answer event {final_answer_event_id} does not exist"))?;
         let mut events = self.events[..=end].to_vec();
-        let Some(Event::AgentKindDef(definition)) = events.first_mut() else {
-            return Err("cloned Agent EDB has no AgentKindDefEvent".into());
+        events[0] = new_edb_id_event(current_timestamp_ms()?)?;
+        let Some(Event::AgentKindDef(definition)) = events.get_mut(1) else {
+            return Err("cloned Agent EDB has no AgentKindDefEvent after its EDB ID".into());
         };
         if definition.kind == AgentKind::SubAgent {
             return Err("read-only sub-Agent history cannot be cloned from a UI operation".into());
@@ -3869,12 +3945,16 @@ impl EventDataBase {
         &self.events
     }
 
+    pub fn edb_id(&self) -> Result<&str> {
+        edb_id(self.events())
+    }
+
     pub fn len(&self) -> usize {
         self.events.len()
     }
 
     pub fn is_empty(&self) -> bool {
-        self.events.is_empty()
+        self.events.len() == 1 && matches!(self.events.first(), Some(Event::EdbIdGeneration(_)))
     }
 
     pub fn persisted_size_bytes(&self) -> u64 {
@@ -3943,6 +4023,7 @@ impl EventDataBase {
 
     fn replace_events(&mut self, events: Vec<Event>, mutation: EdbMutation) -> Result<()> {
         validate_event_ids(&events)?;
+        validate_edb_identity(&events)?;
 
         let persisted_size_bytes = if let Some(path) = &self.path {
             persist_replacement(path, &events, self.next_event_id, &mut self.file)?
@@ -3964,6 +4045,7 @@ impl EventDataBase {
             return Err(format!("EDB {} already exists", path.display()).into());
         }
         validate_event_ids(&events)?;
+        validate_edb_identity(&events)?;
         let next_event_id = events
             .last()
             .map(Event::id)
@@ -4061,8 +4143,17 @@ pub fn effective_ui_events(events: &[Event]) -> Result<Vec<&Event>> {
     effective_branch_events(events, true, false)
 }
 
+pub fn edb_id(events: &[Event]) -> Result<&str> {
+    validate_edb_identity(events)?;
+    match &events[0] {
+        Event::EdbIdGeneration(identity) => Ok(&identity.edb_id),
+        _ => unreachable!("validated EDB identity must be first"),
+    }
+}
+
 pub fn agent_kind_definition(events: &[Event]) -> Result<&AgentKindDefEvent> {
-    match events.first() {
+    validate_edb_identity(events)?;
+    match events.get(1) {
         Some(Event::AgentKindDef(definition)) => {
             if definition.orchestrator.is_empty() {
                 return Err("Agent definition requires an orchestrator".into());
@@ -4089,11 +4180,11 @@ pub fn agent_kind_definition(events: &[Event]) -> Result<&AgentKindDefEvent> {
             Ok(definition)
         }
         Some(event) => Err(format!(
-            "EDB must begin with AgentKindDefEvent, found {}",
+            "EDB ID must be immediately followed by AgentKindDefEvent, found {}",
             event.kind()
         )
         .into()),
-        None => Err("empty EDB has no AgentKindDefEvent".into()),
+        None => Err("EDB has no AgentKindDefEvent after its EDB ID".into()),
     }
 }
 
@@ -4185,7 +4276,7 @@ fn effective_branch_events(
     let mut active: Vec<&Event> = Vec::new();
     for event in events {
         match event {
-            Event::AgentKindDef(_) | Event::SystemPrompt(_) => {}
+            Event::EdbIdGeneration(_) | Event::AgentKindDef(_) | Event::SystemPrompt(_) => {}
             Event::ModelChanged(_) | Event::ReasoningEffortChanged(_) if !include_state_events => {}
             Event::ContextCleared(_) => {
                 active.clear();
@@ -4250,13 +4341,39 @@ fn without_errored_api_content(events: Vec<&Event>) -> Vec<&Event> {
         .collect()
 }
 
+fn current_timestamp_ms() -> Result<u64> {
+    Ok(u64::try_from(
+        SystemTime::now().duration_since(UNIX_EPOCH)?.as_millis(),
+    )?)
+}
+
+fn generate_edb_id() -> Result<String> {
+    let mut bytes = [0_u8; EDB_ID_BYTES];
+    getrandom::fill(&mut bytes)?;
+    let mut edb_id = String::with_capacity(EDB_ID_HEX_LENGTH);
+    for byte in bytes {
+        write!(&mut edb_id, "{byte:02x}").expect("writing hexadecimal into String cannot fail");
+    }
+    Ok(edb_id)
+}
+
+fn new_edb_id_event(timestamp_ms: u64) -> Result<Event> {
+    Ok(Event::EdbIdGeneration(EdbIdGenerationEvent {
+        id: 0,
+        timestamp_ms,
+        edb_id: generate_edb_id()?,
+    }))
+}
+
 fn initialize_file(path: &Path) -> Result<()> {
+    let identity = new_edb_id_event(current_timestamp_ms()?)?;
     let mut file = OpenOptions::new()
         .create(true)
         .truncate(true)
         .write(true)
         .open(path)?;
-    file.write_all(&encode_file_header(0))?;
+    file.write_all(&encode_file_header(1))?;
+    file.write_all(&encode_record(&identity)?)?;
     file.sync_data()?;
     Ok(())
 }
@@ -4485,6 +4602,38 @@ fn sync_parent_directory(_parent: &Path) -> Result<()> {
     Ok(())
 }
 
+fn validate_edb_id(edb_id: &str) -> Result<()> {
+    if edb_id.len() != EDB_ID_HEX_LENGTH
+        || !edb_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f'))
+    {
+        return Err(format!(
+            "EDB ID must contain exactly {EDB_ID_HEX_LENGTH} lowercase hexadecimal characters"
+        )
+        .into());
+    }
+    Ok(())
+}
+
+fn validate_edb_identity(events: &[Event]) -> Result<()> {
+    let Some(Event::EdbIdGeneration(identity)) = events.first() else {
+        return Err("EDB must begin with EdbIdGenerationEvent".into());
+    };
+    if identity.id != 0 {
+        return Err("EdbIdGenerationEvent must use EventId 0".into());
+    }
+    validate_edb_id(&identity.edb_id)?;
+    if events
+        .iter()
+        .skip(1)
+        .any(|event| matches!(event, Event::EdbIdGeneration(_)))
+    {
+        return Err("EDB must contain exactly one EdbIdGenerationEvent".into());
+    }
+    Ok(())
+}
+
 fn validate_event_ids(events: &[Event]) -> Result<()> {
     if events.windows(2).any(|pair| pair[0].id() >= pair[1].id()) {
         return Err("EDB EventIds must be unique and strictly increase by EventOrder".into());
@@ -4508,6 +4657,13 @@ fn encode_event(event: &Event) -> Vec<u8> {
 
 fn encode_event_body(event: &Event) -> Vec<u8> {
     match event {
+        Event::EdbIdGeneration(event) => {
+            let mut raw = Vec::with_capacity(10 + event.edb_id.len());
+            raw.push(28);
+            encode_varint(event.timestamp_ms, &mut raw);
+            raw.extend_from_slice(event.edb_id.as_bytes());
+            raw
+        }
         Event::AgentKindDef(event) => {
             let mut raw = Vec::new();
             raw.push(16);
@@ -4945,6 +5101,17 @@ fn decode_v37_file(bytes: &[u8]) -> Result<(Vec<Event>, usize, EventId)> {
     decode_file_records(bytes, false, CompactRecordFormat::StrategyV37)
 }
 
+fn decode_v40_file(bytes: &[u8]) -> Result<(Vec<Event>, usize, EventId)> {
+    if bytes.len() < FILE_HEADER_SIZE
+        || bytes.get(..4) != Some(b"MEDB")
+        || bytes[4] != 40
+        || bytes[5..8] != [0, 0, 0]
+    {
+        return Err("invalid EDB v40 file".into());
+    }
+    decode_file_records(bytes, false, CompactRecordFormat::Current)
+}
+
 fn decode_file_records(
     bytes: &[u8],
     legacy_agent_definition: bool,
@@ -5135,6 +5302,161 @@ pub(crate) fn migrate_compact_stage_count_v37_to_v38(bytes: Vec<u8>) -> Result<V
     Ok(migrated)
 }
 
+fn shift_event_id(event_id: &mut EventId) -> Result<()> {
+    if *event_id != HOST_AGENT_TITLE_CHANGE {
+        *event_id = event_id
+            .checked_add(1)
+            .ok_or("EventId exhausted during EDB ID migration")?;
+    }
+    Ok(())
+}
+
+fn shift_terminal_session_id(session_id: &mut String) -> Result<()> {
+    let Some(suffix) = session_id.strip_prefix("pty-") else {
+        return Ok(());
+    };
+    let event_id = suffix
+        .parse::<EventId>()
+        .map_err(|_| format!("invalid terminal session ID {session_id}"))?;
+    *session_id = format!(
+        "pty-{}",
+        event_id
+            .checked_add(1)
+            .ok_or("EventId exhausted during terminal session migration")?
+    );
+    Ok(())
+}
+
+fn shift_event_ids(event: &mut Event) -> Result<()> {
+    match event {
+        Event::EdbIdGeneration(_) => {
+            return Err("EDB v40 cannot contain EdbIdGenerationEvent".into());
+        }
+        Event::AgentKindDef(event) => shift_event_id(&mut event.id)?,
+        Event::AgentTurn(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.turn_id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::SystemPrompt(event) => shift_event_id(&mut event.id)?,
+        Event::UserPrompt(event) => shift_event_id(&mut event.id)?,
+        Event::ManagerPrompt(event) => shift_event_id(&mut event.id)?,
+        Event::ParentAgentPrompt(event) => shift_event_id(&mut event.id)?,
+        Event::FollowUpPrompt(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::AssistResponse(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::ApiStateUpdate(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.api_call_id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::ContextUsageEstimate(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.api_state_event_id)?;
+        }
+        Event::UserTurnAborted(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::ToolCall(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.api_call_id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::ToolInfoUpdate(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+            if let ToolInfoContent::Terminal(update) = &mut event.content {
+                shift_terminal_session_id(&mut update.session_id)?;
+            }
+        }
+        Event::ToolCallResult(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+        }
+        Event::TerminalSessionCreated(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+            shift_terminal_session_id(&mut event.session_id)?;
+        }
+        Event::TerminalSessionState(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_terminal_session_id(&mut event.session_id)?;
+        }
+        Event::ModelContextItem(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.api_call_id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::ModelChanged(event) => shift_event_id(&mut event.id)?,
+        Event::ReasoningEffortChanged(event) => shift_event_id(&mut event.id)?,
+        Event::ContextCleared(event) => shift_event_id(&mut event.id)?,
+        Event::WorkMapMutation(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+        }
+        Event::WorkMapPendingReminder(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::CompactStateUpdate(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.compact_id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+            shift_event_id(&mut event.prompt_id)?;
+        }
+        Event::SystemStaticPromptChange(event) => shift_event_id(&mut event.id)?,
+        Event::AgentTitleChanged(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+        }
+        Event::CloneCompleted(event) => shift_event_id(&mut event.id)?,
+        Event::ImageContent(event) => {
+            shift_event_id(&mut event.id)?;
+            shift_event_id(&mut event.tool_call_id)?;
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn migrate_edb_id_v40_to_v41(bytes: Vec<u8>) -> Result<Vec<u8>> {
+    if bytes.len() < FILE_HEADER_SIZE || bytes.get(..4) != Some(b"MEDB") || bytes[4] != 40 {
+        return Err("EDB ID migration requires an EDB v40 file".into());
+    }
+    let (mut events, _, persisted_next_event_id) = decode_v40_file(&bytes)?;
+    validate_event_ids(&events)?;
+    let next_after_events = events
+        .last()
+        .map(Event::id)
+        .map_or(Ok(0), |id| id.checked_add(1).ok_or("EventId exhausted"))?;
+    let next_event_id = persisted_next_event_id
+        .max(next_after_events)
+        .checked_add(1)
+        .ok_or("EventId exhausted during EDB ID migration")?;
+    let timestamp_ms = events
+        .first()
+        .map(Event::timestamp_ms)
+        .map_or_else(current_timestamp_ms, Ok)?;
+    for event in &mut events {
+        shift_event_ids(event)?;
+    }
+    events.insert(0, new_edb_id_event(timestamp_ms)?);
+    validate_event_ids(&events)?;
+    validate_edb_identity(&events)?;
+
+    let mut migrated = encode_file_header(next_event_id).to_vec();
+    migrated[4] = 41;
+    for event in &events {
+        migrated.extend(encode_record(event)?);
+    }
+    Ok(migrated)
+}
+
 #[cfg(test)]
 fn decode_event(raw: &[u8]) -> Result<Event> {
     decode_event_with_format(raw, false, CompactRecordFormat::Current)
@@ -5151,6 +5473,15 @@ fn decode_event_with_format(
     let (timestamp_ms, consumed) = decode_varint(body)?;
     let body = &body[consumed..];
     match kind {
+        28 => {
+            let edb_id = String::from_utf8(body.to_vec())?;
+            validate_edb_id(&edb_id)?;
+            Ok(Event::EdbIdGeneration(EdbIdGenerationEvent {
+                id,
+                timestamp_ms,
+                edb_id,
+            }))
+        }
         16 => {
             let (&kind, body) = body.split_first().ok_or("missing AgentKindDefEvent kind")?;
             let kind = AgentKind::from_code(kind)?;
@@ -5806,9 +6137,22 @@ mod tests {
         std::env::temp_dir().join(format!("me-edb-{name}-{}", std::process::id()))
     }
 
+    fn rewrite_as_current_record_version(path: &Path, version: u8) {
+        let edb = EventDataBase::open(path).unwrap();
+        let events = edb.events().iter().skip(1).cloned().collect::<Vec<_>>();
+        let next_event_id = edb.next_event_id();
+        drop(edb);
+        let mut bytes = encode_file_header(next_event_id).to_vec();
+        bytes[4] = version;
+        for event in &events {
+            bytes.extend(encode_record(event).unwrap());
+        }
+        fs::write(path, bytes).unwrap();
+    }
+
     fn rewrite_as_legacy_agent_definition(path: &Path, version: u8) {
         let edb = EventDataBase::open(path).unwrap();
-        let events = edb.events().to_vec();
+        let events = edb.events().iter().skip(1).cloned().collect::<Vec<_>>();
         let next_event_id = edb.next_event_id();
         drop(edb);
         let mut bytes = encode_file_header(next_event_id).to_vec();
@@ -5820,37 +6164,136 @@ mod tests {
     }
 
     #[test]
-    fn assigns_continuous_ids_from_zero() {
+    fn reserves_event_zero_for_edb_id_then_assigns_continuous_ids() {
         let mut edb = EventDataBase::new();
-        assert_eq!(edb.append_user_prompt("hello").unwrap(), 0);
-        assert_eq!(edb.append_api_requesting(0).unwrap(), 1);
+        assert!(matches!(edb.get(0), Some(Event::EdbIdGeneration(_))));
+        assert_eq!(edb.edb_id().unwrap().len(), EDB_ID_HEX_LENGTH);
+        let prompt = edb.append_user_prompt("hello").unwrap();
+        assert_eq!(prompt, 1);
+        let api = edb.append_api_requesting(prompt).unwrap();
+        assert_eq!(api, 2);
         assert_eq!(
-            edb.append_api_state(1, 0, ApiState::Streaming, "").unwrap(),
-            2
+            edb.append_api_state(api, prompt, ApiState::Streaming, "")
+                .unwrap(),
+            3
         );
-        assert_eq!(edb.append_assist_response(0, "world", true).unwrap(), 3);
         assert_eq!(
-            edb.append_api_state(1, 0, ApiState::Completed, "").unwrap(),
+            edb.append_assist_response(prompt, "world", true).unwrap(),
             4
         );
-        assert_eq!(edb.get(0).unwrap().kind(), EventKind::UserPrompt);
-        assert_eq!(edb.get(1).unwrap().kind(), EventKind::ApiStateUpdate);
-        assert!(edb.has_assist_response(0));
+        assert_eq!(
+            edb.append_api_state(api, prompt, ApiState::Completed, "")
+                .unwrap(),
+            5
+        );
+        assert_eq!(edb.get(prompt).unwrap().kind(), EventKind::UserPrompt);
+        assert_eq!(edb.get(api).unwrap().kind(), EventKind::ApiStateUpdate);
+        assert!(edb.has_assist_response(prompt));
         assert_eq!(edb.get(0).unwrap().getHash().len(), 64);
         assert!(edb.get(0).unwrap().getTimestamp() > 0);
         assert!(
             edb.events()
                 .windows(2)
-                .all(|events| events[0].getTimestamp() <= events[1].getTimestamp())
+                .all(|events| events[0].id() < events[1].id())
         );
-        assert!(edb.get(0).unwrap().getBriefString().contains("hello"));
+        assert!(edb.get(prompt).unwrap().getBriefString().contains("hello"));
+        assert!(edb.get(5).unwrap().getBriefString().contains("completed"));
+    }
+
+    #[test]
+    fn edb_ids_are_canonical_random_and_preserved_by_reopen_and_copy() {
+        let first = EventDataBase::new();
+        let first_id = first.edb_id().unwrap();
+        assert_eq!(first_id.len(), EDB_ID_HEX_LENGTH);
         assert!(
-            edb.get(0)
-                .unwrap()
-                .getDetailString()
-                .contains("timestamp_ms=")
+            first_id
+                .bytes()
+                .all(|byte| matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
         );
-        assert!(edb.get(4).unwrap().getBriefString().contains("completed"));
+        assert_ne!(first_id, EventDataBase::new().edb_id().unwrap());
+
+        let directory = temporary_path("edb-id-copy");
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let source_path = directory.join("source.edb");
+        let copy_path = directory.join("copy.edb");
+        let persisted_id = {
+            let mut edb = EventDataBase::open(&source_path).unwrap();
+            let id = edb.edb_id().unwrap().to_owned();
+            edb.append_user_prompt("persist identity").unwrap();
+            id
+        };
+        fs::copy(&source_path, &copy_path).unwrap();
+        assert_eq!(
+            fs::read(&source_path).unwrap(),
+            fs::read(&copy_path).unwrap()
+        );
+
+        let source = EventDataBase::open(&source_path).unwrap();
+        let copied = EventDataBase::open(&copy_path).unwrap();
+        assert_eq!(source.edb_id().unwrap(), persisted_id);
+        assert_eq!(copied.edb_id().unwrap(), persisted_id);
+        assert!(matches!(
+            source.events().first(),
+            Some(Event::EdbIdGeneration(event))
+                if event.id == 0 && event.edb_id == persisted_id
+        ));
+        drop(source);
+        drop(copied);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn edb_identity_validation_rejects_missing_invalid_and_duplicate_events() {
+        let identity = EventDataBase::new().events()[0].clone();
+
+        let missing = vec![Event::UserPrompt(UserPromptEvent {
+            id: 0,
+            timestamp_ms: 1,
+            content: "missing identity".to_owned(),
+        })];
+        assert!(
+            edb_id(&missing)
+                .unwrap_err()
+                .to_string()
+                .contains("must begin")
+        );
+
+        let mut invalid_id = vec![identity.clone()];
+        let Event::EdbIdGeneration(event) = &mut invalid_id[0] else {
+            unreachable!()
+        };
+        event.id = 1;
+        assert!(
+            edb_id(&invalid_id)
+                .unwrap_err()
+                .to_string()
+                .contains("EventId 0")
+        );
+
+        let mut invalid_format = vec![identity.clone()];
+        let Event::EdbIdGeneration(event) = &mut invalid_format[0] else {
+            unreachable!()
+        };
+        event.edb_id = "A".repeat(EDB_ID_HEX_LENGTH);
+        assert!(
+            edb_id(&invalid_format)
+                .unwrap_err()
+                .to_string()
+                .contains("lowercase hexadecimal")
+        );
+
+        let mut duplicate = identity.clone();
+        let Event::EdbIdGeneration(event) = &mut duplicate else {
+            unreachable!()
+        };
+        event.id = 1;
+        assert!(
+            edb_id(&[identity, duplicate])
+                .unwrap_err()
+                .to_string()
+                .contains("exactly one")
+        );
     }
 
     #[test]
@@ -5919,11 +6362,12 @@ mod tests {
         let directory = temporary_path("agent-title");
         let path = directory.join("main.edb");
         let prompt_id;
+        let call_id;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
             prompt_id = edb.append_user_prompt("investigate input latency").unwrap();
             let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
-            let call_id = edb
+            call_id = edb
                 .append_tool_call(
                     api_call_id,
                     prompt_id,
@@ -5956,7 +6400,7 @@ mod tests {
         );
         assert!(matches!(
             edb.events().iter().find(|event| event.kind() == EventKind::AgentTitleChanged),
-            Some(Event::AgentTitleChanged(changed)) if changed.tool_call_id == 2
+            Some(Event::AgentTitleChanged(changed)) if changed.tool_call_id == call_id
         ));
         edb.rewind_to_event(prompt_id).unwrap();
         assert_eq!(crate::agent_title::current_title(edb.events()), None);
@@ -6012,16 +6456,20 @@ mod tests {
                 )
                 .unwrap();
 
-            assert!(latest_system_static_prompt_change(&edb.events()[..0]).is_none());
+            let custom_one_end = edb.order_of(custom_one).unwrap() + 1;
+            let restored_default_end = edb.order_of(restored_default).unwrap() + 1;
+            assert!(
+                latest_system_static_prompt_change(&edb.events()[..custom_one_end - 1]).is_none()
+            );
             assert!(matches!(
-                latest_system_static_prompt_change(&edb.events()[..1]),
+                latest_system_static_prompt_change(&edb.events()[..custom_one_end]),
                 Some(change)
                     if change.id == custom_one
                         && change.mode == SystemStaticPromptMode::Custom
                         && change.content.as_deref() == Some("You are calm.\n准确回答。")
             ));
             assert!(matches!(
-                latest_system_static_prompt_change(&edb.events()[..2]),
+                latest_system_static_prompt_change(&edb.events()[..restored_default_end]),
                 Some(change)
                     if change.id == restored_default
                         && change.mode == SystemStaticPromptMode::Default
@@ -6136,23 +6584,140 @@ mod tests {
     }
 
     #[test]
-    fn opening_v39_atomically_migrates_to_v40_without_changing_events() {
+    fn opening_v39_inserts_a_new_edb_id_and_preserves_content() {
         let directory = temporary_path("migrate-v39");
         let path = directory.join("main.edb");
-        let expected;
+        let old_edb_id;
+        let expected_next;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
+            old_edb_id = edb.edb_id().unwrap().to_owned();
             edb.append_user_prompt("preserve v39").unwrap();
-            expected = edb.events().to_vec();
+            expected_next = edb.next_event_id() + 1;
         }
-        let mut bytes = fs::read(&path).unwrap();
-        bytes[4] = 39;
+        rewrite_as_current_record_version(&path, 39);
+
+        let migrated = EventDataBase::open(&path).unwrap();
+        assert_ne!(migrated.edb_id().unwrap(), old_edb_id);
+        assert_eq!(migrated.next_event_id(), expected_next);
+        assert!(migrated.events().iter().any(|event| {
+            matches!(event, Event::UserPrompt(prompt) if prompt.content == "preserve v39")
+        }));
+        assert_eq!(fs::read(&path).unwrap()[4], 41);
+        drop(migrated);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_v40_shifts_event_references_terminal_ids_and_next_id_once() {
+        let directory = temporary_path("migrate-v40-references");
+        let _ = fs::remove_dir_all(&directory);
+        fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("main.edb");
+        let events = vec![
+            Event::UserPrompt(UserPromptEvent {
+                id: 0,
+                timestamp_ms: 1,
+                content: "run".to_owned(),
+            }),
+            Event::ApiStateUpdate(ApiStateUpdateEvent {
+                id: 1,
+                timestamp_ms: 2,
+                api_call_id: 1,
+                prompt_id: 0,
+                state: ApiState::Requesting,
+                retry_count: 0,
+                retry_limit: 0,
+                usage: None,
+                detail: String::new(),
+            }),
+            Event::ToolCall(ToolCallEvent {
+                id: 2,
+                timestamp_ms: 3,
+                api_call_id: 1,
+                prompt_id: 0,
+                provider_call_id: "provider-call".to_owned(),
+                name: "Terminal.Create".to_owned(),
+                arguments: "{}".to_owned(),
+            }),
+            Event::TerminalSessionCreated(TerminalSessionCreatedEvent {
+                id: 3,
+                timestamp_ms: 4,
+                tool_call_id: 2,
+                session_id: "pty-2".to_owned(),
+                shell: "/bin/zsh".to_owned(),
+                cwd: "/workspace".to_owned(),
+                width: 80,
+                height: 24,
+            }),
+            Event::ToolInfoUpdate(ToolInfoUpdateEvent {
+                id: 4,
+                timestamp_ms: 5,
+                tool_call_id: 2,
+                stream: ToolOutputStream::Terminal,
+                content: ToolInfoContent::Terminal({
+                    let mut update = crate::terminal::test_update("ready");
+                    update.session_id = "pty-2".to_owned();
+                    update
+                }),
+            }),
+            Event::TerminalSessionState(TerminalSessionStateEvent {
+                id: 5,
+                timestamp_ms: 6,
+                session_id: "pty-2".to_owned(),
+                state: TerminalSessionState::Lost,
+                exit_code: None,
+                detail: "lost".to_owned(),
+            }),
+        ];
+        let mut bytes = encode_file_header(9).to_vec();
+        bytes[4] = 40;
+        for event in &events {
+            bytes.extend(encode_record(event).unwrap());
+        }
         fs::write(&path, bytes).unwrap();
 
         let migrated = EventDataBase::open(&path).unwrap();
-        assert_eq!(migrated.events(), expected);
-        assert_eq!(fs::read(&path).unwrap()[4], 40);
+        assert_eq!(
+            migrated.events().iter().map(Event::id).collect::<Vec<_>>(),
+            vec![0, 1, 2, 3, 4, 5, 6]
+        );
+        assert_eq!(migrated.next_event_id(), 10);
+        assert!(matches!(
+            migrated.get(2),
+            Some(Event::ApiStateUpdate(event))
+                if event.api_call_id == 2 && event.prompt_id == 1
+        ));
+        assert!(matches!(
+            migrated.get(3),
+            Some(Event::ToolCall(event))
+                if event.api_call_id == 2 && event.prompt_id == 1
+        ));
+        assert!(matches!(
+            migrated.get(4),
+            Some(Event::TerminalSessionCreated(event))
+                if event.tool_call_id == 3 && event.session_id == "pty-3"
+        ));
+        assert!(matches!(
+            migrated.get(5),
+            Some(Event::ToolInfoUpdate(event))
+                if event.tool_call_id == 3
+                    && event.content.terminal().is_some_and(|update| update.session_id == "pty-3")
+        ));
+        assert!(matches!(
+            migrated.get(6),
+            Some(Event::TerminalSessionState(event)) if event.session_id == "pty-3"
+        ));
+        assert_eq!(fs::read(&path).unwrap()[4], 41);
+        let migrated_id = migrated.edb_id().unwrap().to_owned();
+        let migrated_bytes = fs::read(&path).unwrap();
         drop(migrated);
+
+        let reopened = EventDataBase::open(&path).unwrap();
+        assert_eq!(reopened.edb_id().unwrap(), migrated_id);
+        assert_eq!(reopened.next_event_id(), 10);
+        drop(reopened);
+        assert_eq!(fs::read(&path).unwrap(), migrated_bytes);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -6234,15 +6799,19 @@ mod tests {
         let path = directory.join("main.edb");
         let long_content = "repeat ".repeat(1024);
         let valid_len;
+        let response_id;
+        let prompt_id;
         let expected_hash;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            assert_eq!(edb.persisted_size_bytes(), FILE_HEADER_SIZE as u64);
-            edb.append_user_prompt("hello").unwrap();
-            edb.append_assist_response(0, &long_content, true).unwrap();
+            assert!(edb.persisted_size_bytes() > FILE_HEADER_SIZE as u64);
+            prompt_id = edb.append_user_prompt("hello").unwrap();
+            response_id = edb
+                .append_assist_response(prompt_id, &long_content, true)
+                .unwrap();
             valid_len = path.metadata().unwrap().len();
             assert_eq!(edb.persisted_size_bytes(), valid_len);
-            expected_hash = edb.get(1).unwrap().getHash();
+            expected_hash = edb.get(response_id).unwrap().getHash();
             assert!(valid_len < long_content.len() as u64);
         }
 
@@ -6251,15 +6820,14 @@ mod tests {
         drop(file);
 
         let edb = EventDataBase::open(&path).unwrap();
-        assert_eq!(edb.len(), 2);
+        assert_eq!(edb.len(), 3);
         assert_eq!(path.metadata().unwrap().len(), valid_len);
         assert_eq!(edb.persisted_size_bytes(), valid_len);
-        assert_eq!(edb.get(1).unwrap().getHash(), expected_hash);
+        assert_eq!(edb.get(response_id).unwrap().getHash(), expected_hash);
         assert!(matches!(
-            edb.get(1),
+            edb.get(response_id),
             Some(Event::AssistResponse(event))
-                if event.id == 1
-                    && event.prompt_id == 0
+                if event.prompt_id == prompt_id
                     && event.content == long_content
                     && event.finished
                     && event.timestamp_ms > 0
@@ -6269,113 +6837,82 @@ mod tests {
     }
 
     #[test]
-    fn opening_v29_atomically_migrates_to_current_without_creating_new_events() {
+    fn opening_v29_atomically_inserts_edb_id_and_preserves_events() {
         let directory = temporary_path("migrate-v29");
         let path = directory.join("main.edb");
-        let expected_hashes;
-        let expected_next_id;
+        let expected_next;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            edb.append_user_prompt("preserve me").unwrap();
-            edb.append_assist_response(0, "preserved", true).unwrap();
-            expected_hashes = edb
-                .events()
-                .iter()
-                .map(EventBase::getHash)
-                .collect::<Vec<_>>();
-            expected_next_id = edb.next_event_id();
+            let prompt = edb.append_user_prompt("preserve me").unwrap();
+            edb.append_assist_response(prompt, "preserved", true)
+                .unwrap();
+            expected_next = edb.next_event_id() + 1;
         }
-        let mut v29 = fs::read(&path).unwrap();
-        v29[4] = 29;
-        fs::write(&path, &v29).unwrap();
+        rewrite_as_current_record_version(&path, 29);
 
         let migrated = EventDataBase::open(&path).unwrap();
+        assert_eq!(migrated.next_event_id(), expected_next);
         assert_eq!(
-            migrated
-                .events()
-                .iter()
-                .map(EventBase::getHash)
-                .collect::<Vec<_>>(),
-            expected_hashes
+            migrated.events().first().unwrap().kind(),
+            EventKind::EdbIdGeneration
         );
-        assert_eq!(migrated.next_event_id(), expected_next_id);
-        assert_eq!(crate::agent_title::current_title(migrated.events()), None);
-        assert!(
-            !migrated
-                .events()
-                .iter()
-                .any(|event| matches!(event, Event::CloneCompleted(_)))
-        );
+        let prompt = migrated
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                Event::UserPrompt(prompt) if prompt.content == "preserve me" => Some(prompt.id),
+                _ => None,
+            })
+            .unwrap();
+        assert!(migrated.events().iter().any(|event| {
+            matches!(event, Event::AssistResponse(response) if response.prompt_id == prompt && response.content == "preserved")
+        }));
         assert_eq!(&fs::read(&path).unwrap()[..FILE_MAGIC.len()], FILE_MAGIC);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn opening_v30_atomically_migrates_to_current_without_creating_new_events() {
+    fn opening_v30_atomically_inserts_edb_id_and_preserves_events() {
         let directory = temporary_path("migrate-v30");
         let path = directory.join("main.edb");
-        let expected_hashes;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
             edb.append_user_prompt("preserve v30").unwrap();
-            expected_hashes = edb
-                .events()
-                .iter()
-                .map(EventBase::getHash)
-                .collect::<Vec<_>>();
         }
-        let mut v30 = fs::read(&path).unwrap();
-        v30[4] = 30;
-        fs::write(&path, &v30).unwrap();
+        rewrite_as_current_record_version(&path, 30);
 
         let migrated = EventDataBase::open(&path).unwrap();
         assert_eq!(
-            migrated
-                .events()
-                .iter()
-                .map(EventBase::getHash)
-                .collect::<Vec<_>>(),
-            expected_hashes
+            migrated.events().first().unwrap().kind(),
+            EventKind::EdbIdGeneration
         );
-        assert!(
-            !migrated
-                .events()
-                .iter()
-                .any(|event| matches!(event, Event::CloneCompleted(_)))
-        );
+        assert!(migrated.events().iter().any(|event| {
+            matches!(event, Event::UserPrompt(prompt) if prompt.content == "preserve v30")
+        }));
         assert_eq!(&fs::read(&path).unwrap()[..FILE_MAGIC.len()], FILE_MAGIC);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
-    fn opening_v31_atomically_migrates_to_current_without_creating_new_events() {
+    fn opening_v31_atomically_inserts_edb_id_and_preserves_events() {
         let directory = temporary_path("migrate-v31");
         let path = directory.join("main.edb");
-        let expected_hashes;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
             edb.append_user_prompt("preserve v31").unwrap();
-            expected_hashes = edb
-                .events()
-                .iter()
-                .map(EventBase::getHash)
-                .collect::<Vec<_>>();
         }
-        let mut v31 = fs::read(&path).unwrap();
-        v31[4] = 31;
-        fs::write(&path, &v31).unwrap();
+        rewrite_as_current_record_version(&path, 31);
 
         let migrated = EventDataBase::open(&path).unwrap();
         assert_eq!(
-            migrated
-                .events()
-                .iter()
-                .map(EventBase::getHash)
-                .collect::<Vec<_>>(),
-            expected_hashes
+            migrated.events().first().unwrap().kind(),
+            EventKind::EdbIdGeneration
         );
+        assert!(migrated.events().iter().any(|event| {
+            matches!(event, Event::UserPrompt(prompt) if prompt.content == "preserve v31")
+        }));
         assert_eq!(&fs::read(&path).unwrap()[..FILE_MAGIC.len()], FILE_MAGIC);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
@@ -6408,11 +6945,11 @@ mod tests {
             rewrite_as_legacy_agent_definition(&path, 32);
 
             let migrated = EventDataBase::open(&path).unwrap();
-            assert_eq!(migrated.events()[2].kind(), expected_kind);
-            assert_eq!(
-                migrated.events()[2].root_prompt_content(),
-                Some("internal instruction")
-            );
+            let migrated_prompt = migrated.events().iter().find(|event| {
+                event.kind() == expected_kind
+                    && event.root_prompt_content() == Some("internal instruction")
+            });
+            assert!(migrated_prompt.is_some());
             assert_eq!(&fs::read(&path).unwrap()[..FILE_MAGIC.len()], FILE_MAGIC);
             drop(migrated);
             fs::remove_dir_all(directory).unwrap();
@@ -6439,7 +6976,7 @@ mod tests {
         ] {
             let directory = temporary_path(&format!("migrate-v34-{name}"));
             let path = directory.join("agent.edb");
-            let expected_hash;
+            let expected_kind;
             {
                 let mut edb = EventDataBase::open(&path).unwrap();
                 edb.append_agent_kind_def(
@@ -6452,14 +6989,14 @@ mod tests {
                 if let Some(system_prompt) = system_prompt {
                     edb.append_system_prompt(system_prompt).unwrap();
                 }
-                expected_hash = edb.events()[0].getHash();
+                expected_kind = kind;
             }
             rewrite_as_legacy_agent_definition(&path, 34);
 
             let migrated = EventDataBase::open(&path).unwrap();
             let definition = agent_kind_definition(migrated.events()).unwrap();
+            assert_eq!(definition.kind, expected_kind);
             assert_eq!(definition.orchestrator, orchestrator);
-            assert_eq!(definition.getHash(), expected_hash);
             assert_eq!(&fs::read(&path).unwrap()[..FILE_MAGIC.len()], FILE_MAGIC);
             drop(migrated);
             fs::remove_dir_all(directory).unwrap();
@@ -6475,8 +7012,8 @@ mod tests {
             edb.append_user_prompt("must survive").unwrap();
         }
 
+        rewrite_as_current_record_version(&path, 29);
         let mut corrupt_v29 = fs::read(&path).unwrap();
-        corrupt_v29[4] = 29;
         *corrupt_v29.last_mut().unwrap() ^= 0xff;
         fs::write(&path, &corrupt_v29).unwrap();
         assert!(EventDataBase::open(&path).is_err());
@@ -6499,21 +7036,24 @@ mod tests {
     fn v29_migration_recovers_an_uncommitted_partial_tail() {
         let directory = temporary_path("migration-partial-tail");
         let path = directory.join("main.edb");
-        let committed_len;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
             edb.append_user_prompt("committed").unwrap();
-            committed_len = edb.persisted_size_bytes();
         }
+        rewrite_as_current_record_version(&path, 29);
         let mut v29 = fs::read(&path).unwrap();
-        v29[4] = 29;
         v29.extend_from_slice(&[1, 2, 3]);
         fs::write(&path, &v29).unwrap();
 
         let migrated = EventDataBase::open(&path).unwrap();
-        assert_eq!(migrated.len(), 1);
-        assert_eq!(migrated.persisted_size_bytes(), committed_len);
-        assert_eq!(path.metadata().unwrap().len(), committed_len);
+        assert_eq!(migrated.len(), 2);
+        assert_eq!(
+            path.metadata().unwrap().len(),
+            migrated.persisted_size_bytes()
+        );
+        assert!(migrated.events().iter().any(|event| {
+            matches!(event, Event::UserPrompt(prompt) if prompt.content == "committed")
+        }));
         assert_eq!(&fs::read(&path).unwrap()[..FILE_MAGIC.len()], FILE_MAGIC);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
@@ -6523,40 +7063,48 @@ mod tests {
     fn persists_api_state_updates() {
         let directory = temporary_path("api-state");
         let path = directory.join("main.edb");
+        let error_id;
+        let retry_id;
+        let prompt_id;
+        let api_call_id;
         let expected_hashes;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            edb.append_user_prompt("hello").unwrap();
-            let api_call_id = edb.append_api_requesting(0).unwrap();
-            edb.append_api_state(api_call_id, 0, ApiState::Streaming, "")
+            prompt_id = edb.append_user_prompt("hello").unwrap();
+            api_call_id = edb.append_api_requesting(prompt_id).unwrap();
+            edb.append_api_state(api_call_id, prompt_id, ApiState::Streaming, "")
                 .unwrap();
-            edb.append_api_state_with_usage(
-                api_call_id,
-                0,
-                ApiState::Error,
-                Some(ApiUsage {
-                    input_tokens: 8,
-                    output_tokens: 2,
-                    total_tokens: 10,
-                }),
-                "connection lost",
-            )
-            .unwrap();
-            edb.append_api_retrying(api_call_id, 0, 1, 10, "connection lost")
+            error_id = edb
+                .append_api_state_with_usage(
+                    api_call_id,
+                    prompt_id,
+                    ApiState::Error,
+                    Some(ApiUsage {
+                        input_tokens: 8,
+                        output_tokens: 2,
+                        total_tokens: 10,
+                    }),
+                    "connection lost",
+                )
                 .unwrap();
-            expected_hashes = [edb.get(3).unwrap().getHash(), edb.get(4).unwrap().getHash()];
+            retry_id = edb
+                .append_api_retrying(api_call_id, prompt_id, 1, 10, "connection lost")
+                .unwrap();
+            expected_hashes = [
+                edb.get(error_id).unwrap().getHash(),
+                edb.get(retry_id).unwrap().getHash(),
+            ];
         }
 
         let edb = EventDataBase::open(&path).unwrap();
-        assert_eq!(edb.len(), 5);
-        assert_eq!(edb.get(3).unwrap().getHash(), expected_hashes[0]);
-        assert_eq!(edb.get(4).unwrap().getHash(), expected_hashes[1]);
+        assert_eq!(edb.len(), 6);
+        assert_eq!(edb.get(error_id).unwrap().getHash(), expected_hashes[0]);
+        assert_eq!(edb.get(retry_id).unwrap().getHash(), expected_hashes[1]);
         assert!(matches!(
-            edb.get(3),
+            edb.get(error_id),
             Some(Event::ApiStateUpdate(event))
-                if event.id == 3
-                    && event.api_call_id == 1
-                    && event.prompt_id == 0
+                if event.api_call_id == api_call_id
+                    && event.prompt_id == prompt_id
                     && event.state == ApiState::Error
                     && event.usage == Some(ApiUsage {
                         input_tokens: 8,
@@ -6567,20 +7115,25 @@ mod tests {
                     && event.timestamp_ms > 0
         ));
         assert!(
-            edb.get(3)
+            edb.get(error_id)
                 .unwrap()
                 .getDetailString()
                 .contains("total_tokens=10")
         );
         assert!(matches!(
-            edb.get(4),
+            edb.get(retry_id),
             Some(Event::ApiStateUpdate(event))
-                if event.api_call_id == 1
+                if event.api_call_id == api_call_id
                     && event.state == ApiState::Retrying
                     && event.retry_count == 1
                     && event.retry_limit == 10
         ));
-        assert!(edb.get(4).unwrap().getBriefString().contains("retry=1/10"));
+        assert!(
+            edb.get(retry_id)
+                .unwrap()
+                .getBriefString()
+                .contains("retry=1/10")
+        );
         drop(edb);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -6698,17 +7251,19 @@ mod tests {
     fn persists_user_turn_abort_with_stable_relation_and_descriptions() {
         let directory = temporary_path("turn-abort");
         let path = directory.join("main.edb");
+        let prompt_id;
+        let abort_id;
         let expected_hash;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            let prompt_id = edb.append_user_prompt("stop this turn").unwrap();
-            let abort_id = edb.append_user_turn_aborted(prompt_id).unwrap();
+            prompt_id = edb.append_user_prompt("stop this turn").unwrap();
+            abort_id = edb.append_user_turn_aborted(prompt_id).unwrap();
             expected_hash = edb.get(abort_id).unwrap().getHash();
             assert!(
                 edb.get(abort_id)
                     .unwrap()
                     .getBriefString()
-                    .contains("prompt_id=0")
+                    .contains(&format!("prompt_id={prompt_id}"))
             );
             assert!(
                 edb.get(abort_id)
@@ -6720,11 +7275,11 @@ mod tests {
 
         let edb = EventDataBase::open(&path).unwrap();
         assert!(matches!(
-            edb.get(1),
+            edb.get(abort_id),
             Some(Event::UserTurnAborted(event))
-                if event.prompt_id == 0 && event.timestamp_ms > 0
+                if event.prompt_id == prompt_id && event.timestamp_ms > 0
         ));
-        assert_eq!(edb.get(1).unwrap().getHash(), expected_hash);
+        assert_eq!(edb.get(abort_id).unwrap().getHash(), expected_hash);
         drop(edb);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -6733,16 +7288,23 @@ mod tests {
     fn persists_prompt_and_tool_events() {
         let directory = temporary_path("tool-events");
         let path = directory.join("main.edb");
+        let system_id;
+        let tool_call_id;
+        let created_id;
+        let info_id;
+        let result_id;
+        let state_id;
+        let session_id;
         let hashes;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            edb.append_system_prompt("tool").unwrap();
+            system_id = edb.append_system_prompt("tool").unwrap();
             let prompt_id = edb.append_user_prompt("run").unwrap();
             let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
             edb.append_api_state(api_call_id, prompt_id, ApiState::Streaming, "")
                 .unwrap();
             edb.append_assist_response(prompt_id, "", true).unwrap();
-            let tool_call_id = edb
+            tool_call_id = edb
                 .append_tool_call(
                     api_call_id,
                     prompt_id,
@@ -6751,33 +7313,38 @@ mod tests {
                     "{}",
                 )
                 .unwrap();
+            session_id = format!("pty-{tool_call_id}");
             edb.append_api_state(api_call_id, prompt_id, ApiState::Completed, "")
                 .unwrap();
-            edb.append_terminal_session_created(
-                tool_call_id,
-                "pty-5",
-                "/bin/zsh",
-                "/workspace",
-                120,
-                40,
-            )
-            .unwrap();
-            edb.append_tool_info(tool_call_id, ToolOutputStream::Stdout, "ready")
+            created_id = edb
+                .append_terminal_session_created(
+                    tool_call_id,
+                    session_id.clone(),
+                    "/bin/zsh",
+                    "/workspace",
+                    120,
+                    40,
+                )
                 .unwrap();
-            edb.append_tool_result(
-                tool_call_id,
-                ToolResultState::Succeeded,
-                None,
-                r#"{"session_id":"pty-5","state":"running"}"#,
-            )
-            .unwrap();
-            edb.append_terminal_session_state(
-                "pty-5",
-                TerminalSessionState::Lost,
-                None,
-                "me exited",
-            )
-            .unwrap();
+            info_id = edb
+                .append_tool_info(tool_call_id, ToolOutputStream::Stdout, "ready")
+                .unwrap();
+            result_id = edb
+                .append_tool_result(
+                    tool_call_id,
+                    ToolResultState::Succeeded,
+                    None,
+                    format!(r#"{{"session_id":"{session_id}","state":"running"}}"#),
+                )
+                .unwrap();
+            state_id = edb
+                .append_terminal_session_state(
+                    session_id.clone(),
+                    TerminalSessionState::Lost,
+                    None,
+                    "me exited",
+                )
+                .unwrap();
             hashes = edb
                 .events()
                 .iter()
@@ -6786,7 +7353,7 @@ mod tests {
         }
 
         let edb = EventDataBase::open(&path).unwrap();
-        assert_eq!(edb.len(), 11);
+        assert_eq!(edb.len(), 12);
         assert_eq!(
             hashes,
             edb.events()
@@ -6795,43 +7362,48 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(matches!(
-            edb.get(0),
+            edb.get(system_id),
             Some(Event::SystemPrompt(event)) if event.name == "tool"
         ));
         assert!(matches!(
-            edb.get(7),
+            edb.get(created_id),
             Some(Event::TerminalSessionCreated(event))
-                if event.tool_call_id == 5
-                    && event.session_id == "pty-5"
+                if event.tool_call_id == tool_call_id
+                    && event.session_id == session_id
                     && event.shell == "/bin/zsh"
         ));
         assert!(matches!(
-            edb.get(8),
+            edb.get(info_id),
             Some(Event::ToolInfoUpdate(event))
-                if event.tool_call_id == 5
+                if event.tool_call_id == tool_call_id
                     && event.stream == ToolOutputStream::Stdout
                     && event.content.text() == Some("ready")
         ));
         assert!(matches!(
-            edb.get(9),
+            edb.get(result_id),
             Some(Event::ToolCallResult(event))
-                if event.tool_call_id == 5
+                if event.tool_call_id == tool_call_id
                     && event.state == ToolResultState::Succeeded
                     && event.exit_code.is_none()
         ));
         assert!(matches!(
-            edb.get(10),
+            edb.get(state_id),
             Some(Event::TerminalSessionState(event))
-                if event.session_id == "pty-5"
+                if event.session_id == session_id
                     && event.state == TerminalSessionState::Lost
         ));
         assert!(
-            edb.get(5)
+            edb.get(tool_call_id)
                 .unwrap()
                 .getBriefString()
                 .contains("Terminal.Create")
         );
-        assert!(edb.get(10).unwrap().getDetailString().contains("me exited"));
+        assert!(
+            edb.get(state_id)
+                .unwrap()
+                .getDetailString()
+                .contains("me exited")
+        );
         drop(edb);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -6841,6 +7413,7 @@ mod tests {
         let directory = temporary_path("styled-terminal-update");
         let path = directory.join("main.edb");
         let expected_hash;
+        let terminal_info_id;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
             let prompt_id = edb.append_user_prompt("open terminal").unwrap();
@@ -6875,6 +7448,7 @@ mod tests {
             let event_id = edb
                 .append_terminal_update(tool_call_id, update.clone())
                 .unwrap();
+            terminal_info_id = event_id;
             expected_hash = edb.get(event_id).unwrap().getHash();
             assert!(
                 edb.get(event_id)
@@ -6885,7 +7459,7 @@ mod tests {
         }
 
         let edb = EventDataBase::open(&path).unwrap();
-        let Event::ToolInfoUpdate(info) = edb.get(5).unwrap() else {
+        let Event::ToolInfoUpdate(info) = edb.get(terminal_info_id).unwrap() else {
             panic!("expected terminal tool info");
         };
         let update = info.content.terminal().unwrap();
@@ -6905,7 +7479,7 @@ mod tests {
         assert_eq!(model["cursor"]["column"], 0);
         assert_eq!(model["cursor"]["underlying"], "c");
         assert!(model.get("base_event_id").is_none());
-        assert_eq!(edb.get(5).unwrap().getHash(), expected_hash);
+        assert_eq!(edb.get(terminal_info_id).unwrap().getHash(), expected_hash);
         drop(edb);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -6953,10 +7527,12 @@ mod tests {
             std::env::temp_dir().join(format!("me-edb-follow-up-{}", std::process::id()));
         let path = directory.join("main.edb");
         let expected_hash;
+        let prompt_id;
+        let follow_up_id;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            let prompt_id = edb.append_user_prompt("start").unwrap();
-            let follow_up_id = edb
+            prompt_id = edb.append_user_prompt("start").unwrap();
+            follow_up_id = edb
                 .append_follow_up_prompt(prompt_id, "also check <xml>")
                 .unwrap();
             let event = edb.get(follow_up_id).unwrap();
@@ -6967,11 +7543,11 @@ mod tests {
 
         let edb = EventDataBase::open(&path).unwrap();
         assert!(matches!(
-            edb.get(1),
+            edb.get(follow_up_id),
             Some(Event::FollowUpPrompt(event))
-                if event.prompt_id == 0 && event.content == "also check <xml>"
+                if event.prompt_id == prompt_id && event.content == "also check <xml>"
         ));
-        assert_eq!(edb.get(1).unwrap().getHash(), expected_hash);
+        assert_eq!(edb.get(follow_up_id).unwrap().getHash(), expected_hash);
         drop(edb);
         std::fs::remove_dir_all(directory).unwrap();
     }
@@ -6982,11 +7558,14 @@ mod tests {
         let path = directory.join("main.edb");
         let content = r#"{"type":"reasoning","encrypted_content":"opaque","summary":[]}"#;
         let expected_hash;
+        let prompt_id;
+        let api_call_id;
+        let item_id;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            let prompt_id = edb.append_user_prompt("hello").unwrap();
-            let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
-            let item_id = edb
+            prompt_id = edb.append_user_prompt("hello").unwrap();
+            api_call_id = edb.append_api_requesting(prompt_id).unwrap();
+            item_id = edb
                 .append_model_context_item(api_call_id, prompt_id, "codex-oauth", content)
                 .unwrap();
             expected_hash = edb.get(item_id).unwrap().getHash();
@@ -7000,16 +7579,16 @@ mod tests {
 
         let edb = EventDataBase::open(&path).unwrap();
         assert!(matches!(
-            edb.get(2),
+            edb.get(item_id),
             Some(Event::ModelContextItem(event))
-                if event.api_call_id == 1
-                    && event.prompt_id == 0
+                if event.api_call_id == api_call_id
+                    && event.prompt_id == prompt_id
                     && event.provider == "codex-oauth"
                     && event.content == content
         ));
-        assert_eq!(edb.get(2).unwrap().getHash(), expected_hash);
+        assert_eq!(edb.get(item_id).unwrap().getHash(), expected_hash);
         assert!(
-            edb.get(2)
+            edb.get(item_id)
                 .unwrap()
                 .getDetailString()
                 .contains("encrypted_content")
@@ -7023,13 +7602,18 @@ mod tests {
         let directory = temporary_path("context-controls");
         let path = directory.join("main.edb");
         let hashes;
+        let discarded;
+        let discarded_response;
+        let effort;
+        let clear;
         {
             let mut edb = EventDataBase::open(&path).unwrap();
-            let discarded = edb.append_user_prompt("discard me").unwrap();
-            edb.append_assist_response(discarded, "old answer", true)
+            discarded = edb.append_user_prompt("discard me").unwrap();
+            discarded_response = edb
+                .append_assist_response(discarded, "old answer", true)
                 .unwrap();
-            edb.append_reasoning_effort_changed("high").unwrap();
-            edb.append_context_cleared().unwrap();
+            effort = edb.append_reasoning_effort_changed("high").unwrap();
+            clear = edb.append_context_cleared().unwrap();
             let target = edb.append_user_prompt("edit me").unwrap();
             edb.append_assist_response(target, "draft answer", true)
                 .unwrap();
@@ -7042,7 +7626,7 @@ mod tests {
         }
 
         let edb = EventDataBase::open(&path).unwrap();
-        assert_eq!(edb.len(), 4);
+        assert_eq!(edb.len(), 5);
         assert_eq!(
             hashes,
             edb.events()
@@ -7051,18 +7635,15 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(matches!(
-            edb.get(2),
+            edb.get(effort),
             Some(Event::ReasoningEffortChanged(event)) if event.effort == "high"
         ));
-        assert!(matches!(edb.get(3), Some(Event::ContextCleared(_))));
-        assert!(edb.get(6).is_none());
-        assert!(edb.get(4).is_none());
-        assert!(edb.get(5).is_none());
+        assert!(matches!(edb.get(clear), Some(Event::ContextCleared(_))));
         assert_eq!(
             edb.events().iter().map(Event::id).collect::<Vec<_>>(),
-            vec![0, 1, 2, 3]
+            vec![0, discarded, discarded_response, effort, clear]
         );
-        for event in edb.events().iter().skip(2) {
+        for event in edb.events().iter().skip(3) {
             assert!(!event.getBriefString().is_empty());
             assert!(event.getDetailString().contains("timestamp_ms="));
         }
@@ -7098,28 +7679,28 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(matches!(
-            edb.get(0),
+            edb.get(1),
             Some(Event::ModelChanged(event))
                 if event.model == "first" && event.cause == ModelChangeCause::Initial
         ));
         assert!(matches!(
-            edb.get(1),
+            edb.get(2),
             Some(Event::ReasoningEffortChanged(event))
                 if event.effort == crate::config::UNSET_EFFORT
                     && event.cause == ReasoningEffortChangeCause::Initial
         ));
         assert!(matches!(
-            edb.get(2),
+            edb.get(3),
             Some(Event::ModelChanged(event))
                 if event.model == "second" && event.cause == ModelChangeCause::User
         ));
         assert!(matches!(
-            edb.get(3),
+            edb.get(4),
             Some(Event::ReasoningEffortChanged(event))
                 if event.effort == crate::config::UNSET_EFFORT
                     && event.cause == ReasoningEffortChangeCause::ModelUnsupported
         ));
-        for event in edb.events() {
+        for event in edb.events().iter().skip(1) {
             assert!(!event.getBriefString().is_empty());
             assert!(event.getDetailString().contains("cause="));
         }
@@ -7196,7 +7777,7 @@ mod tests {
                 .unwrap();
             edb.append_reasoning_effort_changed("high").unwrap();
 
-            assert_eq!(edb.next_event_id(), 5);
+            assert_eq!(edb.next_event_id(), 6);
             assert_eq!(edb.mutation_revision(), 0);
             let mutation = edb.rewind_to_event(target).unwrap();
             assert_eq!(
@@ -7209,25 +7790,25 @@ mod tests {
             assert_eq!(edb.mutation_revision(), 1);
             assert_eq!(
                 edb.events().iter().map(Event::id).collect::<Vec<_>>(),
-                vec![0, 1]
+                vec![0, first, first + 1]
             );
-            assert_eq!(edb.next_event_id(), 5);
+            assert_eq!(edb.next_event_id(), 6);
             assert!(edb.get(target).is_none());
-            assert!(edb.get(3).is_none());
             assert!(edb.get(4).is_none());
+            assert!(edb.get(5).is_none());
         }
 
         let mut edb = EventDataBase::open(&path).unwrap();
-        assert_eq!(edb.next_event_id(), 5);
+        assert_eq!(edb.next_event_id(), 6);
         assert_eq!(
             edb.events().iter().map(Event::id).collect::<Vec<_>>(),
-            vec![0, 1]
+            vec![0, 1, 2]
         );
         let replacement = edb.append_user_prompt("replacement").unwrap();
-        assert_eq!(replacement, 5);
+        assert_eq!(replacement, 6);
         assert_eq!(
             edb.events().iter().map(Event::id).collect::<Vec<_>>(),
-            vec![0, 1, replacement]
+            vec![0, 1, 2, replacement]
         );
         drop(edb);
         fs::remove_dir_all(directory).unwrap();
@@ -7271,9 +7852,9 @@ mod tests {
         assert!(edb.get(after_clear).is_none());
         assert_eq!(
             edb.events().iter().map(Event::id).collect::<Vec<_>>(),
-            vec![before_clear, answer]
+            vec![0, before_clear, answer]
         );
-        assert_eq!(edb.next_event_id(), 4);
+        assert_eq!(edb.next_event_id(), 5);
         assert_eq!(
             effective_conversation_events(edb.events())
                 .unwrap()
@@ -7339,7 +7920,7 @@ mod tests {
                 restored_prompt_content: None,
             }
         );
-        assert_eq!(edb.events().len(), 1);
+        assert_eq!(edb.events().len(), 2);
         assert_eq!(completed_compact_count(edb.events()), 0);
         assert!(matches!(edb.get(prompt), Some(Event::UserPrompt(_))));
         assert!(edb.get(trigger_api).is_none());
@@ -7601,14 +8182,14 @@ mod tests {
         let next_event_id = edb.next_event_id();
         let mut bytes = encode_file_header(next_event_id).to_vec();
         bytes[4] = 35;
-        for event in edb.events() {
+        for event in edb.events().iter().skip(1) {
             bytes.extend(encode_v35_record(event).unwrap());
         }
         fs::create_dir_all(&directory).unwrap();
         fs::write(&path, bytes).unwrap();
 
         let migrated = EventDataBase::open(&path).unwrap();
-        assert_eq!(migrated.next_event_id(), next_event_id);
+        assert_eq!(migrated.next_event_id(), next_event_id + 1);
         assert!(
             migrated
                 .events()
@@ -7621,7 +8202,7 @@ mod tests {
                     |update| update.kind == CompactKind::WorkerSingleTurn && update.stage.is_none()
                 )
         );
-        assert_eq!(fs::read(&path).unwrap()[4], 40);
+        assert_eq!(fs::read(&path).unwrap()[4], 41);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -7659,27 +8240,29 @@ mod tests {
                 .append_compact_started(tool, prompt, CompactKind::ManagerMultiTurn)
                 .unwrap();
             let next_event_id = edb.next_event_id();
-            let event_ids = edb.events().iter().map(Event::id).collect::<Vec<_>>();
+            let event_ids = std::iter::once(0)
+                .chain(edb.events().iter().skip(1).map(|event| event.id() + 1))
+                .collect::<Vec<_>>();
             let mut bytes = encode_file_header(next_event_id).to_vec();
             bytes[4] = 36;
-            for event in edb.events() {
+            for event in edb.events().iter().skip(1) {
                 bytes.extend(encode_v36_record(event).unwrap());
             }
             fs::create_dir_all(&directory).unwrap();
             fs::write(&path, bytes).unwrap();
 
             let migrated = EventDataBase::open(&path).unwrap();
-            assert_eq!(migrated.next_event_id(), next_event_id);
+            assert_eq!(migrated.next_event_id(), next_event_id + 1);
             assert_eq!(
                 migrated.events().iter().map(Event::id).collect::<Vec<_>>(),
                 event_ids
             );
             assert!(matches!(
-                migrated.get(compact),
+                migrated.get(compact + 1),
                 Some(Event::CompactStateUpdate(update))
                     if update.kind == expected && update.total_stages == 6
             ));
-            assert_eq!(fs::read(&path).unwrap()[4], 40);
+            assert_eq!(fs::read(&path).unwrap()[4], 41);
             drop(migrated);
             fs::remove_dir_all(directory).unwrap();
         }
@@ -7705,7 +8288,7 @@ mod tests {
         let next_event_id = edb.next_event_id();
         let mut bytes = encode_file_header(next_event_id).to_vec();
         bytes[4] = 37;
-        for event in edb.events() {
+        for event in edb.events().iter().skip(1) {
             bytes.extend(encode_v37_record(event).unwrap());
         }
         fs::create_dir_all(&directory).unwrap();
@@ -7713,10 +8296,10 @@ mod tests {
 
         let migrated = EventDataBase::open(&path).unwrap();
         assert!(matches!(
-            migrated.get(compact),
+            migrated.get(compact + 1),
             Some(Event::CompactStateUpdate(update)) if update.total_stages == 6
         ));
-        assert_eq!(fs::read(&path).unwrap()[4], 40);
+        assert_eq!(fs::read(&path).unwrap()[4], 41);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -7951,8 +8534,9 @@ mod tests {
                 prompt_id: prompt,
             }
         );
-        assert_eq!(edb.len(), 1);
-        assert!(matches!(edb.events()[0], Event::AgentKindDef(_)));
+        assert_eq!(edb.len(), 2);
+        assert!(matches!(edb.events()[0], Event::EdbIdGeneration(_)));
+        assert!(matches!(edb.events()[1], Event::AgentKindDef(_)));
         assert!(edb.next_event_id() > final_answer);
     }
 
@@ -7964,8 +8548,11 @@ mod tests {
         let source_path = directory.join("source.edb");
         let clone_path = directory.join("clone.edb");
         let final_answer;
+        let source_edb_id;
+        let cloned_edb_id;
         {
             let mut source = EventDataBase::open(&source_path).unwrap();
+            source_edb_id = source.edb_id().unwrap().to_owned();
             source
                 .append_agent_kind_def(AgentKind::Primary, "main-agent", None, None)
                 .unwrap();
@@ -7985,6 +8572,9 @@ mod tests {
             let cloned = source
                 .clone_through_final_answer(final_answer, &clone_path, "Greeting (1)")
                 .unwrap();
+            cloned_edb_id = cloned.edb_id().unwrap().to_owned();
+            assert_ne!(source_edb_id, cloned_edb_id);
+            assert_eq!(source.edb_id().unwrap(), source_edb_id);
             assert_eq!(
                 agent_kind_definition(cloned.events()).unwrap().kind,
                 AgentKind::Interactive
@@ -8014,7 +8604,11 @@ mod tests {
                 matches!(event, Event::UserPrompt(prompt) if prompt.content == "must not be cloned")
             }));
         }
+        let reopened_source = EventDataBase::open(&source_path).unwrap();
+        assert_eq!(reopened_source.edb_id().unwrap(), source_edb_id);
+        drop(reopened_source);
         let reopened = EventDataBase::open(&clone_path).unwrap();
+        assert_eq!(reopened.edb_id().unwrap(), cloned_edb_id);
         assert_eq!(
             crate::agent_title::current_title(reopened.events()),
             Some("Greeting (1)")

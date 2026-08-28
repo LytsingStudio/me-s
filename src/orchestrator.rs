@@ -623,6 +623,10 @@ pub trait Orchestrator: Send {
         None
     }
 
+    fn get_edb_id<'a>(&self, edb: &'a EventDataBase) -> Result<&'a str> {
+        edb.edb_id()
+    }
+
     fn supports_edb(&self, edb: &EventDataBase) -> std::result::Result<(), String>;
 
     fn restore(&mut self, edb: &EventDataBase, models: &mut ModelRuntime) -> Result<()>;
@@ -826,6 +830,7 @@ impl RuntimeEdbSnapshot {
 pub struct AgentRuntime {
     id: String,
     edb_path: PathBuf,
+    edb_id: String,
     orchestrator_name: &'static str,
     input_queue: OrchestratorInputQueue,
     api_activity: ApiActivity,
@@ -872,6 +877,10 @@ impl AgentRuntime {
         let api_activity = orchestrator.api_activity();
         let toolbox_observer = orchestrator.toolbox_observer();
         let advancing = Arc::new(AtomicBool::new(false));
+        let edb_id = edb
+            .edb_id()
+            .expect("AgentRuntime requires a valid EDB ID")
+            .to_owned();
         let events = edb.events().to_vec();
         let edb_size_bytes = edb.persisted_size_bytes();
         let edb_mutation_revision = edb.mutation_revision();
@@ -896,6 +905,7 @@ impl AgentRuntime {
         Self {
             id: id.into(),
             edb_path: edb_path.into(),
+            edb_id,
             orchestrator_name,
             input_queue,
             api_activity,
@@ -922,6 +932,10 @@ impl AgentRuntime {
 
     pub fn edb_path(&self) -> &Path {
         &self.edb_path
+    }
+
+    pub fn edb_id(&self) -> &str {
+        &self.edb_id
     }
 
     pub fn edb_events(&self) -> &[Event] {
@@ -1731,7 +1745,7 @@ impl Orchestrator for MainAgent {
         }
         let expected = self.expected_system_prompts();
         for (offset, expected_name) in expected.iter().copied().enumerate() {
-            let id = EventId::try_from(offset + 1)
+            let id = EventId::try_from(offset + 2)
                 .map_err(|_| "MainAgent system prompt offset overflow".to_owned())?;
             match edb.get(id) {
                 Some(Event::SystemPrompt(prompt)) if prompt.name == expected_name => {}
@@ -1742,7 +1756,7 @@ impl Orchestrator for MainAgent {
                 }
             }
         }
-        let initial_model_id = EventId::try_from(expected.len() + 1)
+        let initial_model_id = EventId::try_from(expected.len() + 2)
             .map_err(|_| "MainAgent initial system prompt count exceeds EventId".to_owned())?;
         let initial_effort_id = initial_model_id
             .checked_add(1)
@@ -1768,7 +1782,7 @@ impl Orchestrator for MainAgent {
         if let Some(prompt) = edb
             .events()
             .iter()
-            .skip(expected.len() + 1)
+            .skip(expected.len() + 2)
             .find_map(|event| match event {
                 Event::SystemPrompt(prompt) => Some(prompt),
                 _ => None,
@@ -1781,7 +1795,8 @@ impl Orchestrator for MainAgent {
         }
         for event in edb.events() {
             match event {
-                Event::AgentKindDef(_)
+                Event::EdbIdGeneration(_)
+                | Event::AgentKindDef(_)
                 | Event::AgentTurn(_)
                 | Event::SystemPrompt(_)
                 | Event::UserPrompt(_)
@@ -3658,20 +3673,21 @@ impl Orchestrator for Chatbot {
                 self.name()
             ));
         }
-        match edb.get(1) {
-            Some(Event::ModelChanged(event)) if event.cause == ModelChangeCause::Initial => {}
-            _ => return Err("chatbot EDB must define its initial model at id=1".into()),
-        }
         match edb.get(2) {
+            Some(Event::ModelChanged(event)) if event.cause == ModelChangeCause::Initial => {}
+            _ => return Err("chatbot EDB must define its initial model at id=2".into()),
+        }
+        match edb.get(3) {
             Some(Event::ReasoningEffortChanged(event))
                 if event.cause == ReasoningEffortChangeCause::Initial => {}
-            _ => return Err("chatbot EDB must define its initial effort at id=2".into()),
+            _ => return Err("chatbot EDB must define its initial effort at id=3".into()),
         }
-        validate_initial_state_events(edb, 1, 2)?;
+        validate_initial_state_events(edb, 2, 3)?;
 
         for event in edb.events() {
             match event {
-                Event::AgentKindDef(_)
+                Event::EdbIdGeneration(_)
+                | Event::AgentKindDef(_)
                 | Event::AgentTurn(_)
                 | Event::ModelChanged(_)
                 | Event::UserPrompt(_)
@@ -5963,7 +5979,8 @@ fn chatbot_model_context(
     let mut projected_tool_batches = BTreeSet::new();
     for event in &effective {
         match event {
-            Event::AgentKindDef(_)
+            Event::EdbIdGeneration(_)
+            | Event::AgentKindDef(_)
             | Event::AgentTurn(_)
             | Event::ApiStateUpdate(_)
             | Event::ContextUsageEstimate(_)
@@ -6228,7 +6245,8 @@ fn main_model_context_with_toolboxes_and_environment(
 
     for event in &effective {
         match event {
-            Event::AgentKindDef(_)
+            Event::EdbIdGeneration(_)
+            | Event::AgentKindDef(_)
             | Event::AgentTurn(_)
             | Event::SystemPrompt(_)
             | Event::ContextUsageEstimate(_) => {}
@@ -7565,11 +7583,26 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(id, 0);
-        assert_eq!(edb.len(), 2);
+        assert_eq!(id, 1);
+        assert_eq!(edb.len(), 3);
         assert!(matches!(
             edb.get(id),
             Some(Event::UserPrompt(prompt)) if prompt.content == "hello"
+        ));
+    }
+
+    #[test]
+    fn orchestrator_and_runtime_expose_the_stored_edb_id() {
+        let edb = EventDataBase::new();
+        let expected = edb.edb_id().unwrap().to_owned();
+        let orchestrator = Chatbot::new(None);
+        assert_eq!(orchestrator.get_edb_id(&edb).unwrap(), expected);
+
+        let runtime = AgentRuntime::new(edb, Box::new(orchestrator), unused_model_api());
+        assert_eq!(runtime.edb_id(), expected);
+        assert!(matches!(
+            runtime.edb_events().first(),
+            Some(Event::EdbIdGeneration(event)) if event.edb_id == expected
         ));
     }
 
@@ -7706,7 +7739,7 @@ mod tests {
             thread::sleep(Duration::from_millis(1));
         }
         assert!(matches!(
-            &runtime.edb_events()[0],
+            &runtime.edb_events()[1],
             Event::UserPrompt(prompt) if prompt.content == "first"
         ));
         assert!(runtime.edb_events().iter().any(|event| matches!(
@@ -7733,14 +7766,15 @@ mod tests {
             unused_model_api(),
         );
         runtime.submit_effort_change("high".into()).unwrap();
-        wait_for_runtime_events(&mut runtime, 1);
+        wait_for_runtime_events(&mut runtime, 2);
         assert!(matches!(
             runtime.edb_events(),
-            [Event::ReasoningEffortChanged(event)] if event.effort == "high"
+            [Event::EdbIdGeneration(_), Event::ReasoningEffortChanged(event)]
+                if event.effort == "high"
         ));
 
         runtime.submit_context_clear().unwrap();
-        wait_for_runtime_events(&mut runtime, 2);
+        wait_for_runtime_events(&mut runtime, 3);
         assert!(matches!(
             runtime.edb_events().last(),
             Some(Event::ContextCleared(_))
@@ -7824,7 +7858,7 @@ mod tests {
         assert_eq!(runtime.edb_size_bytes(), initial_size);
 
         runtime.submit_effort_change("high".into()).unwrap();
-        wait_for_runtime_events(&mut runtime, 1);
+        wait_for_runtime_events(&mut runtime, 2);
         assert!(runtime.edb_size_bytes() > initial_size);
         assert_eq!(runtime.edb_size_bytes(), path.metadata().unwrap().len());
 
@@ -8093,15 +8127,15 @@ mod tests {
     #[test]
     fn follow_up_requires_a_closed_tool_call_safe_point() {
         let mut unsafe_edb = main_agent_pending_tool(terminal::LIST, "{}");
-        unsafe_edb.append_follow_up_prompt(6, "too early").unwrap();
+        unsafe_edb.append_follow_up_prompt(7, "too early").unwrap();
         let error = MainAgent::new(None).supports_edb(&unsafe_edb).unwrap_err();
         assert!(error.contains("before its result"));
 
         let mut safe_edb = main_agent_pending_tool(terminal::LIST, "{}");
         safe_edb
-            .append_tool_result(10, ToolResultState::Succeeded, None, "listed")
+            .append_tool_result(11, ToolResultState::Succeeded, None, "listed")
             .unwrap();
-        safe_edb.append_follow_up_prompt(6, "continue").unwrap();
+        safe_edb.append_follow_up_prompt(7, "continue").unwrap();
         assert!(MainAgent::new(None).supports_edb(&safe_edb).is_ok());
     }
 
@@ -8886,7 +8920,7 @@ mod tests {
             edb.events().iter().find(|event| matches!(event, Event::UserTurnAborted(_))),
             Some(Event::UserTurnAborted(aborted)) if aborted.prompt_id == prompt_id
         ));
-        assert_eq!(edb.len(), 8);
+        assert_eq!(edb.len(), 9);
         assert_eq!(active_user_turn_id(edb.events()).unwrap(), None);
         assert_eq!(
             current_user_turn_state(edb.events()).unwrap(),
@@ -8993,12 +9027,12 @@ mod tests {
         restore_for_test(&mut agent, &edb);
         reconcile_for_test(&mut agent, &mut edb);
         assert!(matches!(
-            edb.get(10),
+            edb.get(11),
             Some(Event::ApiStateUpdate(update))
                 if update.api_call_id == api_call_id
                     && update.state == ApiState::Interrupted
         ));
-        assert_eq!(edb.len(), 11);
+        assert_eq!(edb.len(), 12);
         assert_eq!(
             current_user_turn_state(edb.events()).unwrap(),
             Some(UserTurnState::Aborted(prompt_id))
@@ -9061,47 +9095,47 @@ mod tests {
 
         runtime.submit_user_prompt("stream".into()).unwrap();
         let deadline = Instant::now() + Duration::from_secs(2);
-        while !first_line_sent.load(Ordering::Acquire) || runtime.edb_events().len() < 8 {
+        while !first_line_sent.load(Ordering::Acquire) || runtime.edb_events().len() < 9 {
             assert!(Instant::now() < deadline, "local SSE stream did not start");
             runtime.poll_edb().unwrap();
             thread::sleep(Duration::from_millis(1));
         }
         assert!(runtime.submit_turn_abort().unwrap());
         release_stream.store(true, Ordering::Release);
-        wait_for_runtime_events(&mut runtime, 11);
+        wait_for_runtime_events(&mut runtime, 12);
         server.join().unwrap();
 
         let events = runtime.edb_events();
         assert!(matches!(
             events.iter().find(|event| matches!(event, Event::UserTurnAborted(_))),
-            Some(Event::UserTurnAborted(aborted)) if aborted.prompt_id == 3
+            Some(Event::UserTurnAborted(aborted)) if aborted.prompt_id == 4
         ));
         assert!(matches!(
             events.iter().rev().find(|event| matches!(event, Event::ApiStateUpdate(update) if update.state == ApiState::Interrupted)),
             Some(Event::ApiStateUpdate(update))
-                if update.api_call_id == 5 && update.state == ApiState::Interrupted
+                if update.api_call_id == 6 && update.state == ApiState::Interrupted
         ));
-        assert_eq!(events.len(), 11);
+        assert_eq!(events.len(), 12);
         assert_eq!(
             current_user_turn_state(events).unwrap(),
-            Some(UserTurnState::Aborted(3))
+            Some(UserTurnState::Aborted(4))
         );
         assert!(events.iter().all(|event| {
             !matches!(
                 event,
                 Event::ApiStateUpdate(update)
-                    if update.api_call_id == 5 && update.state == ApiState::Completed
+                    if update.api_call_id == 6 && update.state == ApiState::Completed
             )
         }));
         assert!(events.iter().all(|event| {
             !matches!(
                 event,
                 Event::AssistResponse(response)
-                    if response.prompt_id == 3 && response.finished
+                    if response.prompt_id == 4 && response.finished
             )
         }));
 
-        runtime.submit_context_rewind(3).unwrap();
+        runtime.submit_context_rewind(4).unwrap();
         let observed_revision = runtime.edb_mutation_revision();
         let deadline = Instant::now() + Duration::from_secs(2);
         let mutation = loop {
@@ -9121,7 +9155,7 @@ mod tests {
         assert_eq!(
             mutation,
             EdbMutation::Rewind {
-                target_event_id: 3,
+                target_event_id: 4,
                 restored_prompt_content: Some("stream".into()),
             }
         );
@@ -9133,8 +9167,8 @@ mod tests {
         assert!(!accepted, "a pre-rewind UI write must be rejected");
         assert_eq!(current_revision, restored.revision);
         assert_eq!(runtime.input_draft().unwrap(), restored);
-        assert_eq!(runtime.edb_events().len(), 3);
-        assert!(runtime.edb_events().iter().all(|event| event.id() < 3));
+        assert_eq!(runtime.edb_events().len(), 4);
+        assert!(runtime.edb_events().iter().all(|event| event.id() < 4));
     }
 
     #[test]
@@ -9572,6 +9606,8 @@ for line in sys.stdin:
         output = ["Slow"]
     elif command == "getBrief":
         output = "First ordering probe."
+    elif command == "getResultTokenLimit":
+        output = 32768
     elif command in ("getInputSchema", "getOutputSchema"):
         output = {"type": "object", "additionalProperties": False}
     elif command in ("getInstructions", "getRoute", "getExamples"):
@@ -9600,6 +9636,8 @@ for line in sys.stdin:
         output = ["Check"]
     elif command == "getBrief":
         output = "Second ordering probe."
+    elif command == "getResultTokenLimit":
+        output = 32768
     elif command in ("getInputSchema", "getOutputSchema"):
         output = {"type": "object", "additionalProperties": False}
     elif command in ("getInstructions", "getRoute", "getExamples"):
@@ -9627,7 +9665,7 @@ for line in sys.stdin:
         let mut runtime = AgentRuntime::new(edb, Box::new(agent), models);
 
         runtime.submit_user_prompt("run both".into()).unwrap();
-        wait_for_runtime_events(&mut runtime, 21);
+        wait_for_runtime_events(&mut runtime, 22);
         server.join().unwrap();
         runtime.poll_edb().unwrap();
 
@@ -10127,7 +10165,7 @@ data: [DONE]
         let mut runtime = AgentRuntime::new(edb, Box::new(chatbot), models);
 
         runtime.submit_user_prompt("characters".into()).unwrap();
-        wait_for_runtime_events(&mut runtime, 13);
+        wait_for_runtime_events(&mut runtime, 14);
         server.join().unwrap();
         runtime.poll_edb().unwrap();
 
@@ -10606,16 +10644,16 @@ data: [DONE]
         let mut chatbot = Chatbot::new(None);
         restore_for_test(&mut chatbot, &edb);
         reconcile_for_test(&mut chatbot, &mut edb);
-        assert_eq!(edb.len(), 7);
+        assert_eq!(edb.len(), 8);
         assert!(matches!(
-            edb.get(6),
+            edb.get(7),
             Some(Event::ApiStateUpdate(update))
                 if update.api_call_id == api_call_id
                     && update.state == ApiState::Interrupted
         ));
 
         reconcile_for_test(&mut chatbot, &mut edb);
-        assert_eq!(edb.len(), 7);
+        assert_eq!(edb.len(), 8);
         assert!(chatbot.supports_edb(&edb).is_ok());
     }
 
@@ -10641,7 +10679,7 @@ data: [DONE]
 
         let edb = EventDataBase::open(&path).unwrap();
         assert!(matches!(
-            edb.get(6),
+            edb.get(7),
             Some(Event::ApiStateUpdate(update)) if update.state == ApiState::Interrupted
         ));
         drop(edb);
@@ -10651,14 +10689,14 @@ data: [DONE]
     #[test]
     fn startup_closes_an_unfinished_retry_sequence_after_api_error() {
         let mut edb = EventDataBase::new();
-        edb.append_user_prompt("hello").unwrap();
-        let api_call_id = edb.append_api_requesting(0).unwrap();
-        edb.append_api_state(api_call_id, 0, ApiState::Error, "network")
+        let prompt_id = edb.append_user_prompt("hello").unwrap();
+        let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
+        edb.append_api_state(api_call_id, prompt_id, ApiState::Error, "network")
             .unwrap();
         reconcile_api_states(&mut edb).unwrap();
-        assert_eq!(edb.len(), 4);
+        assert_eq!(edb.len(), 5);
         assert!(matches!(
-            edb.get(3),
+            edb.get(4),
             Some(Event::ApiStateUpdate(update))
                 if update.api_call_id == api_call_id
                     && update.state == ApiState::Interrupted
@@ -10764,30 +10802,31 @@ data: [DONE]
         assert!(agent.supports_edb(&edb).is_ok());
 
         reconcile_for_test(&mut agent, &mut edb);
-        assert_eq!(edb.len(), 6);
+        assert_eq!(edb.len(), 7);
+        assert!(matches!(edb.get(0), Some(Event::EdbIdGeneration(_))));
         assert!(matches!(
-            edb.get(0),
+            edb.get(1),
             Some(Event::AgentKindDef(definition)) if definition.kind == AgentKind::Interactive
         ));
         assert!(matches!(
-            edb.get(1),
+            edb.get(2),
             Some(Event::SystemPrompt(prompt)) if prompt.name == BASE_SYSTEM_PROMPT_NAME
         ));
         assert!(matches!(
-            edb.get(2),
+            edb.get(3),
             Some(Event::SystemPrompt(prompt)) if prompt.name == POLICY_SYSTEM_PROMPT_NAME
         ));
         assert!(matches!(
-            edb.get(3),
+            edb.get(4),
             Some(Event::SystemPrompt(prompt)) if prompt.name == TOOL_SYSTEM_PROMPT_NAME
         ));
         assert!(matches!(
-            edb.get(4),
+            edb.get(5),
             Some(Event::ModelChanged(event))
                 if event.model == "test" && event.cause == ModelChangeCause::Initial
         ));
         assert!(matches!(
-            edb.get(5),
+            edb.get(6),
             Some(Event::ReasoningEffortChanged(event))
                 if event.effort == UNSET_EFFORT
                     && event.cause == ReasoningEffortChangeCause::Initial
@@ -10819,7 +10858,7 @@ data: [DONE]
         );
 
         reconcile_for_test(&mut agent, &mut edb);
-        assert_eq!(edb.len(), 6);
+        assert_eq!(edb.len(), 7);
     }
 
     #[test]
@@ -11155,22 +11194,22 @@ data: [DONE]
         reconcile_for_test(&mut agent, &mut edb);
 
         assert!(matches!(
-            edb.get(0),
+            edb.get(1),
             Some(Event::AgentKindDef(definition))
                 if definition.kind == AgentKind::SubAgent
                     && definition.parent_agent_id.as_deref() == Some("main")
                     && definition.system_prompt.as_deref() == Some("Return only verified facts.")
         ));
         assert!(matches!(
-            edb.get(3),
+            edb.get(4),
             Some(Event::SystemPrompt(prompt)) if prompt.name == PARENT_SYSTEM_PROMPT_NAME
         ));
         assert!(matches!(
-            edb.get(5),
+            edb.get(6),
             Some(Event::ModelChanged(event)) if event.cause == ModelChangeCause::Initial
         ));
         assert!(matches!(
-            edb.get(6),
+            edb.get(7),
             Some(Event::ReasoningEffortChanged(event))
                 if event.cause == ReasoningEffortChangeCause::Initial
         ));
@@ -11300,7 +11339,7 @@ data: [DONE]
         reconcile_for_test(&mut manager, &mut manager_edb);
         assert_eq!(manager.name(), "manager-agent");
         assert!(matches!(
-            manager_edb.get(3),
+            manager_edb.get(4),
             Some(Event::SystemPrompt(prompt)) if prompt.name == MANAGER_SYSTEM_PROMPT_NAME
         ));
         let manager_catalog = ToolboxCatalog::native_for_test().manager_view().unwrap();
@@ -11473,7 +11512,7 @@ data: [DONE]
         reconcile_for_test(&mut worker, &mut worker_edb);
         assert_eq!(worker.name(), "worker-agent");
         assert!(matches!(
-            worker_edb.get(3),
+            worker_edb.get(4),
             Some(Event::SystemPrompt(prompt)) if prompt.name == WORKER_SYSTEM_PROMPT_NAME
         ));
         let worker_catalog = worker
@@ -12041,6 +12080,8 @@ for line in sys.stdin:
         output = ["Run"]
     elif command == "getBrief":
         output = "A low-level fallback test toolbox."
+    elif command == "getResultTokenLimit":
+        output = 32768
     elif command in ("getInputSchema", "getOutputSchema"):
         output = {"type": "object", "additionalProperties": False}
     elif command in ("getInstructions", "getRoute", "getExamples"):
@@ -12126,6 +12167,8 @@ for line in sys.stdin:
         output = ["Snapshot"]
     elif command == "getBrief":
         output = "Test WebBrowser snapshot."
+    elif command == "getResultTokenLimit":
+        output = 32768
     elif command == "getInputSchema":
         output = {"type":"object","properties":{"page_id":{"type":"string"},"wait_ms":{"type":"integer"},"kind":{"type":"string"}},"required":["page_id","wait_ms","kind"],"additionalProperties":False}
     elif command == "getOutputSchema":
@@ -12299,9 +12342,9 @@ for line in sys.stdin:
         apply_model_selection(&mut edb, &mut models, "third", None).unwrap();
         assert_eq!(models.active_model().name, "third");
         assert_eq!(latest_effort(&edb), Some("low"));
-        assert_eq!(edb.len(), 7);
+        assert_eq!(edb.len(), 8);
         assert!(matches!(
-            edb.get(6),
+            edb.get(7),
             Some(Event::ModelChanged(event)) if event.model == "third"
         ));
 
@@ -12317,12 +12360,12 @@ for line in sys.stdin:
         assert_eq!(models.active_model().name, "second");
         assert_eq!(effort.as_deref(), Some(UNSET_EFFORT));
         assert!(matches!(
-            edb.get(7),
+            edb.get(8),
             Some(Event::ModelChanged(event))
                 if event.model == "second" && event.cause == ModelChangeCause::User
         ));
         assert!(matches!(
-            edb.get(8),
+            edb.get(9),
             Some(Event::ReasoningEffortChanged(event))
                 if event.effort == UNSET_EFFORT
                     && event.cause == ReasoningEffortChangeCause::ModelUnsupported
@@ -12368,13 +12411,13 @@ for line in sys.stdin:
         let mut runtime = AgentRuntime::new(edb, Box::new(chatbot), models);
 
         runtime.submit_model_change("second".into()).unwrap();
-        wait_for_runtime_events(&mut runtime, 5);
+        wait_for_runtime_events(&mut runtime, 6);
         assert!(matches!(
-            &runtime.edb_events()[3],
+            &runtime.edb_events()[4],
             Event::ModelChanged(event) if event.model == "second"
         ));
         assert!(matches!(
-            &runtime.edb_events()[4],
+            &runtime.edb_events()[5],
             Event::ReasoningEffortChanged(event)
                 if event.effort == UNSET_EFFORT
                     && event.cause == ReasoningEffortChangeCause::ModelUnsupported
@@ -12467,7 +12510,7 @@ for line in sys.stdin:
         let mut edb = EventDataBase::new();
         edb.append_user_prompt("hello").unwrap();
         let reason = MainAgent::new(None).supports_edb(&edb).unwrap_err();
-        assert!(reason.contains("must begin"));
+        assert!(reason.contains("AgentKindDefEvent"));
     }
 
     #[test]
@@ -12477,17 +12520,17 @@ for line in sys.stdin:
         assert!(agent.supports_edb(&edb).is_ok());
 
         reconcile_for_test(&mut agent, &mut edb);
-        assert_eq!(edb.len(), 14);
+        assert_eq!(edb.len(), 15);
         assert!(matches!(
-            edb.get(13),
+            edb.get(14),
             Some(Event::ToolCallResult(result))
-                if result.tool_call_id == 10
+                if result.tool_call_id == 11
                     && result.state == ToolResultState::Interrupted
                     && result.detail.is_empty()
         ));
 
         reconcile_for_test(&mut agent, &mut edb);
-        assert_eq!(edb.len(), 14);
+        assert_eq!(edb.len(), 15);
         assert!(agent.supports_edb(&edb).is_ok());
     }
 
@@ -12498,7 +12541,7 @@ for line in sys.stdin:
             r#"{"url":"./committed-before-crash.png"}"#,
         );
         edb.append_image_content(
-            10,
+            11,
             "./committed-before-crash.png",
             "image/png",
             "png",
@@ -12514,7 +12557,7 @@ for line in sys.stdin:
         assert!(matches!(
             edb.events().last(),
             Some(Event::ToolCallResult(result))
-                if result.tool_call_id == 10
+                if result.tool_call_id == 11
                     && result.state == ToolResultState::Interrupted
         ));
         assert!(agent.supports_edb(&edb).is_ok());
@@ -12543,7 +12586,7 @@ for line in sys.stdin:
         let arguments =
             r#"{"objective":{"title":"Persist the route"},"plans":[{"title":"persist"}]}"#;
         let mut edb = main_agent_pending_tool(workmap::START, arguments);
-        workmap::execute(workmap::START, arguments, 10, &mut edb).unwrap();
+        workmap::execute(workmap::START, arguments, 11, &mut edb).unwrap();
         assert!(MainAgent::new(None).supports_edb(&edb).is_ok());
 
         let mut agent = MainAgent::new(None);
@@ -12551,7 +12594,7 @@ for line in sys.stdin:
         assert!(matches!(
             edb.events().last(),
             Some(Event::ToolCallResult(result))
-                if result.tool_call_id == 10
+                if result.tool_call_id == 11
                     && result.state == ToolResultState::Succeeded
                     && result.detail.contains("persist")
         ));
@@ -12578,11 +12621,11 @@ for line in sys.stdin:
         assert!(agent.supports_edb(&edb).is_ok());
         reconcile_for_test(&mut agent, &mut edb);
         assert!(matches!(
-            edb.get(11),
+            edb.get(12),
             Some(Event::ApiStateUpdate(update)) if update.state == ApiState::Interrupted
         ));
         assert!(matches!(
-            edb.get(12),
+            edb.get(13),
             Some(Event::ToolCallResult(result))
                 if result.tool_call_id == tool_call_id
                     && result.state == ToolResultState::Interrupted
@@ -12724,8 +12767,8 @@ for line in sys.stdin:
         let arguments =
             r#"{"objective":{"title":"Resume safely"},"plans":[{"title":"Inspect state"}]}"#;
         let mut edb = main_agent_pending_tool(workmap::START, arguments);
-        let output = workmap::execute(workmap::START, arguments, 10, &mut edb).unwrap();
-        edb.append_tool_result(10, ToolResultState::Succeeded, None, output.to_string())
+        let output = workmap::execute(workmap::START, arguments, 11, &mut edb).unwrap();
+        edb.append_tool_result(11, ToolResultState::Succeeded, None, output.to_string())
             .unwrap();
 
         let agent = MainAgent::new(None);
@@ -12802,8 +12845,8 @@ for line in sys.stdin:
         let arguments =
             r#"{"objective":{"title":"Persist the route"},"plans":[{"title":"persist"}]}"#;
         let mut edb = main_agent_pending_tool(workmap::START, arguments);
-        let output = workmap::execute(workmap::START, arguments, 10, &mut edb).unwrap();
-        edb.append_tool_result(10, ToolResultState::Succeeded, None, output.to_string())
+        let output = workmap::execute(workmap::START, arguments, 11, &mut edb).unwrap();
+        edb.append_tool_result(11, ToolResultState::Succeeded, None, output.to_string())
             .unwrap();
 
         assert!(MainAgent::new(None).supports_edb(&edb).is_ok());
@@ -12830,13 +12873,13 @@ for line in sys.stdin:
     fn main_agent_projects_a_multi_tool_batch_as_one_assistant_message() {
         let mut edb = main_agent_multi_tool_batch();
         edb.append_tool_result(
-            10,
+            11,
             ToolResultState::Failed,
             None,
             r#"{"error":"first failed"}"#,
         )
         .unwrap();
-        edb.append_tool_result(11, ToolResultState::Succeeded, None, r#"{"state":"ok"}"#)
+        edb.append_tool_result(12, ToolResultState::Succeeded, None, r#"{"state":"ok"}"#)
             .unwrap();
         assert!(MainAgent::new(None).supports_edb(&edb).is_ok());
 
@@ -12866,7 +12909,7 @@ for line in sys.stdin:
     fn multi_tool_batch_rejects_out_of_order_execution_and_follow_up() {
         let mut out_of_order = main_agent_multi_tool_batch();
         out_of_order
-            .append_tool_result(11, ToolResultState::Succeeded, None, "second")
+            .append_tool_result(12, ToolResultState::Succeeded, None, "second")
             .unwrap();
         assert!(
             MainAgent::new(None)
@@ -12876,7 +12919,7 @@ for line in sys.stdin:
         );
 
         let mut premature_model_request = main_agent_multi_tool_batch();
-        premature_model_request.append_api_requesting(6).unwrap();
+        premature_model_request.append_api_requesting(7).unwrap();
         assert!(
             MainAgent::new(None)
                 .supports_edb(&premature_model_request)
@@ -12886,9 +12929,9 @@ for line in sys.stdin:
 
         let mut pending = main_agent_multi_tool_batch();
         pending
-            .append_tool_result(10, ToolResultState::Failed, None, "first")
+            .append_tool_result(11, ToolResultState::Failed, None, "first")
             .unwrap();
-        pending.append_follow_up_prompt(6, "too early").unwrap();
+        pending.append_follow_up_prompt(7, "too early").unwrap();
         assert!(
             MainAgent::new(None)
                 .supports_edb(&pending)
@@ -12897,11 +12940,11 @@ for line in sys.stdin:
         );
 
         let mut safe = main_agent_multi_tool_batch();
-        safe.append_tool_result(10, ToolResultState::Failed, None, "first")
+        safe.append_tool_result(11, ToolResultState::Failed, None, "first")
             .unwrap();
-        safe.append_tool_result(11, ToolResultState::Succeeded, None, "second")
+        safe.append_tool_result(12, ToolResultState::Succeeded, None, "second")
             .unwrap();
-        safe.append_follow_up_prompt(6, "continue").unwrap();
+        safe.append_follow_up_prompt(7, "continue").unwrap();
         assert!(MainAgent::new(None).supports_edb(&safe).is_ok());
     }
 
@@ -12912,14 +12955,14 @@ for line in sys.stdin:
         reconcile_for_test(&mut agent, &mut edb);
 
         assert!(matches!(
-            edb.get(13),
-            Some(Event::ToolCallResult(result))
-                if result.tool_call_id == 10 && result.state == ToolResultState::Interrupted
-        ));
-        assert!(matches!(
             edb.get(14),
             Some(Event::ToolCallResult(result))
                 if result.tool_call_id == 11 && result.state == ToolResultState::Interrupted
+        ));
+        assert!(matches!(
+            edb.get(15),
+            Some(Event::ToolCallResult(result))
+                if result.tool_call_id == 12 && result.state == ToolResultState::Interrupted
         ));
         assert!(agent.supports_edb(&edb).is_ok());
     }
@@ -12928,25 +12971,20 @@ for line in sys.stdin:
     fn abort_closes_every_not_started_call_without_entering_another_tool() {
         let mut edb = main_agent_multi_tool_batch();
         let agent = MainAgent::new(None);
-        agent.submit_turn_abort(6).unwrap();
+        agent.submit_turn_abort(7).unwrap();
         let mut published = Vec::new();
 
-        interrupt_tool_batch(&[10, 11], &mut edb, &mut |edb| {
+        interrupt_tool_batch(&[11, 12], &mut edb, &mut |edb| {
             published.push(edb.events().last().unwrap().id());
             Ok(())
         })
         .unwrap();
         assert!(
-            begin_turn_abort_if_requested(&agent.input_queue, 6, &mut edb, &mut |_| Ok(()))
+            begin_turn_abort_if_requested(&agent.input_queue, 7, &mut edb, &mut |_| Ok(()))
                 .unwrap()
         );
 
-        assert_eq!(published, vec![13, 14]);
-        assert!(matches!(
-            edb.get(13),
-            Some(Event::ToolCallResult(result))
-                if result.tool_call_id == 10 && result.state == ToolResultState::Interrupted
-        ));
+        assert_eq!(published, vec![14, 15]);
         assert!(matches!(
             edb.get(14),
             Some(Event::ToolCallResult(result))
@@ -12954,7 +12992,12 @@ for line in sys.stdin:
         ));
         assert!(matches!(
             edb.get(15),
-            Some(Event::UserTurnAborted(aborted)) if aborted.prompt_id == 6
+            Some(Event::ToolCallResult(result))
+                if result.tool_call_id == 12 && result.state == ToolResultState::Interrupted
+        ));
+        assert!(matches!(
+            edb.get(16),
+            Some(Event::UserTurnAborted(aborted)) if aborted.prompt_id == 7
         ));
         assert!(agent.supports_edb(&edb).is_ok());
     }
@@ -12974,8 +13017,8 @@ for line in sys.stdin:
         update.rows[0].runs[0].style = 1;
         update.cursor.col = 3;
         update.cursor.underlying = "c".into();
-        edb.append_terminal_update(10, update).unwrap();
-        edb.append_tool_result(10, ToolResultState::Succeeded, None, "{}")
+        edb.append_terminal_update(11, update).unwrap();
+        edb.append_tool_result(11, ToolResultState::Succeeded, None, "{}")
             .unwrap();
 
         let context = main_model_context(&edb).unwrap();
@@ -13042,7 +13085,7 @@ for line in sys.stdin:
             "bom":false
         });
         let raw_detail = serde_json::to_string(&detail).unwrap();
-        edb.append_tool_result(10, ToolResultState::Succeeded, None, raw_detail.clone())
+        edb.append_tool_result(11, ToolResultState::Succeeded, None, raw_detail.clone())
             .unwrap();
 
         let context = main_model_context(&edb).unwrap();
@@ -13067,7 +13110,7 @@ for line in sys.stdin:
             .events()
             .iter()
             .find_map(|event| match event {
-                Event::ToolCallResult(result) if result.tool_call_id == 10 => Some(result),
+                Event::ToolCallResult(result) if result.tool_call_id == 11 => Some(result),
                 _ => None,
             })
             .unwrap();
@@ -13131,8 +13174,8 @@ for line in sys.stdin:
     fn terminal_runtime_loss_events_are_not_projected_into_model_context() {
         let mut edb = main_agent_pending_tool(terminal::CREATE, "{}");
         edb.append_terminal_session_created(
-            10,
-            "pty-10",
+            11,
+            "pty-11",
             terminal::shell_backend(),
             "/workspace",
             120,
@@ -13140,13 +13183,13 @@ for line in sys.stdin:
         )
         .unwrap();
         edb.append_terminal_session_state(
-            "pty-10",
+            "pty-11",
             TerminalSessionState::Lost,
             None,
             "transport <lost> & gone",
         )
         .unwrap();
-        edb.append_tool_result(10, ToolResultState::Succeeded, None, "session was created")
+        edb.append_tool_result(11, ToolResultState::Succeeded, None, "session was created")
             .unwrap();
         assert!(MainAgent::new(None).supports_edb(&edb).is_ok());
 
@@ -13289,7 +13332,7 @@ for line in sys.stdin:
 
     fn main_agent_tool_history(finished: bool) -> EventDataBase {
         let mut edb = main_agent_pending_tool(terminal::LIST, "{}");
-        let tool_call_id = 10;
+        let tool_call_id = 11;
         edb.append_tool_info(tool_call_id, ToolOutputStream::Stdout, "ok")
             .unwrap();
         if finished {
@@ -13317,7 +13360,7 @@ for line in sys.stdin:
             .unwrap();
         edb.append_api_state(api_call_id, prompt_id, ApiState::Completed, "")
             .unwrap();
-        assert_eq!(tool_call_id, 10);
+        assert_eq!(tool_call_id, 11);
         edb
     }
 
@@ -13332,12 +13375,12 @@ for line in sys.stdin:
         assert_eq!(
             edb.append_tool_call(api_call_id, prompt_id, "call-1", terminal::LIST, "{}")
                 .unwrap(),
-            10
+            11
         );
         assert_eq!(
             edb.append_tool_call(api_call_id, prompt_id, "call-2", terminal::STATUS, "{}")
                 .unwrap(),
-            11
+            12
         );
         edb.append_api_state(api_call_id, prompt_id, ApiState::Completed, "")
             .unwrap();

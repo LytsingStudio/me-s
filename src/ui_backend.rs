@@ -57,6 +57,7 @@ pub struct UiAgentSnapshot {
     pub parent_agent_id: Option<AgentId>,
     pub orchestrator_name: String,
     pub edb_path: PathBuf,
+    pub edb_id: String,
     pub edb_size_bytes: u64,
     pub mutation_revision: u64,
     pub last_mutation: Option<EdbMutation>,
@@ -320,6 +321,7 @@ impl UiBackend for WorkspaceUiBackend {
                         .transpose()?,
                     orchestrator_name: workspace.orchestrator_name(&id)?.to_owned(),
                     edb_path: workspace.edb_path(&id),
+                    edb_id: workspace.edb_id(&id)?.to_owned(),
                     edb_size_bytes: workspace.edb_size_bytes(&id)?,
                     mutation_revision: workspace.edb_mutation_revision(&id)?,
                     last_mutation: workspace.last_edb_mutation(&id)?.cloned(),
@@ -635,6 +637,18 @@ mod tests {
             &after_a.agent(&draft.id).unwrap().events,
             &after_b.agent(&draft.id).unwrap().events,
         ));
+        let agent_a = after_a.agent(&draft.id).unwrap();
+        let agent_b = after_b.agent(&draft.id).unwrap();
+        let Event::EdbIdGeneration(identity) = &agent_a.events[0] else {
+            panic!("UI snapshot must retain the raw EDB identity event");
+        };
+        assert_eq!(agent_a.edb_id, identity.edb_id);
+        assert_eq!(agent_b.edb_id, identity.edb_id);
+        assert_eq!(agent_a.edb_id.len(), crate::event::EDB_ID_HEX_LENGTH);
+        assert_eq!(
+            backend.workspace.lock().unwrap().edb_id(&draft.id).unwrap(),
+            identity.edb_id
+        );
 
         let UiCommandReceipt::InputDraftUpdated {
             accepted,

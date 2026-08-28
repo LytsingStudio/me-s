@@ -129,6 +129,7 @@ impl Drop for Workspace {
 struct WorkspaceAgentSnapshot {
     title: Option<String>,
     events: Arc<[Event]>,
+    edb_id: String,
     edb_size_bytes: u64,
     mutation_revision: u64,
     last_mutation: Option<EdbMutation>,
@@ -352,6 +353,15 @@ impl Workspace {
         ))
     }
 
+    pub fn edb_id(&self, id: &AgentId) -> Result<&str> {
+        Ok(self
+            .snapshots
+            .get(id)
+            .ok_or_else(|| format!("Agent {id} does not exist"))?
+            .edb_id
+            .as_str())
+    }
+
     pub fn edb_size_bytes(&self, id: &AgentId) -> Result<u64> {
         Ok(self
             .snapshots
@@ -488,6 +498,7 @@ impl Workspace {
                 title: agent_title::current_title(&events).map(str::to_owned),
                 agent_kind: agent_kind_definition(&events)?.kind,
                 events,
+                edb_id: runtime.edb_id().to_owned(),
                 edb_size_bytes: runtime.edb_size_bytes(),
                 mutation_revision: runtime.edb_mutation_revision(),
                 last_mutation: runtime.last_edb_mutation().cloned(),
@@ -1535,8 +1546,8 @@ mod tests {
             latest_model(&EventDataBase::open(&valid_edb_path).unwrap()),
             Some("other")
         );
-        assert_eq!(EventDataBase::open(&valid_edb_path).unwrap().len(), 3);
-        assert_eq!(workspace.edb_events(&main).unwrap().len(), 5);
+        assert_eq!(EventDataBase::open(&valid_edb_path).unwrap().len(), 4);
+        assert_eq!(workspace.edb_events(&main).unwrap().len(), 6);
         drop(workspace);
 
         let reopened = Workspace::open_with_default_model(
@@ -1546,8 +1557,8 @@ mod tests {
             "test",
         )
         .unwrap();
-        assert_eq!(reopened.edb_events(&main).unwrap().len(), 5);
-        assert_eq!(EventDataBase::open(&valid_edb_path).unwrap().len(), 3);
+        assert_eq!(reopened.edb_events(&main).unwrap().len(), 6);
+        assert_eq!(EventDataBase::open(&valid_edb_path).unwrap().len(), 4);
         drop(reopened);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -1592,6 +1603,10 @@ mod tests {
         fs::write(added_temporary.join("scratch.txt"), "temporary").unwrap();
         assert!(matches!(
             workspace.edb_events(&added).unwrap().first(),
+            Some(Event::EdbIdGeneration(_))
+        ));
+        assert!(matches!(
+            workspace.edb_events(&added).unwrap().get(1),
             Some(Event::AgentKindDef(_))
         ));
         let path = workspace.edb_path(&added);

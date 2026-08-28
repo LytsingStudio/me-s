@@ -458,6 +458,7 @@ fn sync_state_payload(
                 if reset {
                     event_updates.push(json!({
                         "agent_id": agent.id.to_string(),
+                        "edb_id": agent.edb_id,
                         "reset": true,
                         "event_count": agent.events.len(),
                         "mutation_revision": agent.mutation_revision,
@@ -469,6 +470,7 @@ fn sync_state_payload(
                 } else if restore_turn_history {
                     event_updates.push(json!({
                         "agent_id": agent.id.to_string(),
+                        "edb_id": agent.edb_id,
                         "reset": false,
                         "event_count": agent.events.len(),
                         "mutation_revision": agent.mutation_revision,
@@ -505,6 +507,7 @@ fn sync_state_payload(
             };
             event_updates.push(json!({
                 "agent_id": agent.id.to_string(),
+                "edb_id": agent.edb_id,
                 "reset": reset,
                 "event_count": agent.events.len(),
                 "mutation_revision": agent.mutation_revision,
@@ -1639,6 +1642,7 @@ struct AgentMetadata {
     kind: String,
     parent_agent_id: Option<String>,
     orchestrator: String,
+    edb_id: String,
     edb_path: String,
     edb_size_bytes: u64,
     event_count: usize,
@@ -1682,6 +1686,7 @@ fn snapshot_metadata(snapshot: UiSnapshot, include_event_hashes: bool) -> Snapsh
             kind: agent.kind.to_string(),
             parent_agent_id: agent.parent_agent_id.map(|id| id.to_string()),
             orchestrator: agent.orchestrator_name,
+            edb_id: agent.edb_id,
             edb_path: crate::host_path::public_host_path(&agent.edb_path),
             edb_size_bytes: agent.edb_size_bytes,
             event_count: agent.events.len(),
@@ -1728,6 +1733,7 @@ fn model_metadata(model: &UiModelOption) -> ModelMetadata {
 #[derive(Serialize)]
 struct EventsResponse<'a> {
     ok: bool,
+    edb_id: &'a str,
     reset: bool,
     event_count: usize,
     mutation_revision: u64,
@@ -1767,6 +1773,7 @@ fn events_response(
         StatusCode(200),
         &EventsResponse {
             ok: true,
+            edb_id: &agent.edb_id,
             reset,
             event_count: agent.events.len(),
             mutation_revision: agent.mutation_revision,
@@ -2393,6 +2400,7 @@ mod tests {
                 parent_agent_id: None,
                 orchestrator_name: orchestrator_name.into(),
                 edb_path: PathBuf::from("main.edb"),
+                edb_id: "0".repeat(crate::event::EDB_ID_HEX_LENGTH),
                 edb_size_bytes: 0,
                 mutation_revision,
                 last_mutation: None,
@@ -2646,12 +2654,15 @@ mod tests {
             payload["snapshot"]["agents"][0]["last_event_hash"],
             last_hash
         );
+        let expected_edb_id = "0".repeat(crate::event::EDB_ID_HEX_LENGTH);
+        assert_eq!(payload["snapshot"]["agents"][0]["edb_id"], expected_edb_id);
         let ordinary =
             serde_json::to_value(snapshot_metadata(backend.snapshot().unwrap(), false)).unwrap();
         assert_eq!(
             ordinary["agents"][0]["last_event_hash"],
             serde_json::Value::Null
         );
+        assert_eq!(ordinary["agents"][0]["edb_id"], expected_edb_id);
         assert_eq!(
             payload["snapshot"]["chatbot_default_static_prompt"],
             crate::orchestrator::CHATBOT_DEFAULT_STATIC_PROMPT
@@ -2660,6 +2671,20 @@ mod tests {
             ordinary["chatbot_default_static_prompt"],
             crate::orchestrator::CHATBOT_DEFAULT_STATIC_PROMPT
         );
+    }
+
+    #[test]
+    fn events_response_includes_the_session_edb_id() {
+        let backend = sync_test_backend(sync_test_events(3), 4);
+        let response = events_response(&backend, &AgentId::new("main").unwrap(), None).unwrap();
+        let mut body = Vec::new();
+        response.into_reader().read_to_end(&mut body).unwrap();
+        let payload: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(
+            payload["edb_id"],
+            "0".repeat(crate::event::EDB_ID_HEX_LENGTH)
+        );
+        assert_eq!(payload["events"].as_array().unwrap().len(), 3);
     }
 
     #[test]
@@ -2686,6 +2711,10 @@ mod tests {
         )
         .unwrap();
         let update = &valid["event_updates"][0];
+        assert_eq!(
+            update["edb_id"],
+            "0".repeat(crate::event::EDB_ID_HEX_LENGTH)
+        );
         assert_eq!(update["reset"], false);
         assert_eq!(update["events"].as_array().unwrap().len(), 2);
         assert_eq!(update["cursor_event_hash"], final_hash);
@@ -2713,6 +2742,7 @@ mod tests {
         )
         .unwrap();
         let reset = &invalid["event_updates"][0];
+        assert_eq!(reset["edb_id"], "0".repeat(crate::event::EDB_ID_HEX_LENGTH));
         assert_eq!(reset["reset"], true);
         assert_eq!(reset["events"].as_array().unwrap().len(), 3);
     }
@@ -2781,6 +2811,10 @@ mod tests {
         )
         .unwrap();
         let update = &restored["event_updates"][0];
+        assert_eq!(
+            update["edb_id"],
+            "0".repeat(crate::event::EDB_ID_HEX_LENGTH)
+        );
         assert_eq!(update["reset"], false);
         assert_eq!(update["events"], json!([]));
         assert_eq!(update["cursor_event_hash"], final_hash);
@@ -2856,6 +2890,7 @@ mod tests {
         )
         .unwrap();
         let reset = &payload["event_updates"][0];
+        assert_eq!(reset["edb_id"], "0".repeat(crate::event::EDB_ID_HEX_LENGTH));
         assert_eq!(reset["reset"], true);
         assert_eq!(reset["event_count"], 0);
         assert_eq!(reset["cursor_event_hash"], serde_json::Value::Null);
@@ -2938,6 +2973,7 @@ mod tests {
                 parent_agent_id: None,
                 orchestrator_name: "worker-agent".into(),
                 edb_path: PathBuf::from(format!("{id}.edb")),
+                edb_id: "0".repeat(crate::event::EDB_ID_HEX_LENGTH),
                 edb_size_bytes: 0,
                 mutation_revision: 0,
                 last_mutation: None,

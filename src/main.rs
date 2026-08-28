@@ -1029,7 +1029,7 @@ mod tests {
             EventDataBase::open(&workspace_edb_path(&workspace))
                 .unwrap()
                 .len(),
-            0
+            1
         );
         assert!(workspace.join(".me/tools/Terminal.py").is_file());
         assert!(workspace.join(".me/tools/File.py").is_file());
@@ -1109,7 +1109,7 @@ mod tests {
             EventDataBase::open(&workspace_edb_path(&workspace))
                 .unwrap()
                 .len(),
-            4
+            5
         );
         assert!(select_orchestrator(&mut local, &config_path, "worker-agent").is_err());
         fs::remove_dir_all(workspace).unwrap();
@@ -1247,12 +1247,12 @@ mod tests {
         assert_eq!(latest_model(&edb), Some("second"));
         assert_eq!(latest_effort(&edb), Some(me::config::UNSET_EFFORT));
         assert!(matches!(
-            edb.events().get(2),
+            edb.events().get(3),
             Some(me::event::Event::ModelChanged(event))
                 if event.cause == me::event::ModelChangeCause::User
         ));
         assert!(matches!(
-            edb.events().get(3),
+            edb.events().get(4),
             Some(me::event::Event::ReasoningEffortChanged(event))
                 if event.cause == me::event::ReasoningEffortChangeCause::ModelUnsupported
         ));

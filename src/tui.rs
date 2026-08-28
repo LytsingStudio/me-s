@@ -238,7 +238,8 @@ impl ChatProjection {
 
     fn project_event(&mut self, event: &Event) -> Result<()> {
         match event {
-            Event::AgentKindDef(_)
+            Event::EdbIdGeneration(_)
+            | Event::AgentKindDef(_)
             | Event::SystemPrompt(_)
             | Event::ModelContextItem(_)
             | Event::UserTurnAborted(_)
@@ -7380,7 +7381,7 @@ mod tests {
         let prompt = edb.append_user_prompt("ordinary conversation").unwrap();
         assert!(!workmap_view_needs_redraw(0, edb.events(), false));
         assert!(workmap_view_needs_redraw(0, edb.events(), true));
-        assert!(workmap_view_needs_redraw(2, edb.events(), false));
+        assert!(workmap_view_needs_redraw(3, edb.events(), false));
 
         let api = edb.append_api_requesting(prompt).unwrap();
         edb.append_api_state(api, prompt, ApiState::Completed, "")
