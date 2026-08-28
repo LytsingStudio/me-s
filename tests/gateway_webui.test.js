@@ -430,7 +430,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
     for (const relative of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
       const style = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(style).toContain(".transcript-content > :nth-last-child(-n + 32) { content-visibility: visible; contain-intrinsic-size: none; }");
+      expect(style).toContain(".transcript-window > .message-block, .transcript-window > .tool-card { content-visibility: visible;");
       expect(style).toContain(".message-block { contain: layout paint style; content-visibility: auto;");
       expect(style).toContain(".tool-card { contain: layout paint style; content-visibility: auto;");
       expect(style).toContain(".prompt-input-mirror { position: absolute;");
@@ -438,7 +438,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(style).toContain(".objective-summary { position: relative;");
       expect(style).toContain(".objective-details { position: absolute;");
       expect(style).toContain("bottom: calc(100% + 6px)");
-      expect(style).toContain(".ios-webkit .transcript-content > .message-block");
+      expect(style).toContain(".ios-webkit .transcript-window > .message-block");
     }
 
     const transcript = readFileSync(join(import.meta.dir, "../src/webui/transcript.js"), "utf8");

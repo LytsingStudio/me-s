@@ -3489,7 +3489,7 @@ mod tests {
         assert!(STYLE_CSS.contains(".prompt-input-mirror { position: absolute;"));
         assert!(STYLE_CSS.contains("contain: layout paint style;"));
         assert!(STYLE_CSS.contains(".objective-details { position: absolute;"));
-        assert!(STYLE_CSS.contains(".ios-webkit .transcript-content > .message-block"));
+        assert!(STYLE_CSS.contains(".ios-webkit .transcript-window > .message-block"));
         assert!(APP_JS.contains("message.kind === \"notice\" || message.kind === \"session\""));
         assert!(APP_JS.contains("content.textContent = message.content;"));
         assert!(APP_JS.contains("const CONNECTION_DEGRADED_GRACE_MS = 2000;"));
@@ -3497,7 +3497,10 @@ mod tests {
         assert!(APP_JS.contains("const CONNECTION_STABILIZE_SUCCESSES = 2;"));
         assert!(APP_JS.contains("connectionPhase: \"initial\""));
         assert!(APP_JS.contains("connectionOverlayMode: null"));
-        assert!(STYLE_CSS.contains(".transcript-content > :nth-last-child(-n + 32)"));
+        assert!(
+            STYLE_CSS
+                .contains(".transcript-window > .message-block, .transcript-window > .tool-card")
+        );
         assert!(TRANSCRIPT_JS.contains("let committedScrollHeight = viewport.scrollHeight;"));
         assert!(TRANSCRIPT_JS.contains("scrollHeight !== committedScrollHeight"));
         assert!(TRANSCRIPT_JS.contains("const applyFollowNow = (force = forcing)"));
@@ -3662,8 +3665,11 @@ mod tests {
         assert!(APP_JS.contains(
             "renderTranscript(Boolean(changes.fullReplay), changes.transcriptFrom ?? 0)"
         ));
-        assert!(APP_JS.contains("function reconcileTranscript(messages, changedFrom = 0)"));
-        assert!(APP_JS.contains("for (let index = start; index < messages.length; index += 1)"));
+        assert!(APP_JS.contains(
+            "function reconcileTranscript(container, messages, start, end, previousKind = null)"
+        ));
+        assert!(APP_JS.contains("for (let index = start; index < end; index += 1)"));
+        assert!(APP_JS.contains("transcriptVirtualizer.update(messages"));
         assert!(!APP_JS.contains("projection.messages.filter((message) =>"));
         assert!(APP_JS.contains("projection._messageByKey.get(`tool:${node.dataset.workerWait}`)"));
         assert!(APP_JS.contains("function markPendingPromptConfirmation(store, changes)"));
@@ -3700,15 +3706,19 @@ mod tests {
             1
         );
         assert!(APP_JS.contains("MeTranscript.reconcileHtmlChildren(markdown, rendered)"));
-        assert!(APP_JS.contains("new Map([...elements.transcriptContent.children].slice(start)"));
+        assert!(APP_JS.contains("new Map([...container.children]"));
+        assert!(APP_JS.contains("MeTranscript.createVirtualTranscript("));
+        assert!(APP_JS.contains("transcriptVirtualizer.noteScroll();"));
         assert!(!APP_JS.contains("markdown.innerHTML = rendered"));
         assert!(
             !APP_JS.contains("if (forceFull) replaceElementChildren(elements.transcriptContent)")
         );
-        assert!(STYLE_CSS.contains("overflow-anchor: auto"));
-        assert!(
-            STYLE_CSS.contains(".transcript-content { display: flow-root; min-height: 100%; }")
-        );
+        assert!(STYLE_CSS.contains("overflow-anchor: none"));
+        assert!(STYLE_CSS.contains(
+            ".transcript-content { display: flow-root; min-height: 100%; overflow-anchor: none; }"
+        ));
+        assert!(STYLE_CSS.contains(".transcript-spacer {"));
+        assert!(STYLE_CSS.contains(".transcript-window { display: flow-root;"));
         assert!(APP_JS.contains("function createAgentRow(agent)"));
         assert!(!APP_JS.contains("elements.agents.innerHTML = state.snapshot.agents.map"));
     }

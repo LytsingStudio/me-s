@@ -3,7 +3,7 @@
 const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
-const { reconcileChildren, reconcileNode } = require("../src/webui/transcript.js");
+const { createVirtualTranscript, reconcileChildren, reconcileNode } = require("../src/webui/transcript.js");
 require("../src/webui/edb-cache.js");
 
 
@@ -16,10 +16,22 @@ class FakeNode {
     this.parentNode = null;
     this.attributeMap = new Map();
     this.scrollLeft = 0;
+    this.style = {};
+    this.dataset = {};
+    this.className = "";
+    this.measuredHeight = 0;
   }
 
   get attributes() {
     return [...this.attributeMap].map(([name, value]) => ({ name, value }));
+  }
+
+  get children() {
+    return this.childNodes.filter((node) => node.nodeType === 1);
+  }
+
+  get lastElementChild() {
+    return this.children[this.children.length - 1] || null;
   }
 
   get lastChild() {
@@ -137,6 +149,90 @@ function textMessageNode(kind, content) {
   return { node, replacement: () => replacement };
 }
 
+function virtualHarness(options = {}) {
+  const frames = new Map();
+  let nextFrame = 1;
+  let resizeCallback = null;
+  let following = Boolean(options.following);
+  const viewport = {
+    clientHeight: options.clientHeight ?? 200,
+    clientWidth: options.clientWidth ?? 800,
+    scrollTop: options.scrollTop ?? 0,
+    getBoundingClientRect() { return { top: 0, bottom: this.clientHeight, height: this.clientHeight }; },
+  };
+  const documentRef = { createElement: (tagName) => element(tagName) };
+  const content = element("div");
+  content.ownerDocument = documentRef;
+  content.clientWidth = viewport.clientWidth;
+  let controller = null;
+  const renderRange = (container, items, start, end) => {
+    const existing = new Map(container.children.map((node) => [node.dataset.messageKey, node]));
+    let position = 0;
+    for (let index = start; index < end; index += 1) {
+      const item = items[index];
+      let node = container.children[position];
+      if (!node || node.dataset.messageKey !== item.key) {
+        node = existing.get(item.key) || element("div");
+        container.insertBefore(node, container.children[position] || null);
+      }
+      node.dataset.messageKey = item.key;
+      node.dataset.messageIndex = String(index);
+      node.item = item;
+      node.getBoundingClientRect = () => {
+        const topSpacer = Number.parseFloat(content.children[0].style.height) || 0;
+        const before = controller.windowElement.children
+          .slice(0, controller.windowElement.children.indexOf(node))
+          .reduce((total, candidate) => total + candidate.item.height, 0);
+        const top = topSpacer + before - viewport.scrollTop;
+        return { top, bottom: top + node.item.height, height: node.item.height };
+      };
+      position += 1;
+    }
+    while (container.children.length > position) container.lastElementChild.remove();
+  };
+  controller = createVirtualTranscript(viewport, content, {
+    targetHeight: options.targetHeight ?? 500,
+    edgeOverscan: options.edgeOverscan ?? 50,
+    key: (item) => item.key,
+    revision: (item) => item.revision ?? 0,
+    context: (item) => item.kind ?? "message",
+    estimateHeight: (item) => item.estimate ?? 100,
+    renderRange,
+    renderEmpty: (container) => {
+      while (container.lastChild) container.lastChild.remove();
+      container.append(element("div"));
+    },
+    isFollowing: () => following,
+  }, {
+    requestFrame(callback) { const id = nextFrame++; frames.set(id, callback); return id; },
+    cancelFrame(id) { frames.delete(id); },
+    createResizeObserver(callback) {
+      resizeCallback = callback;
+      return { observe() {}, disconnect() {} };
+    },
+    measureNode: (node) => node.item?.height || 0,
+  });
+  const flushFrames = () => {
+    while (frames.size) {
+      const callbacks = [...frames.values()];
+      frames.clear();
+      callbacks.forEach((callback) => callback());
+    }
+  };
+  return {
+    viewport, content, controller,
+    setFollowing(value) { following = Boolean(value); },
+    resize() { resizeCallback?.(); },
+    flushFrames,
+  };
+}
+
+function virtualItems(count, height = 100) {
+  return Array.from({ length: count }, (_, index) => ({
+    key: `message-${index}`, revision: 1, estimate: 100, height, kind: "message",
+  }));
+}
+
 describe("shared WebUI transcript reconciliation", () => {
   test("preserves stable Markdown media and scroll containers while text grows", () => {
     const paragraphText = text("Stable ");
@@ -240,6 +336,98 @@ describe("shared WebUI transcript reconciliation", () => {
     expect(link.getAttribute("rel")).toBe("noopener");
   });
 
+  test("bounds the materialized DOM and represents omitted history with two spacers", () => {
+    const subject = virtualHarness();
+    const items = virtualItems(100);
+    subject.controller.update(items, { scopeKey: "main", force: true, following: false });
+    const state = subject.controller.inspect();
+    expect(state.start).toBe(0);
+    expect(state.end).toBeLessThanOrEqual(6);
+    expect(state.materialized).toBeLessThanOrEqual(6);
+    expect(state.topHeight).toBe(0);
+    expect(state.bottomHeight).toBeGreaterThan(9_000);
+    expect(subject.content.children).toHaveLength(3);
+    expect(subject.content.children[0].className).toContain("transcript-spacer-top");
+    expect(subject.content.children[1]).toBe(subject.controller.windowElement);
+    expect(subject.content.children[2].className).toContain("transcript-spacer-bottom");
+  });
+
+  test("moves the virtual window both ways and reuses overlapping keyed nodes", () => {
+    const subject = virtualHarness();
+    const items = virtualItems(100);
+    subject.controller.update(items, { scopeKey: "main", force: true, following: false });
+    const stable = subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-4");
+    subject.viewport.scrollTop = 450;
+    subject.controller.noteScroll();
+    subject.flushFrames();
+    expect(subject.controller.inspect().start).toBeGreaterThan(0);
+    expect(subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-4")).toBe(stable);
+    subject.viewport.scrollTop = 1_400;
+    subject.controller.noteScroll();
+    subject.flushFrames();
+    const lower = subject.controller.inspect();
+    expect(lower.start).toBeGreaterThan(10);
+    expect(lower.end).toBeLessThan(25);
+    subject.viewport.scrollTop = 250;
+    subject.controller.noteScroll();
+    subject.flushFrames();
+    expect(subject.controller.inspect().start).toBeLessThan(5);
+  });
+
+  test("preserves the visible message anchor when a measured height above it changes", () => {
+    const subject = virtualHarness({ scrollTop: 250 });
+    const items = virtualItems(30);
+    subject.controller.update(items, { scopeKey: "main", force: true, following: false });
+    const anchor = subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-2");
+    expect(anchor.getBoundingClientRect().top).toBe(-50);
+    items[1].height = 180;
+    subject.resize();
+    subject.flushFrames();
+    expect(subject.viewport.scrollTop).toBe(330);
+    expect(anchor.getBoundingClientRect().top).toBe(-50);
+  });
+
+  test("keeps one oversized atomic message intact beyond the soft pixel budget", () => {
+    const subject = virtualHarness({ scrollTop: 150 });
+    const items = virtualItems(3);
+    items[1].estimate = 900;
+    items[1].height = 900;
+    subject.controller.update(items, { scopeKey: "main", force: true, following: false });
+    expect(subject.controller.windowElement.children
+      .some((node) => node.dataset.messageKey === "message-1")).toBe(true);
+    expect(subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-1").item.height).toBe(900);
+  });
+
+  test("keeps the tail materialized while following but leaves history browsing anchored", () => {
+    const tail = virtualHarness({ following: true });
+    const tailItems = virtualItems(100);
+    tail.controller.update(tailItems, { scopeKey: "main", force: true, following: true });
+    const appendedTail = [...tailItems, {
+      key: "message-100", revision: 1, estimate: 100, height: 100, kind: "message",
+    }];
+    tail.controller.update(appendedTail, { scopeKey: "main", changedFrom: 100, following: true });
+    expect(tail.controller.inspect().end).toBe(101);
+    expect(tail.controller.windowElement.children.at(-1).dataset.messageKey).toBe("message-100");
+
+    const history = virtualHarness({ following: false, scrollTop: 0 });
+    const historyItems = virtualItems(100);
+    history.controller.update(historyItems, { scopeKey: "main", force: true, following: false });
+    const before = history.controller.inspect();
+    const appendedHistory = [...historyItems, {
+      key: "message-100", revision: 1, estimate: 100, height: 100, kind: "message",
+    }];
+    history.controller.update(appendedHistory, { scopeKey: "main", changedFrom: 100, following: false });
+    const after = history.controller.inspect();
+    expect(after.start).toBe(before.start);
+    expect(after.end).toBe(before.end);
+    expect(history.viewport.scrollTop).toBe(0);
+    expect(after.bottomHeight).toBe(before.bottomHeight + 100);
+  });
+
   test("keeps me-s and gateway on the shared stable-DOM and gesture paths", () => {
     const single = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const gateway = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
@@ -248,6 +436,9 @@ describe("shared WebUI transcript reconciliation", () => {
       expect(source).toContain("MeTranscript.reconcileNode(details, replacement)");
       expect(source).toContain('typeof window.PointerEvent === "function"');
       expect(source).toContain('addEventListener("scrollend", finishTranscriptScrolling');
+      expect(source).toContain("MeTranscript.createVirtualTranscript(");
+      expect(source).toContain("transcriptVirtualizer.noteScroll()");
+      expect(source).toContain("renderRange: reconcileTranscript");
       expect(source).not.toContain("markdown.innerHTML = rendered");
       expect(source).not.toContain("if (forceFull) replaceElementChildren(elements.transcriptContent)");
     }

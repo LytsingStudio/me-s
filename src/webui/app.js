@@ -104,6 +104,8 @@ const state = {
   terminalFramesUnavailable: new Set(),
   pageClosing: false,
 };
+let transcriptVirtualizer = null;
+
 
 const $ = (selector) => document.querySelector(selector);
 const elements = {
@@ -2032,6 +2034,7 @@ function renderIncremental(request) {
   if (changes.turn || promptConfirmed) renderComposer();
   if (request.status || changes.status) renderStatus();
   if (transcriptChanged || promptConfirmed) {
+    transcriptVirtualizer?.layoutChanged();
     transcriptBottomFollower.layoutChanged();
   }
   if (state.view.kind === "terminal") void renderTerminal();
@@ -2088,6 +2091,8 @@ function updateScrollToBottomButton() {
 function scrollTranscriptToBottomAfterLayout() {
   if (state.view.kind !== "chat") return;
   transcriptBottomFollower.follow();
+  transcriptVirtualizer?.follow();
+  transcriptBottomFollower.layoutChanged();
 }
 
 function suspendTranscriptAutoFollow() {
@@ -2426,50 +2431,62 @@ function renderTranscript(forceFull = false, changedFrom = 0) {
     || !messages.some((message) => message.kind === "user" && message.eventId === state.userMenu.eventId))) {
     closeUserMessageMenu();
   }
-  if (!messages.length) {
-    const environment = state.snapshot.environment;
-    const rendered = `<div class="empty-state"><div><strong>ME-S</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
-    MeTranscript.reconcileHtmlChildren(elements.transcriptContent, rendered);
+  if (!transcriptVirtualizer) {
+    if (!messages.length) renderEmptyTranscript(elements.transcriptContent);
+    else reconcileTranscript(elements.transcriptContent, messages, 0, messages.length, null);
     return;
   }
-  reconcileTranscript(messages, forceFull ? 0 : changedFrom);
+  transcriptVirtualizer.update(messages, {
+    scopeKey: state.selectedAgent || "",
+    changedFrom: forceFull ? 0 : changedFrom,
+    force: forceFull,
+    following: transcriptBottomFollower.isFollowing(),
+  });
 }
 
-function reconcileTranscript(messages, changedFrom = 0) {
-  const start = Math.max(0, Math.min(changedFrom, messages.length));
-  const existing = new Map([...elements.transcriptContent.children].slice(start)
+function renderEmptyTranscript(container) {
+  const environment = state.snapshot.environment;
+  const rendered = `<div class="empty-state"><div><strong>ME-S</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
+  MeTranscript.reconcileHtmlChildren(container, rendered);
+}
+
+function estimateTranscriptMessageHeight(message) {
+  if (!messageIsVisible(message)) return 0;
+  if (message.kind === "tool" || message.kind === "worker-activity") return 51;
+  if (message.kind === "turn-toolbar") return 40;
+  if (message.kind === "user") return 72;
+  if (message.kind === "assistant") return 120;
+  return 45;
+}
+
+function transcriptMessageContext(message) {
+  return messageIsVisible(message) ? message.kind : null;
+}
+
+function reconcileTranscript(container, messages, start, end, previousKind = null) {
+  const existing = new Map([...container.children]
     .filter((node) => node.dataset.messageKey)
     .map((node) => [node.dataset.messageKey, node]));
-  let previousKind = previousVisibleRenderedKind(start);
-  for (let index = start; index < messages.length; index += 1) {
+  let position = 0;
+  for (let index = start; index < end; index += 1) {
     const message = messages[index];
     const visible = messageIsVisible(message);
-    const afterTool = visible && isToolLikeKind(previousKind) && message.kind === "assistant";
-    const followsTool = visible && previousKind === "tool" && message.kind === "tool";
+    if (!visible) continue;
+    const afterTool = isToolLikeKind(previousKind) && message.kind === "assistant";
+    const followsTool = previousKind === "tool" && message.kind === "tool";
     const key = messageDomKey(message, index);
     const revision = messageRenderRevision(message, afterTool, followsTool);
-    let node = elements.transcriptContent.children[index];
+    let node = container.children[position];
     if (!node || node.dataset.messageKey !== key) {
       node = existing.get(key) || createMessageNode(message, afterTool, followsTool, index);
-      elements.transcriptContent.insertBefore(
-        node,
-        elements.transcriptContent.children[index] || null,
-      );
+      container.insertBefore(node, container.children[position] || null);
     }
+    node.dataset.messageIndex = String(index);
     if (node.meRenderRevision !== revision) updateMessageNode(node, message, afterTool, followsTool, index);
-    if (visible) previousKind = message.kind;
+    previousKind = message.kind;
+    position += 1;
   }
-  while (elements.transcriptContent.children.length > messages.length) {
-    elements.transcriptContent.lastElementChild.remove();
-  }
-}
-
-function previousVisibleRenderedKind(index) {
-  for (let previous = index - 1; previous >= 0; previous -= 1) {
-    const node = elements.transcriptContent.children[previous];
-    if (node?.dataset.messageVisible === "true") return node.dataset.messageKind || null;
-  }
-  return null;
+  while (container.children.length > position) container.lastElementChild.remove();
 }
 
 const ASSISTANT_ONLY_NON_RENDERING_CHARACTERS = /^[\p{White_Space}\p{Default_Ignorable_Code_Point}\p{Cc}]*$/u;
@@ -2539,6 +2556,7 @@ function updateMessageNode(node, message, afterTool, followsTool, index) {
 
 function initializeMessageNode(node, message, afterTool, followsTool, index) {
   node.dataset.messageKey = messageDomKey(message, index);
+  node.dataset.messageIndex = String(index);
   node.dataset.messageVisible = String(messageIsVisible(message));
   node.dataset.messageKind = messageIsVisible(message) ? message.kind : "";
   node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
@@ -2715,6 +2733,7 @@ function bindToolCard(card) {
       updateToolCardNode(card, messages[index].tool);
       refreshRunningToolNodes();
       card.meRenderRevision = messageRenderRevision(messages[index], false, card.classList.contains("follows-tool"));
+      transcriptVirtualizer?.layoutChanged();
     }
   };
   card.addEventListener("click", toggle);
@@ -4158,6 +4177,7 @@ window.addEventListener("resize", () => {
   closeAgentMenu();
   positionToastRegion();
   updateScrollToBottomButton();
+  transcriptVirtualizer?.layoutChanged();
   if (state.view.kind === "terminal") {
     if (state.terminalFollowBottom) requestAnimationFrame(scrollTerminalToBottom);
     void renderTerminal();
@@ -4184,9 +4204,24 @@ const transcriptBottomFollower = createTranscriptBottomFollower(
   elements.transcriptContent,
   updateScrollToBottomButton,
 );
+transcriptVirtualizer = MeTranscript.createVirtualTranscript(
+  elements.transcript,
+  elements.transcriptContent,
+  {
+    key: messageDomKey,
+    revision: (message) => messageRenderRevision(message, false, false),
+    context: transcriptMessageContext,
+    estimateHeight: estimateTranscriptMessageHeight,
+    renderRange: reconcileTranscript,
+    renderEmpty: renderEmptyTranscript,
+    isFollowing: () => transcriptBottomFollower.isFollowing(),
+    onLayoutChange: () => transcriptBottomFollower.layoutChanged(),
+  },
+);
 elements.transcript.addEventListener("scroll", () => {
   closeUserMessageMenu();
   transcriptBottomFollower.noteScroll();
+  transcriptVirtualizer.noteScroll();
 }, { passive: true });
 elements.agents.addEventListener("scroll", closeAgentMenu, { passive: true });
 elements.transcript.addEventListener("wheel", suspendTranscriptAutoFollow, { passive: true });
