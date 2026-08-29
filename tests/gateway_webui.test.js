@@ -41,10 +41,11 @@ function loadRuntime(relative) {
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, apiPath: frontendRuntime.apiPath,
       eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
       eventRecoveryMatches, selectedEventRecoveryReady, httpSyncProgressSignature, isIosWebKit,
-      sessionStartupLocked: typeof sessionStartupLocked === "function" ? sessionStartupLocked : null,
-      noteStartupProgress: typeof noteStartupProgress === "function" ? noteStartupProgress : null,
-      gatewayStartupReady: typeof gatewayStartupReady === "function" ? gatewayStartupReady : null,
-      noteGatewayStartupProgress: typeof noteGatewayStartupProgress === "function" ? noteGatewayStartupProgress : null,
+      createAgentLoadProgress: typeof createAgentLoadProgress === "function" ? createAgentLoadProgress : null,
+      prepareAgentLoadProgress: typeof prepareAgentLoadProgress === "function" ? prepareAgentLoadProgress : null,
+      settleAgentLoadProgress: typeof settleAgentLoadProgress === "function" ? settleAgentLoadProgress : null,
+      agentLoadingState: typeof agentLoadingState === "function" ? agentLoadingState : null,
+      workspaceMetadataReady: typeof workspaceMetadataReady === "function" ? workspaceMetadataReady : null,
       applyGatewayStartupMetadata: typeof applyGatewayStartupMetadata === "function" ? applyGatewayStartupMetadata : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
@@ -381,7 +382,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
-  test("keeps bulk recovery current-session scoped and commits only at its fixed target", () => {
+  test("keeps bulk recovery current-session scoped and exposes progress on its session row", () => {
     for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       expect(runtime.shouldUseBulkEventRecovery(99, 0)).toBe(false);
@@ -415,10 +416,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain("full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged)");
       expect(source).toContain("if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();");
       expect(source).toContain("if (bulkEventRecoveryActive()) return emptyProjectionChanges();");
-      expect(source).toContain('elements.connectionRetry.classList.add("hidden")');
-      expect(source).toContain('elements.eventRecoveryProgress.setAttribute("aria-valuenow", String(percent))');
-      expect(source).toContain('elements.eventRecoveryProgressFill.style.transform = `scaleX(${progress})`');
-      expect(source).toContain('elements.app.inert = true;');
+      expect(source).toContain("loadProgress: createAgentLoadProgress(meta, events.length, mutationRevision)");
+      expect(source).toContain("percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100)");
+      expect(source).not.toContain("showEventRecoveryOverlay");
+      expect(source).not.toContain("eventRecoveryProgressFill");
     }
     const gateway = loadRuntime("../src/webui/app.js");
     const first = gateway.emptyGatewayWorkspaceState();
@@ -524,7 +525,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
-  if (sessionStartupLocked(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -716,23 +716,46 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
-  test("keeps every session disabled until all Workspace startup work finishes", () => {
+  test("tracks cache restoration and catch-up independently for each session", () => {
     const gateway = loadRuntime("../src/webui/app.js");
-    expect(gateway.sessionStartupLocked()).toBe(true);
-    gateway.state.gateway.workspaces = [{ id: "chat" }, { id: "w-one" }];
+    const readyMeta = {
+      id: "ready", edb_id: "a".repeat(64), event_count: 2, mutation_revision: 1,
+      prompt_submission_revision: 0, input_draft_revision: 0,
+    };
+    const pendingMeta = {
+      id: "pending", edb_id: "b".repeat(64), event_count: 6, mutation_revision: 1,
+      prompt_submission_revision: 0, input_draft_revision: 0,
+    };
     gateway.state.workspaceId = "chat";
+    gateway.state.snapshot = { environment: { workspace: "/chat" }, agents: [readyMeta, pendingMeta] };
     gateway.state.edbCacheInitialized = true;
-    gateway.state.activeCatchUpPending = false;
+    const cached = [event("AgentTurn", 1, { state: "Completed" }), event("AgentTurn", 2, { state: "Completed" })];
+    gateway.state.stores.set("ready", gateway.createAgentStore(readyMeta, {
+      events: cached, eventCount: 2, mutationRevision: 1, lastEventHash: "ready-hash",
+    }));
+    const pending = gateway.createAgentStore(pendingMeta, {
+      events: cached, eventCount: 2, mutationRevision: 1, lastEventHash: "pending-hash",
+    });
+    gateway.state.stores.set("pending", pending);
+    expect(gateway.agentLoadingState("chat", "ready")).toEqual({ loading: false, percent: null });
+    expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 0 });
+    pending.eventCount = 4;
+    expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 50 });
+    pending.eventCount = 6;
+    gateway.settleAgentLoadProgress(pending);
+    expect(pending.loadProgress).toBeNull();
+    gateway.prepareAgentLoadProgress(
+      pending, { ...pendingMeta, event_count: 10 }, null, pending.eventCount, pending.mutationRevision,
+    );
+    expect(pending.loadProgress).toEqual({
+      mutationRevision: 1, startEventCount: 6, targetEventCount: 10,
+    });
+
+
     const inactive = gateway.emptyGatewayWorkspaceState();
-    inactive.edbCacheInitialized = true;
-    inactive.catchUpPending = true;
+    inactive.snapshot = { environment: { workspace: "/other" }, agents: [pendingMeta] };
     gateway.state.workspaceStates.set("w-one", inactive);
-    expect(gateway.gatewayStartupReady()).toBe(false);
-    expect(gateway.sessionStartupLocked("chat", "ready")).toBe(true);
-    inactive.catchUpPending = false;
-    expect(gateway.gatewayStartupReady()).toBe(true);
-    expect(gateway.noteGatewayStartupProgress()).toBe(true);
-    expect(gateway.sessionStartupLocked("chat", "pending")).toBe(false);
+    expect(gateway.agentLoadingState("w-one", "pending")).toEqual({ loading: true, percent: null });
   });
 
   test("keeps complete cached Events resident without client-only loading state", () => {
@@ -999,13 +1022,13 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain('class="agent-delete"');
     expect(source).toContain('void openDeleteAgent(agent.id)');
     expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
-    expect(source).toContain("const active = !startupLoading && sidebarAgentActive(summary);");
+    expect(source).toContain("const active = !loadingState.loading && sidebarAgentActive(summary);");
     expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
-    expect(source).toContain("startupPending: true");
-    expect(source).toContain('row.classList.toggle("startup-loading", startupLoading)');
-    expect(source).toContain("item.disabled = startupLoading");
-    expect(source).toContain("deleteButton.disabled = startupLoading");
-    expect(source).toContain("sessionStartupLocked(");
+    expect(source).not.toContain("startupPending: true");
+    expect(source).toContain('row.classList.toggle("session-loading", loadingState.loading)');
+    expect(source).toContain('class="agent-load-progress hidden"');
+    expect(source).not.toContain("item.disabled = startupLoading");
+    expect(source).not.toContain("deleteButton.disabled = startupLoading");
     expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
     expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
     expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
@@ -1018,10 +1041,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain("animation: agent-label-sweep 3s ease-in-out infinite;");
     expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
     expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
-    expect(styles).toContain(".agent-row.startup-loading { opacity: .52; }");
-    expect(styles).toContain(".agent-dot.startup-loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
-    expect(styles).toContain("animation: agent-startup-spin .8s linear infinite;");
-    expect(styles).toContain("@keyframes agent-startup-spin { to { transform: rotate(360deg); } }");
+    expect(styles).toContain(".agent-row.session-loading { opacity: .72; }");
+    expect(styles).toContain(".agent-dot.loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
+    expect(styles).toContain("animation: agent-loading-spin .8s linear infinite;");
+    expect(styles).toContain("@keyframes agent-loading-spin { to { transform: rotate(360deg); } }");
     expect(styles).toContain(".statusbar { contain: layout paint style;");
     expect(styles).toContain("font-weight: 700; white-space: nowrap;");
     expect(styles).toContain(".status-model-icon {");

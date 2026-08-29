@@ -3484,13 +3484,15 @@ mod tests {
     fn embedded_webui_uses_recoverable_incremental_http_polling() {
         assert!(INDEX_HTML.contains("id=\"connection-overlay\""));
         assert!(INDEX_HTML.contains("id=\"connection-retry\""));
-        assert!(INDEX_HTML.contains("id=\"event-recovery-progress\""));
-        assert!(INDEX_HTML.contains("role=\"progressbar\""));
+        assert!(!INDEX_HTML.contains("id=\"event-recovery-progress\""));
+        assert!(!INDEX_HTML.contains("role=\"progressbar\""));
         assert!(
             STYLE_CSS.contains(".connection-overlay { position: fixed; inset: 0; z-index: 120;")
         );
-        assert!(STYLE_CSS.contains(".event-recovery-progress-fill"));
+        assert!(!STYLE_CSS.contains(".event-recovery-progress-fill"));
+        assert!(STYLE_CSS.contains(".agent-load-progress"));
         assert!(APP_JS.contains("function eventRecoveryProgress(recovery, localEventCount)"));
+        assert!(APP_JS.contains("function agentLoadingState(workspaceId, agentId)"));
         assert!(APP_JS.contains("api(\"/api/sync\""));
         assert!(!APP_JS.contains("new WebSocket"));
         assert!(APP_JS.contains("if (state.syncInFlight"));
@@ -3598,7 +3600,9 @@ mod tests {
     #[test]
     fn sidebar_agent_uses_turn_lifecycle_and_stronger_three_second_sweep() {
         assert!(APP_JS.contains("if (kind === \"AgentTurn\") summary.turnState = value.state;"));
-        assert!(APP_JS.contains("const active = !startupLoading && sidebarAgentActive(summary);"));
+        assert!(
+            APP_JS.contains("const active = !loadingState.loading && sidebarAgentActive(summary);")
+        );
         assert!(!APP_JS.contains("const active = API_ACTIVE.has(summary?.apiState);"));
         assert!(
             !APP_JS
@@ -3628,15 +3632,19 @@ mod tests {
             "@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }"
         ));
         assert!(STYLE_CSS.contains(
-            "@media (prefers-reduced-motion: reduce) { .agent-dot.startup-loading, .agent-dot.active { animation: none; }"
+            "@media (prefers-reduced-motion: reduce) { .agent-dot.loading, .agent-dot.active { animation: none; }"
         ));
-        assert!(APP_JS.contains("row.classList.toggle(\"startup-loading\", startupLoading)"));
-        assert!(APP_JS.contains("item.disabled = startupLoading"));
-        assert!(APP_JS.contains("deleteButton.disabled = startupLoading"));
-        assert!(STYLE_CSS.contains("animation: agent-startup-spin .8s linear infinite"));
+        assert!(APP_JS.contains("row.classList.toggle(\"session-loading\", loadingState.loading)"));
+        assert!(APP_JS.contains(
+            "percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100)"
+        ));
+        assert!(!APP_JS.contains("item.disabled = startupLoading"));
+        assert!(!APP_JS.contains("deleteButton.disabled = startupLoading"));
+        assert!(!APP_JS.contains("startupPending: true"));
+        assert!(STYLE_CSS.contains("animation: agent-loading-spin .8s linear infinite"));
         assert!(
             STYLE_CSS
-                .contains("@keyframes agent-startup-spin { to { transform: rotate(360deg); } }")
+                .contains("@keyframes agent-loading-spin { to { transform: rotate(360deg); } }")
         );
         assert!(
             THEME_CSS.contains("--activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));")

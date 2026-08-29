@@ -98,9 +98,11 @@ describe("browser-local raw EDB cache", () => {
     expect(sharedSource).toContain("state.stores.clear()");
     expect(sharedSource).toContain("events: store.events");
     expect(sharedSource).toContain("delta: batch ? { ...batch, reset: replace } : null");
-    expect(sharedSource).toContain("startupPending: true");
-    expect(sharedSource).toContain("item.disabled = startupLoading");
-    expect(sharedSource).toContain("deleteButton.disabled = startupLoading");
+    expect(sharedSource).not.toContain("startupPending: true");
+    expect(sharedSource).toContain("loadProgress: createAgentLoadProgress(meta, events.length, mutationRevision)");
+    expect(sharedSource).toContain("function agentLoadingState(workspaceId, agentId)");
+    expect(sharedSource).not.toContain("item.disabled = startupLoading");
+    expect(sharedSource).not.toContain("deleteButton.disabled = startupLoading");
 
     for (const runtimeSource of [directRuntime, gatewayRuntime]) {
       expect(runtimeSource).toContain("createEdbCache()");

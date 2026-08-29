@@ -75,7 +75,6 @@ const state = {
   backgroundSyncDueAt: null,
   backgroundSyncOperation: null,
   backgroundSyncCursor: 0,
-  startupPending: true,
   startupMetadataPending: false,
   activeCatchUpPending: true,
   snapshot: {
@@ -158,9 +157,6 @@ const elements = {
   connectionOverlay: $("#connection-overlay"),
   connectionOverlayTitle: $("#connection-overlay-title"),
   connectionOverlayMessage: $("#connection-overlay-message"),
-  eventRecoveryProgress: $("#event-recovery-progress"),
-  eventRecoveryProgressFill: $("#event-recovery-progress-fill"),
-  eventRecoveryProgressLabel: $("#event-recovery-progress-label"),
   connectionRetry: $("#connection-retry"),
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
@@ -519,16 +515,54 @@ function discardStoredAgentEdb(snapshot, agentId, store = null) {
   if (key) void edbCache.discardSession(key);
 }
 
+function createAgentLoadProgress(meta, localEventCount, localMutationRevision) {
+  const mutationRevision = Number(meta.mutation_revision) || 0;
+  const targetEventCount = Math.max(0, Number(meta.event_count) || 0);
+  const sameMutation = (Number(localMutationRevision) || 0) === mutationRevision;
+  const startEventCount = sameMutation ? Math.max(0, Number(localEventCount) || 0) : 0;
+  return startEventCount < targetEventCount
+    ? { mutationRevision, startEventCount, targetEventCount } : null;
+}
+
+function loadProgressSignature(store) {
+  const progress = store?.loadProgress;
+  return progress
+    ? `${progress.mutationRevision}:${progress.startEventCount}:${progress.targetEventCount}:${store.eventCount}` : "";
+}
+
+function prepareAgentLoadProgress(store, meta, payload, previousEventCount, previousMutationRevision) {
+  const mutationRevision = Number(payload?.mutation_revision ?? meta.mutation_revision) || 0;
+  const targetEventCount = Math.max(0, Number(payload?.event_count ?? meta.event_count) || 0);
+  if (store.loadProgress && store.loadProgress.mutationRevision !== mutationRevision) {
+    store.loadProgress = null;
+  }
+  if (!store.loadProgress) {
+    const reset = Boolean(payload?.reset)
+      || (Number(previousMutationRevision) || 0) !== mutationRevision;
+    const startEventCount = reset ? 0 : Math.max(0, Number(previousEventCount) || 0);
+    if (startEventCount < targetEventCount) {
+      store.loadProgress = { mutationRevision, startEventCount, targetEventCount };
+    }
+  }
+}
+
+function settleAgentLoadProgress(store) {
+  if (store.loadProgress && store.eventCount >= store.loadProgress.targetEventCount) {
+    store.loadProgress = null;
+  }
+}
+
 function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
   const events = Array.isArray(cached?.events) ? cached.events : [];
   const scope = edbCacheScope(snapshot);
   const edbId = String(meta.edb_id || "");
+  const mutationRevision = cached ? Number(cached.mutationRevision) || 0 : Number(meta.mutation_revision) || 0;
   return {
     edbId,
     cacheKey: cached?.key || (scope ? frontendRuntime.cacheKey(scope, meta.id, edbId) : ""),
     events,
     eventCount: events.length,
-    mutationRevision: cached ? Number(cached.mutationRevision) || 0 : meta.mutation_revision,
+    mutationRevision,
     lastEventHash: cached?.lastEventHash ?? null,
     promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
     inputDraftRevision: Number(meta.input_draft_revision || 0),
@@ -539,6 +573,7 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
     summary: projectAgentSummary(events),
     projectedOrder: 0,
     needsReplay: true,
+    loadProgress: createAgentLoadProgress(meta, events.length, mutationRevision),
   };
 }
 
@@ -940,6 +975,7 @@ async function hydrateBackgroundEdbCache(operation, snapshot) {
 
 function syncBackgroundAgentEvents(workspace, meta, payload) {
   let store = workspace.stores.get(meta.id);
+  const loadingBefore = loadProgressSignature(store);
   let changed = false;
   if (!store) {
     store = createAgentStore(meta, null, workspace.snapshot);
@@ -949,15 +985,25 @@ function syncBackgroundAgentEvents(workspace, meta, payload) {
   }
   observeBackgroundInputDraft(workspace, meta, store);
   store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
-  if (!payload && store.eventCount === meta.event_count
-      && store.mutationRevision === meta.mutation_revision) {
-    return { changed, summaryChanged: false };
-  }
-  if (!payload) return { changed, summaryChanged: false };
-  const previousSummary = JSON.stringify(store.summary);
-  const events = Array.isArray(payload.events) ? payload.events : [];
   const previousEventCount = store.eventCount;
   const previousMutationRevision = store.mutationRevision;
+  settleAgentLoadProgress(store);
+  prepareAgentLoadProgress(store, meta, payload, previousEventCount, previousMutationRevision);
+  if (!payload && store.eventCount === meta.event_count
+      && store.mutationRevision === meta.mutation_revision) {
+    return {
+      changed, summaryChanged: false,
+      loadChanged: loadingBefore !== loadProgressSignature(store),
+    };
+  }
+  if (!payload) {
+    return {
+      changed, summaryChanged: false,
+      loadChanged: loadingBefore !== loadProgressSignature(store),
+    };
+  }
+  const previousSummary = JSON.stringify(store.summary);
+  const events = Array.isArray(payload.events) ? payload.events : [];
   if (payload.reset) {
     store.events = events;
     store.eventCount = events.length;
@@ -972,6 +1018,7 @@ function syncBackgroundAgentEvents(workspace, meta, payload) {
   }
   store.mutationRevision = payload.mutation_revision;
   store.lastEventHash = payload.cursor_event_hash ?? null;
+  settleAgentLoadProgress(store);
   if (payload.reset || events.length > 0) {
     persistWorkspaceAgentEdb(workspace.snapshot, meta, store, Boolean(payload.reset), {
       startOrder: payload.reset ? 0 : previousEventCount,
@@ -981,7 +1028,11 @@ function syncBackgroundAgentEvents(workspace, meta, payload) {
       events,
     });
   }
-  return { changed: true, summaryChanged: previousSummary !== JSON.stringify(store.summary) };
+  return {
+    changed: true,
+    summaryChanged: previousSummary !== JSON.stringify(store.summary),
+    loadChanged: loadingBefore !== loadProgressSignature(store),
+  };
 }
 
 function applyBackgroundSyncState(workspace, payload) {
@@ -999,7 +1050,7 @@ function applyBackgroundSyncState(workspace, payload) {
     syncBackgroundAgentEvents(workspace, meta, updates.get(meta.id)));
   workspace.cacheValidated = true;
   return presentationChanged || structureChanged
-    || eventChanges.some((change) => change.changed || change.summaryChanged);
+    || eventChanges.some((change) => change.changed || change.summaryChanged || change.loadChanged);
 }
 
 async function requestBackgroundWorkspaceSync() {
@@ -1040,8 +1091,7 @@ async function requestBackgroundWorkspaceSync() {
       candidate.workspace.backgroundNextSyncAt = message.more_events && madeProgress
         ? 0 : Date.now() + (message.more_events ? HTTP_SYNC_ACTIVE_MS : BACKGROUND_SYNC_IDLE_MS);
     }
-    const startupCompleted = noteGatewayStartupProgress();
-    if (sidebarChanged || startupCompleted) renderAgents();
+    if (sidebarChanged) renderAgents();
   } catch (error) {
     if (!backgroundSyncOperationCurrent(operation)) return;
     if (error.status === 401) {
@@ -1077,7 +1127,6 @@ function applyGatewaySnapshot(snapshot) {
     cancelBackgroundWorkspaceSync(id);
     state.workspaceStates.delete(id);
   }
-  noteGatewayStartupProgress();
   renderAgents();
 }
 
@@ -1095,25 +1144,6 @@ async function refreshGatewayState() {
   }
 }
 
-function sessionStartupLocked() {
-  return state.startupPending;
-}
-
-function gatewayStartupReady() {
-  if (!state.startupPending) return true;
-  if (state.startupMetadataPending || !state.edbCacheInitialized || state.activeCatchUpPending) return false;
-  return (state.gateway.workspaces || []).every((workspace) => {
-    if (workspace.id === state.workspaceId) return true;
-    const bucket = state.workspaceStates.get(workspace.id);
-    return Boolean(bucket?.edbCacheInitialized) && !bucket.catchUpPending;
-  });
-}
-
-function noteGatewayStartupProgress() {
-  if (!state.startupPending || !gatewayStartupReady()) return false;
-  state.startupPending = false;
-  return true;
-}
 
 function applyGatewayStartupMetadata(workspaceId, snapshot) {
   const workspace = gatewayWorkspaceState(workspaceId);
@@ -1149,7 +1179,7 @@ async function loadGatewayStartupMetadata(activeWorkspaceId) {
     }
   } finally {
     state.startupMetadataPending = false;
-    if (noteGatewayStartupProgress()) renderAgents();
+    renderAgents();
     scheduleBackgroundWorkspaceSync(0);
   }
 }
@@ -1160,8 +1190,7 @@ async function initializeGateway() {
   const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
   const workspaceId = ids.has(snapshot.selected_workspace_id) ? snapshot.selected_workspace_id : "chat";
   activateWorkspace(workspaceId, snapshot.selected_agent_id, false);
-  if (state.startupPending) void loadGatewayStartupMetadata(workspaceId);
-  else scheduleBackgroundWorkspaceSync(0);
+  void loadGatewayStartupMetadata(workspaceId);
 }
 
 function showLogin(message = "") {
@@ -1189,7 +1218,7 @@ function showApplication() {
   elements.loginScreen.classList.add("hidden");
   elements.app.classList.remove("hidden");
   elements.loginError.textContent = "";
-  elements.addAgent.disabled = sessionStartupLocked();
+  elements.addAgent.disabled = true;
 }
 
 async function initializeAuthentication() {
@@ -1431,27 +1460,10 @@ function failHttpSync(title, error) {
   showConnectionOverlay(title, `${detail}。请点击“立即重试”。`);
 }
 
-function resetEventRecoveryProgress() {
-  elements.eventRecoveryProgress.classList.add("hidden");
-  elements.eventRecoveryProgress.setAttribute("aria-valuenow", "0");
-  elements.eventRecoveryProgressFill.style.transform = "scaleX(0)";
-  elements.eventRecoveryProgressLabel.textContent = "0%";
-}
-
-function renderEventRecoveryProgress() {
-  const progress = eventRecoveryProgress(state.eventRecovery, currentStore()?.events.length);
-  const percent = Math.floor(progress * 100);
-  elements.eventRecoveryProgress.classList.remove("hidden");
-  elements.eventRecoveryProgress.setAttribute("aria-valuenow", String(percent));
-  elements.eventRecoveryProgressFill.style.transform = `scaleX(${progress})`;
-  elements.eventRecoveryProgressLabel.textContent = `${percent}%`;
-}
-
 function showConnectionOverlay(title, message) {
   if (elements.connectionOverlayTitle.textContent !== title) elements.connectionOverlayTitle.textContent = title;
   if (elements.connectionOverlayMessage.textContent !== message) elements.connectionOverlayMessage.textContent = message;
   if (state.connectionOverlayMode === "connection") return;
-  resetEventRecoveryProgress();
   elements.connectionRetry.classList.remove("hidden");
   elements.connectionOverlay.classList.remove("hidden");
   elements.app.inert = true;
@@ -1459,26 +1471,8 @@ function showConnectionOverlay(title, message) {
   if (elements.app.contains(document.activeElement)) document.activeElement.blur();
 }
 
-function showEventRecoveryOverlay() {
-  if (state.connectionOverlayMode !== "recovery") {
-    elements.connectionOverlayTitle.textContent = "正在恢复会话";
-    elements.connectionOverlayMessage.textContent = "正在载入较长的会话历史，请稍候。";
-    elements.connectionRetry.classList.add("hidden");
-    elements.connectionOverlay.classList.remove("hidden");
-    elements.app.inert = true;
-    state.connectionOverlayMode = "recovery";
-    if (elements.app.contains(document.activeElement)) document.activeElement.blur();
-  }
-  renderEventRecoveryProgress();
-}
-
 function hideConnectionOverlay() {
-  if (bulkEventRecoveryActive()) {
-    showEventRecoveryOverlay();
-    return;
-  }
   if (state.connectionOverlayMode === "hidden") return;
-  resetEventRecoveryProgress();
   elements.connectionOverlay.classList.add("hidden");
   elements.connectionRetry.classList.remove("hidden");
   elements.app.inert = false;
@@ -1486,10 +1480,6 @@ function hideConnectionOverlay() {
 }
 
 function renderConnectionOverlayForPhase() {
-  if (bulkEventRecoveryActive()) {
-    showEventRecoveryOverlay();
-    return;
-  }
   if (state.connectionPhase === "connected" || state.connectionPhase === "degraded") {
     hideConnectionOverlay();
   } else if (state.connectionPhase === "initial") {
@@ -1616,7 +1606,6 @@ async function requestHttpSync() {
     }
     state.activeCatchUpPending = Boolean(message.more_events)
       || (message.selected_agent ?? null) !== state.selectedAgent;
-    if (noteGatewayStartupProgress()) renderAgents();
     if (!state.activeCatchUpPending) scheduleBackgroundWorkspaceSync(0);
     const madeProgress = progressBefore !== httpSyncProgressSignature();
     const delay = state.connectionPhase === "stabilizing"
@@ -1674,6 +1663,7 @@ function applySyncState(payload) {
   const selectedWorkerChanged = eventChanges.some((change) =>
     change.changed && isWorkerForSelectedAgent(change.agentId));
   const agentSummaryChanged = eventChanges.some((change) => change.summaryChanged);
+  const agentLoadChanged = eventChanges.some((change) => change.loadChanged);
   const responseMatchesSelection = (payload.selected_agent ?? null) === state.selectedAgent;
   const apiActivityChanged = responseMatchesSelection
     ? syncApiActivity(payload.api_activity || {}) : false;
@@ -1705,7 +1695,7 @@ function applySyncState(payload) {
   requestRender({
     full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged),
     connection: connectionChanged,
-    agents: presentationChanged || agentSummaryChanged,
+    agents: presentationChanged || agentSummaryChanged || agentLoadChanged,
     tabs: presentationChanged || terminalChanged,
     currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged,
     workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged,
@@ -1891,6 +1881,7 @@ function reconcileAgents() {
 
 function syncAgentEvents(meta, payload) {
   let store = state.stores.get(meta.id);
+  const loadingBefore = loadProgressSignature(store);
   let changed = false;
   if (!store) {
     store = createAgentStore(meta);
@@ -1904,18 +1895,28 @@ function syncAgentEvents(meta, payload) {
     changed = true;
   }
   observeInputDraft(meta, store);
+  const previousEventCount = store.eventCount;
+  const previousMutationRevision = store.mutationRevision;
+  settleAgentLoadProgress(store);
+  prepareAgentLoadProgress(store, meta, payload, previousEventCount, previousMutationRevision);
   if (!payload && store.eventCount === meta.event_count
       && store.mutationRevision === meta.mutation_revision) {
     observePromptSubmission(meta, store);
-    return { agentId: meta.id, changed, summaryChanged: false };
+    return {
+      agentId: meta.id, changed, summaryChanged: false,
+      loadChanged: loadingBefore !== loadProgressSignature(store),
+    };
   }
   // A large initial replay is transferred in bounded batches. Agents without a
   // batch in this response remain pending and are requested again immediately.
-  if (!payload) return { agentId: meta.id, changed, summaryChanged: false };
+  if (!payload) {
+    return {
+      agentId: meta.id, changed, summaryChanged: false,
+      loadChanged: loadingBefore !== loadProgressSignature(store),
+    };
+  }
   const previousSummary = JSON.stringify(store.summary);
   const events = Array.isArray(payload.events) ? payload.events : [];
-  const previousEventCount = store.eventCount;
-  const previousMutationRevision = store.mutationRevision;
   if (payload.reset) {
     store.events = events;
     store.eventCount = events.length;
@@ -1930,6 +1931,7 @@ function syncAgentEvents(meta, payload) {
   }
   store.mutationRevision = payload.mutation_revision;
   store.lastEventHash = payload.cursor_event_hash ?? null;
+  settleAgentLoadProgress(store);
   if (payload.reset || events.length > 0) {
     persistAgentEdb(meta, store, Boolean(payload.reset), {
       startOrder: payload.reset ? 0 : previousEventCount,
@@ -1945,6 +1947,7 @@ function syncAgentEvents(meta, payload) {
     agentId: meta.id,
     changed: true,
     summaryChanged: previousSummary !== JSON.stringify(store.summary),
+    loadChanged: loadingBefore !== loadProgressSignature(store),
   };
 }
 
@@ -2723,10 +2726,6 @@ function flushPendingRender() {
 }
 
 function renderAll() {
-  if (bulkEventRecoveryActive()) {
-    suppressBulkEventRecoveryRender();
-    return;
-  }
   state.pendingRender = emptyRenderRequest();
   const changes = advanceCurrentProjection();
   const promptConfirmed = beginConfirmedPromptRender(changes);
@@ -2865,11 +2864,31 @@ function renderConnection() {
   elements.environment.title = environment?.workspace || "";
 }
 
+function workspaceUiState(workspaceId) {
+  return workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
+}
+
+function workspaceMetadataReady(workspaceId) {
+  return Boolean(workspaceUiState(workspaceId)?.snapshot?.environment);
+}
+
+function agentLoadingState(workspaceId, agentId) {
+  const bucket = workspaceUiState(workspaceId);
+  const meta = bucket.snapshot?.agents?.find((agent) => agent.id === agentId);
+  if (!meta) return { loading: false, percent: null };
+  const store = bucket.stores.get(agentId);
+  if (!bucket.edbCacheInitialized || !store) return { loading: true, percent: null };
+  if (!store.loadProgress) return { loading: false, percent: null };
+  return {
+    loading: true,
+    percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100),
+  };
+}
+
 function renderAgents() {
   const workspaces = state.gateway.workspaces || [];
-  const startupLoading = sessionStartupLocked();
-  elements.addAgent.disabled = startupLoading;
   const chat = workspaces.find((workspace) => workspace.builtin);
+  elements.addAgent.disabled = !workspaceMetadataReady(chat?.id || "chat");
   const external = workspaces.filter((workspace) => !workspace.builtin);
   const externalIds = new Set(external.map((workspace) => workspace.id));
   pruneWorkspaceDisclosure(externalIds);
@@ -2926,7 +2945,7 @@ function createWorkspaceGroup(workspace) {
     updateWorkspaceGroup(group, workspace);
   });
   group.querySelector("[data-workspace-add]").addEventListener("click", () => {
-    if (sessionStartupLocked(workspace.id)) return;
+    if (!workspaceMetadataReady(workspace.id)) return;
     activateWorkspace(workspace.id);
     openAddAgent();
   });
@@ -2939,7 +2958,7 @@ function createWorkspaceGroup(workspace) {
 
 function updateWorkspaceGroup(group, workspace) {
   const expanded = workspaceExpanded(workspace.id);
-  const startupLoading = sessionStartupLocked(workspace.id);
+  const metadataReady = workspaceMetadataReady(workspace.id);
   group.classList.toggle("expanded", expanded);
   const select = group.querySelector("[data-workspace-select]");
   const add = group.querySelector("[data-workspace-add]");
@@ -2951,19 +2970,19 @@ function updateWorkspaceGroup(group, workspace) {
   select.setAttribute("aria-label", `${expanded ? "折叠" : "展开"} ${workspace.name}`);
   select.title = `${expanded ? "折叠" : "展开"} ${workspace.name}`;
   agents.hidden = !expanded;
-  add.disabled = startupLoading;
+  add.disabled = !metadataReady;
   add.setAttribute("aria-label", `在 ${workspace.name}中新建会话`);
-  add.title = startupLoading ? "正在加载会话" : `在 ${workspace.name}中新建会话`;
+  add.title = metadataReady ? `在 ${workspace.name}中新建会话` : "正在加载工作区";
   actions.setAttribute("aria-label", `打开 ${workspace.name} 的工作区选项`);
   actions.title = `打开 ${workspace.name} 的工作区选项`;
 }
 
 function renderWorkspaceAgentRows(container, workspaceId) {
   if (!container) return;
-  const bucket = workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
+  const bucket = workspaceUiState(workspaceId);
   const agents = bucket.snapshot?.agents || [];
   if (!agents.length) {
-    const label = state.startupPending && !bucket.snapshot?.environment ? "正在加载会话" : "暂无会话";
+    const label = !bucket.snapshot?.environment ? "正在加载会话" : "暂无会话";
     let empty = container.querySelector(":scope > .empty-state");
     if (!empty) {
       container.innerHTML = `<div class="empty-state"></div>`;
@@ -2987,26 +3006,28 @@ function renderWorkspaceAgentRows(container, workspaceId) {
 }
 
 function updateAgentRow(row, agent, workspaceId, bucket) {
-  const startupLoading = sessionStartupLocked(workspaceId, agent.id);
+  const loadingState = agentLoadingState(workspaceId, agent.id);
   const summary = bucket.stores.get(agent.id)?.summary;
-  const active = !startupLoading && sidebarAgentActive(summary);
+  const active = !loadingState.loading && sidebarAgentActive(summary);
   const label = agent.title || agent.id;
-  row.classList.toggle("startup-loading", startupLoading);
-  row.classList.toggle("active", !startupLoading
-    && workspaceId === state.workspaceId && agent.id === state.selectedAgent);
-  row.setAttribute("aria-busy", String(startupLoading));
+  const loadingLabel = loadingState.percent == null ? "正在加载" : `正在加载 ${loadingState.percent}%`;
+  row.classList.toggle("session-loading", loadingState.loading);
+  row.classList.toggle("active", workspaceId === state.workspaceId && agent.id === state.selectedAgent);
+  row.setAttribute("aria-busy", String(loadingState.loading));
   const item = row.querySelector(".agent-item");
-  item.disabled = startupLoading;
-  item.title = startupLoading ? "正在加载会话" : "";
+  item.title = loadingState.loading ? loadingLabel : "";
   const dot = row.querySelector(".agent-dot");
-  dot.classList.toggle("startup-loading", startupLoading);
+  dot.classList.toggle("loading", loadingState.loading);
   dot.classList.toggle("active", active);
   const title = row.querySelector(".agent-label");
   if (title.textContent !== label) title.textContent = label;
+  const progress = row.querySelector(".agent-load-progress");
+  const progressText = loadingState.percent == null ? "" : `${loadingState.percent}%`;
+  if (progress.textContent !== progressText) progress.textContent = progressText;
+  progress.classList.toggle("hidden", !loadingState.loading || loadingState.percent == null);
   const deleteButton = row.querySelector(".agent-delete");
-  deleteButton.disabled = startupLoading;
-  deleteButton.setAttribute("aria-label", startupLoading ? `${label} 正在加载` : `删除 ${label}`);
-  deleteButton.title = startupLoading ? "正在加载会话" : `删除 ${label}`;
+  deleteButton.setAttribute("aria-label", `删除 ${label}`);
+  deleteButton.title = `删除 ${label}`;
 }
 
 function createAgentRow(agent, workspaceId = state.workspaceId) {
@@ -3015,6 +3036,7 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
     <button class="agent-item" type="button" data-agent="${escapeAttr(agent.id)}">
       <span class="agent-dot" aria-hidden="true"></span>
       <span class="agent-label"></span>
+      <span class="agent-load-progress hidden" aria-hidden="true"></span>
     </button>
     <button class="agent-delete" type="button" data-agent-delete="${escapeAttr(agent.id)}" title="删除会话" aria-label="删除会话">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>
@@ -3031,7 +3053,6 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
 }
 
 function selectWorkspaceAgent(workspaceId, agentId) {
-  if (sessionStartupLocked(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -3055,14 +3076,13 @@ function finishAgentSelection(id) {
   delete elements.terminalScreen.dataset.revision;
   restoreDraft();
   const meta = state.snapshot.agents.find((agent) => agent.id === id);
-  if (prepareSelectedEventRecovery(meta, null, true)) showEventRecoveryOverlay();
-  else renderAll();
+  prepareSelectedEventRecovery(meta, null, true);
+  renderAll();
   persistGatewaySelection(state.workspaceId, id);
   requestHttpSyncNow();
 }
 
 function selectAgent(id) {
-  if (sessionStartupLocked(state.workspaceId, id)) return;
   finishAgentSelection(id);
 }
 
@@ -5528,7 +5548,7 @@ elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", retryConnectionNow);
-elements.addAgent.addEventListener("click", () => { if (!sessionStartupLocked()) { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); } });
+elements.addAgent.addEventListener("click", () => { if (workspaceMetadataReady("chat")) { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); } });
 if (runtimeCapabilities.multipleWorkspaces) {
   elements.createWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("create"); });
   elements.openWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("open"); });
