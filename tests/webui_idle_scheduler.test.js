@@ -7,7 +7,7 @@ const { join } = require("node:path");
 function loadScheduler(relative, options = {}) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
   const start = source.indexOf("function apiSpinnerIsActive()");
-  const end = source.indexOf("\n\ninitializeAuthentication();", start);
+  const end = source.indexOf("\nif (runtimeCapabilities.multipleWorkspaces)", start);
   if (start < 0 || end < 0) throw new Error(`could not isolate scheduler from ${relative}`);
 
   const factory = new Function(
@@ -92,7 +92,7 @@ function loadScheduler(relative, options = {}) {
   };
 }
 
-const WEBUIS = ["../src/webui/app.js", "../src/gateway_webui/app.js"];
+const WEBUIS = ["../src/webui/app.js"];
 
 describe("WebUI on-demand animation scheduler", () => {
   test("stays completely idle without API or running tools", () => {

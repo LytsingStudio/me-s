@@ -285,28 +285,29 @@ describe("RemoteControl shared WebUI controller", () => {
     controller.dispose();
   });
 
-  test("keeps both pages structurally aligned and gateway remote requests on the chat child", () => {
-    const directHtml = read("src/webui/index.html");
-    const gatewayHtml = read("src/gateway_webui/index.html");
+  test("keeps one shared remote-control shell while adapters own path routing", () => {
+    const html = read("src/webui/index.html");
     const expectedOrder = ["data-remote-start", "data-remote-stop", "data-remote-screenshot", "data-remote-fps", "data-remote-scale"];
-    for (const html of [directHtml, gatewayHtml]) {
-      let cursor = -1;
-      for (const marker of expectedOrder) {
-        const next = html.indexOf(marker);
-        expect(next).toBeGreaterThan(cursor);
-        cursor = next;
-      }
-      expect(html).toContain('<option value="1">1 FPS</option>');
-      expect(html).toContain('<option value="3" selected>3 FPS</option>');
-      expect(html).toContain('<option value="50" selected>50%</option>');
-      expect(html).toContain("frame: 0");
-      expect(html).toContain('<script src="/remote-control.js"></script>');
+    let cursor = -1;
+    for (const marker of expectedOrder) {
+      const next = html.indexOf(marker);
+      expect(next).toBeGreaterThan(cursor);
+      cursor = next;
     }
-    const directApp = read("src/webui/app.js");
-    const gatewayApp = read("src/gateway_webui/app.js");
-    expect(directApp).toContain("/api/remote-control/${encodeURIComponent(action)}");
-    expect(gatewayApp).toContain('scopedApiPath(`/api/remote-control/${encodeURIComponent(action)}`, "chat")');
-    expect(gatewayApp).toContain('path.startsWith("/api/remote-control/")');
+    expect(html).toContain('<option value="1">1 FPS</option>');
+    expect(html).toContain('<option value="3" selected>3 FPS</option>');
+    expect(html).toContain('<option value="50" selected>50%</option>');
+    expect(html).toContain("frame: 0");
+    expect(html).toContain('<script src="/remote-control.js"></script>');
+
+    const sharedApp = read("src/webui/app.js");
+    const directRuntime = read("src/webui/runtime.js");
+    const gatewayRuntime = read("src/gateway_webui/runtime.js");
+    expect(sharedApp).toContain('frontendRuntime.apiPath(`/api/remote-control/${encodeURIComponent(action)}`, "chat")');
+    expect(directRuntime).toContain("apiPath(path)");
+    expect(directRuntime).toContain('return String(path || "")');
+    expect(gatewayRuntime).toContain('value.startsWith("/api/remote-control/")');
+    expect(gatewayRuntime).toContain('return `/api/workspaces/${encodeURIComponent(workspaceId || "chat")}${value.slice(4)}`');
   });
 
   test("does not introduce a video transport, frame base64, or browser persistence", () => {

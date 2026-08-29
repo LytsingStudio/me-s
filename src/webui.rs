@@ -51,6 +51,7 @@ pub struct ManagedWebAccess {
 }
 const INDEX_HTML: &str = include_str!("webui/index.html");
 const APP_JS: &str = include_str!("webui/app.js");
+const RUNTIME_JS: &str = include_str!("webui/runtime.js");
 const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
@@ -766,6 +767,9 @@ fn route(
         }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
+        }
+        (&Method::Get, "/runtime.js") => {
+            return Ok(text_response("text/javascript; charset=utf-8", RUNTIME_JS));
         }
         (&Method::Get, "/file-manager.js") => {
             return Ok(text_response(
@@ -2906,8 +2910,8 @@ mod tests {
         assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
         assert!(EDB_CACHE_JS.contains("keyPath: [\"sessionKey\", \"order\"]"));
         assert!(APP_JS.contains("cache_metadata_only: !state.edbCacheInitialized"));
-        assert!(APP_JS.contains("if (payload.reset || payload.events.length > 0) {"));
-        assert!(APP_JS.contains("persistAgentEdb(meta, store, Boolean(payload.reset))"));
+        assert!(APP_JS.contains("if (payload.reset || events.length > 0) {"));
+        assert!(APP_JS.contains("persistAgentEdb(meta, store, Boolean(payload.reset), {"));
     }
 
     #[test]
@@ -3423,7 +3427,7 @@ mod tests {
         assert!(APP_JS.contains("data-agent-delete="));
         assert!(APP_JS.contains("row.querySelector(\".agent-delete\").addEventListener"));
         assert!(APP_JS.contains("event.stopPropagation();"));
-        assert!(APP_JS.contains("void openDeleteAgent(agent.id);"));
+        assert!(APP_JS.contains("requestAnimationFrame(() => void openDeleteAgent(agent.id));"));
         assert!(APP_JS.contains("async function openDeleteAgent(agentId = state.selectedAgent)"));
         assert!(APP_JS.contains("openConfirm(\"删除会话？\""));
         assert!(APP_JS.contains("agent_id: agentId"));
@@ -3447,10 +3451,10 @@ mod tests {
         assert!(APP_JS.contains("window.addEventListener(\"pagehide\", () =>"));
         assert!(APP_JS.contains("flushDraftBeforePageCloses();"));
         assert!(
-            APP_JS.contains("if (state.stores.get(agentId)?.pendingPromptSubmission) continue;")
+            APP_JS.contains("if (bucket.stores.get(agentId)?.pendingPromptSubmission) continue;")
         );
-        assert!(APP_JS.contains("navigator.sendBeacon?.(\"/api/command\""));
-        assert!(APP_JS.contains("fetch(\"/api/command\""));
+        assert!(APP_JS.contains("navigator.sendBeacon?.(url, data)"));
+        assert!(APP_JS.contains("void fetch(url, {"));
         assert!(APP_JS.contains("receipt?.prompt_submission_revision"));
         assert!(APP_JS.contains("store.promptSubmissionRevision = Math.max"));
     }
@@ -3678,13 +3682,13 @@ mod tests {
             .map(|(body, _)| body)
             .expect("hydrateEdbCache function should exist");
         assert_eq!(cache_hydration.matches("renderAll();").count(), 1);
-        assert_eq!(APP_JS.matches("renderAll();").count(), 3);
+        assert_eq!(APP_JS.matches("renderAll();").count(), 5);
         assert!(APP_JS.contains("if (changes.workmap)"));
         assert!(APP_JS.contains("while (cache.nextOrder < events.length)"));
         assert!(APP_JS.contains("store.needsReplay = true"));
         assert!(APP_JS.contains("function projectAgentSummary(events)"));
-        assert!(APP_JS.contains("updateAgentSummary(store.summary, payload.events)"));
-        assert!(APP_JS.contains("const summary = state.stores.get(agent.id)?.summary"));
+        assert!(APP_JS.contains("updateAgentSummary(store.summary, events)"));
+        assert!(APP_JS.contains("const summary = bucket.stores.get(agent.id)?.summary"));
         assert_eq!(
             APP_JS
                 .matches("store.projection = projectChat(store.events)")
@@ -3760,7 +3764,7 @@ mod tests {
         ));
         assert!(STYLE_CSS.contains(".transcript-spacer {"));
         assert!(STYLE_CSS.contains(".transcript-window { display: flow-root;"));
-        assert!(APP_JS.contains("function createAgentRow(agent)"));
+        assert!(APP_JS.contains("function createAgentRow(agent, workspaceId = state.workspaceId)"));
         assert!(!APP_JS.contains("elements.agents.innerHTML = state.snapshot.agents.map"));
     }
 
@@ -4738,9 +4742,15 @@ mod tests {
             .unwrap()
             .text()
             .unwrap();
-        assert!(html.contains("ME-S"));
+        assert!(html.contains("/runtime.js"));
         assert!(html.contains("/app.js"));
-
+        let runtime = reqwest::blocking::get(format!("{address}/runtime.js"))
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .text()
+            .unwrap();
+        assert!(runtime.contains("pageTitle: \"ME-S\""));
         let transcript_runtime = reqwest::blocking::get(format!("{address}/transcript.js"))
             .unwrap()
             .error_for_status()

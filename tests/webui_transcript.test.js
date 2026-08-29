@@ -5,6 +5,7 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { createVirtualTranscript, reconcileChildren, reconcileNode } = require("../src/webui/transcript.js");
 require("../src/webui/edb-cache.js");
+const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 
 class FakeNode {
@@ -113,6 +114,7 @@ function fragment(...children) {
 }
 
 function loadMessageUpdateRuntime(relative) {
+  installDirectFrontendRuntime();
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
@@ -123,6 +125,7 @@ function loadMessageUpdateRuntime(relative) {
   const runtime = factory(
     {
       cookie: "",
+      documentElement: { classList: { toggle() {} } },
       querySelector: () => null,
       createElement: () => ({
         set innerHTML(_value) {},
@@ -428,51 +431,43 @@ describe("shared WebUI transcript reconciliation", () => {
     expect(after.bottomHeight).toBe(before.bottomHeight + 100);
   });
 
-  test("keeps me-s and gateway on the shared stable-DOM and gesture paths", () => {
-    const single = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const gateway = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    for (const source of [single, gateway]) {
-      expect(source).toContain("MeTranscript.reconcileHtmlChildren(markdown, rendered)");
-      expect(source).toContain("MeTranscript.reconcileNode(details, replacement)");
-      expect(source).toContain('typeof window.PointerEvent === "function"');
-      expect(source).toContain('addEventListener("scrollend", finishTranscriptScrolling');
-      expect(source).toContain("MeTranscript.createVirtualTranscript(");
-      expect(source).toContain("transcriptVirtualizer.noteScroll()");
-      expect(source).toContain("renderRange: reconcileTranscript");
-      expect(source).not.toContain("markdown.innerHTML = rendered");
-      expect(source).not.toContain("if (forceFull) replaceElementChildren(elements.transcriptContent)");
-    }
-    const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
-    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
-    for (const html of [singleIndex, gatewayIndex]) {
-      expect(html.indexOf('/transcript.js')).toBeGreaterThan(html.indexOf('/markdown.js'));
-      expect(html.indexOf('/transcript.js')).toBeLessThan(html.indexOf('/app.js'));
-    }
+  test("keeps the authoritative shared core on the stable-DOM and gesture paths", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    expect(source).toContain("MeTranscript.reconcileHtmlChildren(markdown, rendered)");
+    expect(source).toContain("MeTranscript.reconcileNode(details, replacement)");
+    expect(source).toContain('typeof window.PointerEvent === "function"');
+    expect(source).toContain('addEventListener("scrollend", finishTranscriptScrolling');
+    expect(source).toContain("MeTranscript.createVirtualTranscript(");
+    expect(source).toContain("transcriptVirtualizer.noteScroll()");
+    expect(source).toContain("renderRange: reconcileTranscript");
+    expect(source).not.toContain("markdown.innerHTML = rendered");
+    expect(source).not.toContain("if (forceFull) replaceElementChildren(elements.transcriptContent)");
+    const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    expect(index.indexOf('/transcript.js')).toBeGreaterThan(index.indexOf('/markdown.js'));
+    expect(index.indexOf('/transcript.js')).toBeLessThan(index.indexOf('/app.js'));
   });
 
-  test("updates Compact notices and session text in place in both WebUIs", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
-      const runtime = loadMessageUpdateRuntime(relative);
-      runtime.state.selectedAgent = "main";
-      for (const kind of ["notice", "session"]) {
-        const content = { textContent: "旧文本" };
-        const stable = textMessageNode(kind, content);
-        const message = {
-          kind, content: kind === "notice" ? "正在压缩 (1/6) ... ↓ 37" : "新会话状态",
-          revision: 7, presentationRevision: 3, timestamp: 10,
-        };
-        runtime.updateMessageNode(stable.node, message, false, false, 0);
-        expect(stable.replacement()).toBeNull();
-        expect(stable.node.querySelector(`:scope > .${kind}-content`)).toBe(content);
-        expect(content.textContent).toBe(message.content);
-        expect(stable.node.meRenderRevision).toBe("7:3:0:0:0:0");
-      }
-
-      const incompatible = textMessageNode("notice", null);
-      runtime.updateMessageNode(incompatible.node, {
-        kind: "notice", content: "结构恢复", revision: 8, presentationRevision: 0, timestamp: 11,
-      }, false, false, 0);
-      expect(incompatible.replacement()).toBe(runtime.replacement);
+  test("updates Compact notices and session text in place in the shared core", () => {
+    const runtime = loadMessageUpdateRuntime("../src/webui/app.js");
+    runtime.state.selectedAgent = "main";
+    for (const kind of ["notice", "session"]) {
+      const content = { textContent: "旧文本" };
+      const stable = textMessageNode(kind, content);
+      const message = {
+        kind, content: kind === "notice" ? "正在压缩 (1/6) ... ↓ 37" : "新会话状态",
+        revision: 7, presentationRevision: 3, timestamp: 10,
+      };
+      runtime.updateMessageNode(stable.node, message, false, false, 0);
+      expect(stable.replacement()).toBeNull();
+      expect(stable.node.querySelector(`:scope > .${kind}-content`)).toBe(content);
+      expect(content.textContent).toBe(message.content);
+      expect(stable.node.meRenderRevision).toBe("7:3:0:0:0:0");
     }
+
+    const incompatible = textMessageNode("notice", null);
+    runtime.updateMessageNode(incompatible.node, {
+      kind: "notice", content: "结构恢复", revision: 8, presentationRevision: 0, timestamp: 11,
+    }, false, false, 0);
+    expect(incompatible.replacement()).toBe(runtime.replacement);
   });
 });

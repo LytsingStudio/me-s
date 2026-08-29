@@ -4,8 +4,10 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 require("../src/webui/edb-cache.js");
+const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 function loadSendShortcutRuntime(cookie = "", location = { protocol: "http:", port: "38199" }) {
+  installDirectFrontendRuntime();
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI send shortcut runtime");
@@ -14,7 +16,10 @@ function loadSendShortcutRuntime(cookie = "", location = { protocol: "http:", po
       readSendShortcutCookie, sendShortcutHint, sendShortcutPressed };`);
   const input = { value: "", style: {}, scrollHeight: 0 };
   return factory(
-    { cookie, location, querySelector: (selector) => selector === "#prompt-input" ? input : null },
+    {
+      cookie, location, querySelector: (selector) => selector === "#prompt-input" ? input : null,
+      documentElement: { classList: { toggle() {} } },
+    },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
   );

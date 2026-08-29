@@ -5,6 +5,7 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 require("../src/webui/edb-cache.js");
+const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 function loadToolPresenters() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
@@ -13,6 +14,7 @@ function loadToolPresenters() {
 }
 
 function loadProjectionRuntime() {
+  installDirectFrontendRuntime();
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI projection runtime");
@@ -40,7 +42,7 @@ function loadProjectionRuntime() {
       selectedEventRecoveryReady,
     };`);
   const runtime = factory(
-    { querySelector: () => null },
+    { querySelector: () => null, documentElement: { classList: { toggle() {} } } },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
     loadToolPresenters(),

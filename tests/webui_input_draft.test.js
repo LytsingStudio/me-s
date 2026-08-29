@@ -5,8 +5,10 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 require("../src/webui/edb-cache.js");
+const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 function loadDraftRuntime(options = {}) {
+  installDirectFrontendRuntime();
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI draft runtime");
@@ -75,6 +77,7 @@ function loadDraftRuntime(options = {}) {
       querySelector: (selector) => selector === "#prompt-input" ? input
         : selector === "#prompt-input-mirror" ? inputMirror : null,
       cookie: "",
+      documentElement: { classList: { toggle() {} } },
     },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
@@ -85,6 +88,12 @@ function loadDraftRuntime(options = {}) {
     setTimeoutFake,
     clearTimeoutFake,
   );
+  runtime.state.workspaceStates.set(null, {
+    snapshot: runtime.state.snapshot,
+    stores: runtime.state.stores,
+    drafts: runtime.state.drafts,
+    draftSync: runtime.state.draftSync,
+  });
   runtime.pageCloseCalls = pageCloseCalls;
   runtime.fetchCalls = fetchCalls;
   runtime.heightWrites = realHeightWrites;

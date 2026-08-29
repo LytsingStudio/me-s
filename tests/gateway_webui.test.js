@@ -7,6 +7,24 @@ const { join } = require("node:path");
 require("../src/webui/edb-cache.js");
 globalThis.MeMarkdown = require("../src/webui/markdown.js");
 
+globalThis.MeFrontendRuntime = {
+  capabilities: { multipleWorkspaces: true, gatewaySettings: true },
+  apiPath(path, workspaceId = "chat") {
+    const child = path === "/api/sync" || path === "/api/snapshot" || path === "/api/command"
+      || path.startsWith("/api/deletion-blocker/") || path.startsWith("/api/session-terminal/")
+      || path.startsWith("/api/remote-control/") || path.startsWith("/api/files/");
+    return child ? `/api/workspaces/${workspaceId}${path.slice(4)}` : path;
+  },
+  createEdbCache() {
+    return { loadScope: async () => [], discardSession: async () => {}, saveSession() {}, renderManager() {} };
+  },
+  loadCachedSessions(cache, _snapshot, scope) { return cache.loadScope(scope); },
+  cacheKey(scope, agentId) { return `${scope}::${agentId}`; },
+  persistSelection() { return Promise.resolve(); },
+  loadGatewayState() { return Promise.resolve({ workspaces: [] }); },
+  get endpoint() { return ""; },
+};
+
 function loadToolPresenters() {
   const source = readFileSync(join(import.meta.dir, "../src/webui/tool-presenters.js"), "utf8");
   new Function(source)();
@@ -20,7 +38,7 @@ function loadRuntime(relative) {
   const factory = new Function("document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
-      emptyWorkMap, projectWorkMap, consumeWorkMapEvents, scopedApiPath: typeof scopedApiPath === "function" ? scopedApiPath : null,
+      emptyWorkMap, projectWorkMap, consumeWorkMapEvents, apiPath: frontendRuntime.apiPath,
       eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
       eventRecoveryMatches, selectedEventRecoveryReady, httpSyncProgressSignature, isIosWebKit,
       sessionStartupLocked: typeof sessionStartupLocked === "function" ? sessionStartupLocked : null,
@@ -30,6 +48,7 @@ function loadRuntime(relative) {
       applyGatewayStartupMetadata: typeof applyGatewayStartupMetadata === "function" ? applyGatewayStartupMetadata : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
+      createAgentStore: typeof createAgentStore === "function" ? createAgentStore : null,
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
       backgroundSyncCanRun: typeof backgroundSyncCanRun === "function" ? backgroundSyncCanRun : null,
       nextBackgroundWorkspace: typeof nextBackgroundWorkspace === "function" ? nextBackgroundWorkspace : null,
@@ -70,7 +89,10 @@ function loadRuntime(relative) {
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
-    { querySelector: () => null, cookie: "", location: { protocol: "http:", port: "38199" } },
+    {
+      querySelector: () => null, cookie: "", location: { protocol: "http:", port: "38199" },
+      documentElement: { classList: { toggle() {} } },
+    },
     { now: () => 0 },
     () => ({ matches: false, addEventListener() {} }),
     { reconcileHtmlChildren(container, html) { container.innerHTML = html; } },
@@ -80,6 +102,19 @@ function loadRuntime(relative) {
     hidden_names: ["SetTitle"], hidden_prefixes: ["WorkMap.", "Worker."], activity_names: ["Worker.Wait"],
   };
   return runtime;
+}
+
+function loadFrontendAdapter(relative) {
+  const source = readFileSync(join(import.meta.dir, relative), "utf8");
+  const sandbox = {
+    MeEdbCache: {
+      create() { return {}; },
+      sessionKey(scope, agentId) { return `${scope}::${agentId}`; },
+    },
+  };
+  const documentValue = { documentElement: { classList: { add() {} } } };
+  new Function("globalThis", "document", source)(sandbox, documentValue);
+  return sandbox.MeFrontendRuntime;
 }
 
 function event(kind, id, value = {}) {
@@ -117,7 +152,7 @@ const fixture = [
 
 describe("ME Gateway WebUI semantic compatibility", () => {
   test("scopes send shortcut cookies to each WebUI page port", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       expect(runtime.SEND_SHORTCUT_COOKIE).toBe("me_send_shortcut_p38199");
       expect(runtime.portScopedCookieName("me_send_shortcut", { protocol: "http:", port: "38201" }))
@@ -131,15 +166,15 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
-  test("projects the same EDB fixture as the me-s WebUI", () => {
-    const single = loadRuntime("../src/webui/app.js");
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
-    expect(visibleProjection(gateway.projectChat(fixture)))
-      .toEqual(visibleProjection(single.projectChat(fixture)));
-    const gatewayWorkMap = gateway.projectWorkMap(fixture);
-    const singleWorkMap = single.projectWorkMap(fixture);
-    expect({ ...gatewayWorkMap, _records: undefined })
-      .toEqual({ ...singleWorkMap, _records: undefined });
+  test("projects the same EDB fixture deterministically from the shared core", () => {
+    const first = loadRuntime("../src/webui/app.js");
+    const second = loadRuntime("../src/webui/app.js");
+    expect(visibleProjection(second.projectChat(fixture)))
+      .toEqual(visibleProjection(first.projectChat(fixture)));
+    const secondWorkMap = second.projectWorkMap(fixture);
+    const firstWorkMap = first.projectWorkMap(fixture);
+    expect({ ...secondWorkMap, _records: undefined })
+      .toEqual({ ...firstWorkMap, _records: undefined });
   });
 
   test("projects complete Chatbot prompt-change notices symmetrically", () => {
@@ -147,7 +182,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       event("SystemStaticPromptChange", 1, { mode: "Custom", content: "# Persona\n\n完整多行内容。" }),
       event("SystemStaticPromptChange", 2, { mode: "Default", content: null }),
     ];
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       expect(runtime.projectChat(events).messages.map((message) => message.content)).toEqual([
         "系统提示词已更新\n# Persona\n\n完整多行内容。",
@@ -157,7 +192,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("derives saved prompt state from raw EDB while preserving dirty local drafts", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       runtime.state.snapshot.chatbot_default_static_prompt = "内置默认提示";
       runtime.state.snapshot.agents = [{ id: "chat", orchestrator: "chatbot" }];
@@ -196,7 +231,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("keeps Chatbot prompt drafts page-local and Workspace-plus-Agent isolated", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const first = gateway.emptyGatewayWorkspaceState();
     const second = gateway.emptyGatewayWorkspaceState();
     first.promptDrafts.set("main", { content: "workspace-one" });
@@ -209,7 +244,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("keeps Chatbot tabs, authoritative EDB confirmation, and editor styling aligned", () => {
     const paths = [
       ["../src/webui/index.html", "../src/webui/app.js", "../src/webui/style.css"],
-      ["../src/gateway_webui/index.html", "../src/gateway_webui/app.js", "../src/gateway_webui/style.css"],
     ];
     for (const [htmlPath, appPath, stylePath] of paths) {
       const html = readFileSync(join(import.meta.dir, htmlPath), "utf8");
@@ -238,7 +272,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(style).toContain(".system-prompt-panel {");
       expect(style).toContain(".system-prompt-actions > span[data-state=\"pending\"]");
     }
-    const gatewayApp = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const gatewayApp = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewayApp).toContain("promptDrafts: state.promptDrafts");
     expect(gatewayApp).toContain("state.promptDrafts = workspace.promptDrafts;");
   });
@@ -265,7 +299,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       ["$$x^2$$", 'class="math-display"'],
     ];
 
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       for (const content of invisibleContents) {
         const message = { kind: "assistant", content };
@@ -320,7 +354,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("keeps sidebar activity open across API loops until the Agent turn closes", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       const summary = runtime.projectAgentSummary([
         event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" }),
@@ -348,7 +382,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("keeps bulk recovery current-session scoped and commits only at its fixed target", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       expect(runtime.shouldUseBulkEventRecovery(99, 0)).toBe(false);
       expect(runtime.shouldUseBulkEventRecovery(100, 0)).toBe(false);
@@ -386,12 +420,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('elements.eventRecoveryProgressFill.style.transform = `scaleX(${progress})`');
       expect(source).toContain('elements.app.inert = true;');
     }
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const first = gateway.emptyGatewayWorkspaceState();
     const second = gateway.emptyGatewayWorkspaceState();
     first.eventRecovery = { agentId: "main", mutationRevision: 1, startEventCount: 0, targetEventCount: 101 };
     expect(second.eventRecovery).toBeNull();
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewaySource).toContain("eventRecovery: state.eventRecovery");
     expect(gatewaySource).toContain("state.eventRecovery = workspace.eventRecovery;");
   });
@@ -400,7 +434,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("keeps draft, message, paint, and connection stability policies aligned across both WebUIs", () => {
     const sources = [
       readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8"),
-      readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8"),
     ];
     for (const source of sources) {
       expect(source).toContain("const DRAFT_BATCH_MS = 80;");
@@ -433,7 +466,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('if (state.connectionOverlayMode === "hidden") return;');
     }
 
-    for (const relative of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
+    for (const relative of ["../src/webui/style.css"]) {
       const style = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(style).toContain(".transcript-window > .message-block, .transcript-window > .tool-card { content-visibility: visible;");
       expect(style).toContain(".message-block { contain: layout paint style; content-visibility: auto;");
@@ -462,7 +495,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       [{ userAgent: "Mozilla/5.0 (Linux; Android 14) AppleWebKit/537.36 Chrome/125", platform: "Linux armv8l", maxTouchPoints: 5 }, false],
       [{ userAgent: "Mozilla/5.0 (iPhone) Gecko/20100101 Firefox/125", platform: "iPhone", maxTouchPoints: 5 }, false],
     ];
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       for (const [navigatorValue, expected] of cases) {
         expect(runtime.isIosWebKit(navigatorValue)).toBe(expected);
@@ -471,7 +504,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("keeps zero-delay event catch-up conditional on a changed sync cursor", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       runtime.state.snapshotInitialized = true;
       runtime.state.snapshot.revision = 3;
@@ -489,9 +522,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
   test("closes the portrait sidebar before selecting any Gateway session", () => {
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
-  if (sessionStartupLocked()) return;
+  if (sessionStartupLocked(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -506,7 +539,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("keeps Objective details scoped while the whole card is the single accessible control", () => {
     const objectiveTitleRule =
       ".objective-title { min-width: 0; flex: 1; overflow-wrap: anywhere; font-weight: 400; }";
-    for (const relative of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
+    for (const relative of ["../src/webui/style.css"]) {
       const style = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(style).toContain(objectiveTitleRule);
     }
@@ -515,7 +548,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       objective: { id: "objective-1", title: "Ship safely", description: "Release details" },
       plans: [{ plan: { id: "plan-1", title: "Build", state: "active" }, notes: [{}] }],
     };
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       const disclosure = runtime.emptyObjectiveDisclosure();
       expect(disclosure).toEqual({ scopeId: null, objectiveId: null, expanded: false });
@@ -580,11 +613,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain('if (event.type === "keydown") event.preventDefault();');
       expect(source.match(/state\.objectiveDisclosure\.expanded = !state\.objectiveDisclosure\.expanded;/g)).toHaveLength(1);
     }
-    const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    expect(singleSource).toContain("syncObjectiveDisclosure(state.objectiveDisclosure, state.selectedAgent, current.objective.id)");
-    expect(gatewaySource).toContain("JSON.stringify([state.workspaceId, state.selectedAgent])");
-    for (const stylePath of ["../src/webui/style.css", "../src/gateway_webui/style.css"]) {
+    const sharedSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    expect(sharedSource).toContain("JSON.stringify([state.workspaceId, state.selectedAgent])");
+    for (const stylePath of ["../src/webui/style.css"]) {
       const styles = readFileSync(join(import.meta.dir, stylePath), "utf8");
       expect(styles).toContain(".objective-summary:focus-visible");
       expect(styles).toContain(".objective-summary:hover");
@@ -592,15 +623,17 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
-  test("namespaces child APIs and allocates independent Workspace stores", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
-    gateway.state.workspaceId = "w-one";
-    expect(gateway.scopedApiPath("/api/sync")).toBe("/api/workspaces/w-one/sync");
-    expect(gateway.scopedApiPath("/api/session-terminal/main/read"))
+  test("routes child APIs in adapters and allocates independent Workspace stores", () => {
+    const shared = loadRuntime("../src/webui/app.js");
+    const direct = loadFrontendAdapter("../src/webui/runtime.js");
+    const gateway = loadFrontendAdapter("../src/gateway_webui/runtime.js");
+    expect(direct.apiPath("/api/sync", "w-one")).toBe("/api/sync");
+    expect(gateway.apiPath("/api/sync", "w-one")).toBe("/api/workspaces/w-one/sync");
+    expect(gateway.apiPath("/api/session-terminal/main/read", "w-one"))
       .toBe("/api/workspaces/w-one/session-terminal/main/read");
-    expect(gateway.scopedApiPath("/api/auth/status")).toBe("/api/auth/status");
-    const first = gateway.emptyGatewayWorkspaceState();
-    const second = gateway.emptyGatewayWorkspaceState();
+    expect(gateway.apiPath("/api/auth/status", "w-one")).toBe("/api/auth/status");
+    const first = shared.emptyGatewayWorkspaceState();
+    const second = shared.emptyGatewayWorkspaceState();
     first.stores.set("main", { marker: 1 });
     first.drafts.set("main", "workspace one");
     expect(second.stores.has("main")).toBe(false);
@@ -610,7 +643,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("background-syncs every inactive Workspace as raw EDB without visible projection work", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     gateway.state.connectionPhase = "connected";
     gateway.state.activeCatchUpPending = false;
     expect(gateway.backgroundSyncCanRun()).toBe(true);
@@ -665,7 +698,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.nextBackgroundWorkspace(10).workspaceId).toBe("w-one");
     expect(gateway.nextBackgroundWorkspace(10).workspaceId).toBe("w-two");
 
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const applyStart = gatewaySource.indexOf("function applyBackgroundSyncState");
     const applyEnd = gatewaySource.indexOf("\nasync function requestBackgroundWorkspaceSync", applyStart);
     const backgroundApply = gatewaySource.slice(applyStart, applyEnd);
@@ -676,24 +709,16 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gatewaySource).toContain("if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;");
     expect(gatewaySource).toContain("state.connectionPhase === \"connected\"");
 
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(source).toContain("agents: [...state.stores].map(([id, store]) => ({");
       expect(source).toContain("const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));");
     }
   });
 
-
-  test("keeps every session disabled until the initial raw EDB startup finishes", () => {
-    const direct = loadRuntime("../src/webui/app.js");
-    expect(direct.sessionStartupLocked()).toBe(true);
-    direct.state.edbCacheInitialized = true;
-    expect(direct.noteStartupProgress(true, true)).toBe(false);
-    expect(direct.noteStartupProgress(false, false)).toBe(false);
-    expect(direct.noteStartupProgress(false, true)).toBe(true);
-    expect(direct.sessionStartupLocked()).toBe(false);
-
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+  test("keeps every session disabled until all Workspace startup work finishes", () => {
+    const gateway = loadRuntime("../src/webui/app.js");
+    expect(gateway.sessionStartupLocked()).toBe(true);
     gateway.state.gateway.workspaces = [{ id: "chat" }, { id: "w-one" }];
     gateway.state.workspaceId = "chat";
     gateway.state.edbCacheInitialized = true;
@@ -703,14 +728,39 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     inactive.catchUpPending = true;
     gateway.state.workspaceStates.set("w-one", inactive);
     expect(gateway.gatewayStartupReady()).toBe(false);
+    expect(gateway.sessionStartupLocked("chat", "ready")).toBe(true);
     inactive.catchUpPending = false;
     expect(gateway.gatewayStartupReady()).toBe(true);
     expect(gateway.noteGatewayStartupProgress()).toBe(true);
-    expect(gateway.sessionStartupLocked()).toBe(false);
+    expect(gateway.sessionStartupLocked("chat", "pending")).toBe(false);
+  });
+
+  test("keeps complete cached Events resident without client-only loading state", () => {
+    const gateway = loadRuntime("../src/webui/app.js");
+    const edbId = "f".repeat(64);
+    const snapshot = { environment: { workspace: "/workspace" }, agents: [] };
+    gateway.state.snapshot = snapshot;
+    const cachedEvents = [{ EdbIdGeneration: { edb_id: edbId } }, { UserPrompt: { content: "cached" } }];
+    const store = gateway.createAgentStore({
+      id: "retained", edb_id: edbId, mutation_revision: 2,
+      prompt_submission_revision: 0, input_draft_revision: 0,
+    }, {
+      key: edbId, agentId: "retained", edbId, events: cachedEvents,
+      eventCount: cachedEvents.length, mutationRevision: 2, lastEventHash: "hash-2",
+    }, snapshot);
+    expect(store.events).toBe(cachedEvents);
+    expect(store.eventCount).toBe(2);
+    expect(store.cacheKey).toBe(edbId);
+    expect(store).not.toHaveProperty("materialized");
+    expect(store).not.toHaveProperty("cacheLoading");
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    expect(source).not.toContain("materializeClientAgentStore");
+    expect(source).not.toContain("releaseClientAgentStore");
+    expect(source).not.toContain("cacheLoadOperation");
   });
 
   test("stores lightweight Gateway session metadata before raw EDB hydration", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const workspace = gateway.emptyGatewayWorkspaceState();
     gateway.state.workspaceStates.set("w-one", workspace);
     const snapshot = {
@@ -725,7 +775,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(workspace.edbCacheInitialized).toBe(false);
   });
   test("keeps Gateway Workspace disclosure as an origin-local browser preference", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const values = new Map();
     const storage = {
       getItem(key) { return values.has(key) ? values.get(key) : null; },
@@ -743,7 +793,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect([...restored]).toEqual([["w-two", true]]);
     expect(gateway.readWorkspaceDisclosure({ getItem() { return "not-json"; } })).toEqual(new Map());
 
-    const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(source).toContain('const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";');
     expect(source).toContain("workspaceDisclosure: readWorkspaceDisclosure()");
     expect(source).toContain("setWorkspaceExpanded(workspace.id, !workspaceExpanded(workspace.id));");
@@ -753,7 +803,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
 
   test("refreshes empty transcript metadata when switching Workspaces", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const transcriptContent = {
       value: "",
       querySelector() { return this.value.includes("empty-state") ? {} : null; },
@@ -771,7 +821,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("renders icon settings and collapsed model cards with visible API Keys", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const model = {
       ...gateway.blankGatewayModel(), name: "model-a", provider: "openai-compatible", api_key: "visible-key",
     };
@@ -780,23 +830,26 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(html).toContain('class="settings-model-icon"');
     expect(html).toContain('data-setting="api_key" type="text"');
     expect(html).toContain('value="visible-key"');
-    const index = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
     expect(index).toContain('id="open-settings" class="sidebar-settings" type="button" title="设置" aria-label="设置"><svg');
   });
 
-  test("keeps login branding free of marketing taglines", () => {
-    const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
-    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
-    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
-    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    expect(singleIndex).toContain("<strong>ME-S</strong>");
-    expect(gatewayIndex).toContain("<strong>ME</strong>");
-    for (const index of [singleIndex, gatewayIndex]) expect(index).not.toContain("智能工作台");
-    for (const styles of [singleStyles, gatewayStyles]) expect(styles).not.toContain(".login-brand span");
+  test("keeps runtime-specific login branding free of marketing taglines", () => {
+    const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const directRuntime = readFileSync(join(import.meta.dir, "../src/webui/runtime.js"), "utf8");
+    const gatewayRuntime = readFileSync(join(import.meta.dir, "../src/gateway_webui/runtime.js"), "utf8");
+    expect(index).toContain("<strong>ME</strong>");
+    expect(directRuntime).toContain('brandTitle: "ME-S"');
+    expect(gatewayRuntime).toContain('brandTitle: "ME"');
+    const app = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    expect(app).toContain("${escapeHtml(runtimeCapabilities.brandTitle)}");
+    expect(index).not.toContain("智能工作台");
+    expect(styles).not.toContain(".login-brand span");
   });
 
   test("sorts, filters, and formats host directory metadata without recursion", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const entries = [
       { name: "Folder 10", kind: "directory", modified_at_ms: null, size_bytes: null },
       { name: "file10.txt", kind: "file", modified_at_ms: 200, size_bytes: 10 },
@@ -823,8 +876,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("uses a fixed responsive Finder-style host directory window", () => {
-    const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    const styles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     expect(source).not.toContain("浏览 ME Gateway 宿主机上的文件和文件夹。");
     expect(source).toContain('class="directory-list-header"');
     expect(source).toContain('data-directory-sort="${key}"');
@@ -852,52 +905,43 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain(".directory-list { min-width: 0; min-height: 0; flex: 1; overflow: auto;");
   });
 
-  test("locks the document while keeping content areas internally scrollable", () => {
-    const single = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
-    const gateway = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    for (const styles of [single, gateway]) {
-      expect(styles).toContain("overflow: hidden; overscroll-behavior: none;");
-      expect(styles).toContain("html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }");
-      expect(styles).toContain("body { position: fixed; inset: 0; }");
-      expect(styles).toContain("height: 100%; height: 100dvh; min-height: 0;");
-      expect(styles).toContain(".login-screen { display: grid; width: 100%; height: 100%; min-height: 0;");
-      expect(styles).toContain("overflow: auto; overscroll-behavior: contain; padding: 24px;");
-      expect(styles).toContain(".transcript { contain: layout paint style; flex: 1; min-height: 0; overflow: auto;");
-      expect(styles).toContain("overscroll-behavior-y: contain;");
-    }
+  test("locks the shared document while keeping content areas internally scrollable", () => {
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    expect(styles).toContain("overflow: hidden; overscroll-behavior: none;");
+    expect(styles).toContain("html { -webkit-text-size-adjust: 100%; text-size-adjust: 100%; }");
+    expect(styles).toContain("body { position: fixed; inset: 0; }");
+    expect(styles).toContain("height: 100%; height: 100dvh; min-height: 0;");
+    expect(styles).toContain(".login-screen { display: grid; width: 100%; height: 100%; min-height: 0;");
+    expect(styles).toContain("overflow: auto; overscroll-behavior: contain; padding: 24px;");
+    expect(styles).toContain(".transcript { contain: layout paint style; flex: 1; min-height: 0; overflow: auto;");
+    expect(styles).toContain("overscroll-behavior-y: contain;");
   });
 
   test("balances short confirmation dialogs without resizing content modals", () => {
-    const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
-    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    for (const [source, styles] of [[singleSource, singleStyles], [gatewaySource, gatewayStyles]]) {
-      expect(source).toContain("当前会话将从空白上下文继续，已有消息记录不会被删除。");
-      expect(source).toContain('classList.toggle("message-modal-backdrop", messageOnly)');
-      expect(styles).toContain(".message-modal-backdrop .modal { width: min(560px, calc(100vw - 40px)); min-height: min(260px, calc(100dvh - 40px)); }");
-      expect(styles).toContain(".message-modal-backdrop .modal > header { min-height: 64px;");
-      expect(styles).toContain(".message-modal-backdrop .modal > p { display: flex;");
-      expect(styles).toContain(".message-modal-backdrop .modal > footer { min-height: 72px;");
-      expect(styles).toContain(".message-modal-backdrop .modal { width: 100%; min-height: min(280px, calc(86dvh - env(safe-area-inset-top))); }");
-    }
-    expect(singleSource).toContain("const messageOnly = modal.html == null && choices.length === 0;");
-    expect(singleSource).toContain('classList.remove("message-modal-backdrop")');
-    expect(gatewaySource).toContain("const messageOnly = modal.html == null && !choices.length;");
-    expect(gatewaySource).toContain('classList.remove("directory-modal-backdrop", "message-modal-backdrop")');
-    expect(gatewaySource).toContain('html: `<div class="directory-browser"></div>`');
-    expect(gatewaySource).toContain('html: `<div class="settings-editor"></div>`');
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    expect(source).toContain("当前会话将从空白上下文继续，已有消息记录不会被删除。");
+    expect(source).toContain('classList.toggle("message-modal-backdrop", messageOnly)');
+    expect(styles).toContain(".message-modal-backdrop .modal { width: min(560px, calc(100vw - 40px)); min-height: min(260px, calc(100dvh - 40px)); }");
+    expect(styles).toContain(".message-modal-backdrop .modal > header { min-height: 64px;");
+    expect(styles).toContain(".message-modal-backdrop .modal > p { display: flex;");
+    expect(styles).toContain(".message-modal-backdrop .modal > footer { min-height: 72px;");
+    expect(styles).toContain(".message-modal-backdrop .modal { width: 100%; min-height: min(280px, calc(86dvh - env(safe-area-inset-top))); }");
+    expect(source).toContain("const messageOnly = modal.html == null && !choices.length;");
+    expect(source).toContain('classList.remove("directory-modal-backdrop", "message-modal-backdrop")');
+    expect(source).toContain('html: `<div class="directory-browser"></div>`');
+    expect(source).toContain('html: `<div class="settings-editor"></div>`');
   });
 
   test("routes Windows drive roots through the host root selector", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     expect(gateway.directoryParentRequest({ parent: "C:\\Users", parent_is_root_selector: false }))
       .toEqual({ path: "C:\\Users", roots: false });
     expect(gateway.directoryParentRequest({ parent: null, parent_is_root_selector: true }))
       .toEqual({ path: null, roots: true });
     expect(gateway.directoryParentRequest({ parent: null, parent_is_root_selector: false }))
       .toBeNull();
-    const source = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(source).not.toContain("displayHostPath");
     expect(source).toContain('String(listing.path || "")');
     expect(source).toContain('JSON.stringify({ path, roots })');
@@ -906,7 +950,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
 
   test("keeps the selected default model attached when that model is renamed", () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
+    const gateway = loadRuntime("../src/webui/app.js");
     const previous = [{ name: "model-a" }, { name: "model-b" }];
     const edited = [{ name: "model-a" }, { name: "model-renamed" }];
     expect(gateway.resolveEditedDefaultModel(previous, edited, "model-b")).toBe("model-renamed");
@@ -914,106 +958,96 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("serializes persisted Workspace selections in user action order", async () => {
-    const gateway = loadRuntime("../src/gateway_webui/app.js");
-    const originalFetch = globalThis.fetch;
+    const originalPersistSelection = globalThis.MeFrontendRuntime.persistSelection;
     const calls = [];
     const releases = [];
-    globalThis.fetch = (url, options) => new Promise((resolve) => {
-      calls.push({ url, body: JSON.parse(options.body) });
-      releases.push(() => resolve({
-        ok: true, status: 200, json: async () => ({ ok: true }),
-      }));
+    globalThis.MeFrontendRuntime.persistSelection = (_api, workspaceId, agentId) => new Promise((resolve) => {
+      calls.push({ workspaceId, agentId });
+      releases.push(resolve);
     });
     try {
+      const gateway = loadRuntime("../src/webui/app.js");
       const first = gateway.persistGatewaySelection("w-one", "main");
       const second = gateway.persistGatewaySelection("w-two", "agent-2");
       await Promise.resolve();
       await Promise.resolve();
-      expect(calls.map((call) => call.body.workspace_id)).toEqual(["w-one"]);
+      expect(calls.map((call) => call.workspaceId)).toEqual(["w-one"]);
       releases.shift()();
       await first;
       await Promise.resolve();
-      expect(calls.map((call) => call.body.workspace_id)).toEqual(["w-one", "w-two"]);
+      expect(calls.map((call) => call.workspaceId)).toEqual(["w-one", "w-two"]);
       releases.shift()();
       await second;
     } finally {
-      globalThis.fetch = originalFetch;
+      globalThis.MeFrontendRuntime.persistSelection = originalPersistSelection;
     }
   });
 
-  test("renders compact accessible sidebar rows and status metadata in both WebUIs", () => {
-    const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
-    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
-    const singleSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
-    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+  test("renders compact accessible sidebar rows and capability-gated Workspace surfaces", () => {
+    const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     const themeStyles = readFileSync(join(import.meta.dir, "../src/webui/theme.css"), "utf8");
 
-    for (const [index, source, styles] of [
-      [singleIndex, singleSource, singleStyles],
-      [gatewayIndex, gatewaySource, gatewayStyles],
-    ]) {
-      expect(index).toContain('class="sidebar-scroll"');
-      expect(index).not.toContain('id="mobile-delete-agent"');
-      expect(index).toContain('class="status-model-icon"');
-      expect(index).toContain('class="status-selector status-effort" type="button" aria-haspopup="dialog" title="切换推理强度"><span');
-      expect(index).not.toContain('title="切换推理强度">(<span');
-      expect(source).toContain('class="agent-dot" aria-hidden="true"');
-      expect(source).toContain('class="agent-label"></span>');
-      expect(source).toContain('class="agent-delete"');
-      expect(source).toContain('void openDeleteAgent(agent.id)');
-      expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
-      expect(source).toContain("const active = !startupLoading && sidebarAgentActive(summary);");
-      expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
-      expect(source).toContain("startupPending: true");
-      expect(source).toContain('row.classList.toggle("startup-loading", startupLoading)');
-      expect(source).toContain("item.disabled = startupLoading");
-      expect(source).toContain("deleteButton.disabled = startupLoading");
-      expect(source).toContain("if (sessionStartupLocked()) return;");
-      expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
-      expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
-      expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
-      expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
-      expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
-      expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");
-      expect(styles).not.toContain(".agent-row.active { background: var(--agent-selected-bg); box-shadow:");
-      expect(styles).toContain("animation: agent-dot-breathe 3s ease-in-out infinite;");
-      expect(styles).toContain("linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%)");
-      expect(styles).toContain("animation: agent-label-sweep 3s ease-in-out infinite;");
-      expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
-      expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
-      expect(styles).toContain(".agent-row.startup-loading { opacity: .52; }");
-      expect(styles).toContain(".agent-dot.startup-loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
-      expect(styles).toContain("animation: agent-startup-spin .8s linear infinite;");
-      expect(styles).toContain("@keyframes agent-startup-spin { to { transform: rotate(360deg); } }");
-      expect(styles).toContain(".statusbar { contain: layout paint style;");
-      expect(styles).toContain("font-weight: 700; white-space: nowrap;");
-      expect(styles).toContain(".status-model-icon {");
-      expect(styles).toContain(".sidebar-scroll.scrollbar-active");
-    }
+    expect(index).toContain('class="sidebar-scroll"');
+    expect(index).not.toContain('id="mobile-delete-agent"');
+    expect(index).toContain('class="status-model-icon"');
+    expect(index).toContain('class="status-selector status-effort" type="button" aria-haspopup="dialog" title="切换推理强度"><span');
+    expect(index).not.toContain('title="切换推理强度">(<span');
+    expect(source).toContain('class="agent-dot" aria-hidden="true"');
+    expect(source).toContain('class="agent-label"></span>');
+    expect(source).toContain('class="agent-delete"');
+    expect(source).toContain('void openDeleteAgent(agent.id)');
+    expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
+    expect(source).toContain("const active = !startupLoading && sidebarAgentActive(summary);");
+    expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
+    expect(source).toContain("startupPending: true");
+    expect(source).toContain('row.classList.toggle("startup-loading", startupLoading)');
+    expect(source).toContain("item.disabled = startupLoading");
+    expect(source).toContain("deleteButton.disabled = startupLoading");
+    expect(source).toContain("sessionStartupLocked(");
+    expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
+    expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
+    expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
+    expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
+    expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
+    expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");
+    expect(styles).not.toContain(".agent-row.active { background: var(--agent-selected-bg); box-shadow:");
+    expect(styles).toContain("animation: agent-dot-breathe 3s ease-in-out infinite;");
+    expect(styles).toContain("linear-gradient(100deg, var(--text) 0 36%, var(--activity-sweep) 46% 54%, var(--text) 64% 100%)");
+    expect(styles).toContain("animation: agent-label-sweep 3s ease-in-out infinite;");
+    expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
+    expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
+    expect(styles).toContain(".agent-row.startup-loading { opacity: .52; }");
+    expect(styles).toContain(".agent-dot.startup-loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
+    expect(styles).toContain("animation: agent-startup-spin .8s linear infinite;");
+    expect(styles).toContain("@keyframes agent-startup-spin { to { transform: rotate(360deg); } }");
+    expect(styles).toContain(".statusbar { contain: layout paint style;");
+    expect(styles).toContain("font-weight: 700; white-space: nowrap;");
+    expect(styles).toContain(".status-model-icon {");
+    expect(styles).toContain(".sidebar-scroll.scrollbar-active");
 
     expect(themeStyles).toContain("--activity-sweep: color-mix(in srgb, var(--text) 42%, var(--bg));");
     expect(themeStyles).toContain("--agent-selected-bg: color-mix(in srgb, var(--accent) 22%, var(--panel));");
-    expect(gatewayIndex).toContain('class="sidebar-divider" aria-hidden="true"');
-    expect(gatewaySource).toContain("workspaceDisclosure: readWorkspaceDisclosure()");
-    expect(gatewaySource).toContain('class="workspace-disclosure-icon"');
-    expect(gatewaySource).toContain('class="workspace-folder-icon"');
-    expect(gatewaySource).toContain('class="workspace-name"></span>');
-    expect(gatewaySource).toContain('aria-expanded="${workspaceExpanded(workspace.id)}"');
-    expect(gatewaySource).toContain("agents.hidden = !expanded");
-    expect(gatewaySource).not.toContain("if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);");
-    expect(gatewaySource).not.toContain('group.classList.toggle("active", active);');
-    expect(gatewayStyles).not.toContain(".workspace-group.active > .workspace-row");
-    expect(gatewayStyles).toContain(".workspace-select { display: grid; min-width: 0; min-height: 34px;");
-    expect(gatewayStyles).toContain(".workspace-agent-list .agent-row { min-height: 34px; }");
-    expect(gatewaySource).not.toContain("select.title = workspace.path");
-    expect(gatewayStyles).toContain(".workspace-name { display: block; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 750;");
-    expect(gatewayStyles).toContain(".sidebar-settings { display: grid; width: 32px; min-width: 32px; height: 32px; flex: 0 0 32px;");
+    expect(index).toContain('class="sidebar-divider" data-multiple-workspaces aria-hidden="true"');
+    expect(source).toContain("workspaceDisclosure: readWorkspaceDisclosure()");
+    expect(source).toContain('class="workspace-disclosure-icon"');
+    expect(source).toContain('class="workspace-folder-icon"');
+    expect(source).toContain('class="workspace-name"></span>');
+    expect(source).toContain('aria-expanded="${workspaceExpanded(workspace.id)}"');
+    expect(source).toContain("agents.hidden = !expanded");
+    expect(source).not.toContain("if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);");
+    expect(source).not.toContain('group.classList.toggle("active", active);');
+    expect(styles).not.toContain(".workspace-group.active > .workspace-row");
+    expect(styles).toContain(".workspace-select { display: grid; min-width: 0; min-height: 34px;");
+    expect(styles).toContain(".workspace-agent-list .agent-row { min-height: 34px; }");
+    expect(source).not.toContain("select.title = workspace.path");
+    expect(styles).toContain(".workspace-name { display: block; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 750;");
+    expect(styles).toContain(".sidebar-settings { display: grid; width: 32px; min-width: 32px; height: 32px; flex: 0 0 32px;");
   });
 
   test("auto-hides only the themed scrollbar appearance without intercepting scrolling", () => {
-    for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
+    for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       const listeners = new Map();
       const removed = [];

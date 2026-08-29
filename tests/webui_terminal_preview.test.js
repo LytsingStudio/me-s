@@ -4,16 +4,18 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 require("../src/webui/edb-cache.js");
+const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 
 function loadTerminalScrollHelpers() {
+  installDirectFrontendRuntime();
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI terminal preview runtime");
   const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
     return { terminalIsNearBottom, captureTerminalScroll, restoreTerminalScroll };`);
   return factory(
-    { querySelector: () => null },
+    { querySelector: () => null, documentElement: { classList: { toggle() {} } } },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
   );

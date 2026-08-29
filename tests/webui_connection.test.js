@@ -4,7 +4,7 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
-const APP_PATHS = ["../src/webui/app.js", "../src/gateway_webui/app.js"];
+const APP_PATHS = ["../src/webui/app.js"];
 
 function connectionHarness(relative) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");

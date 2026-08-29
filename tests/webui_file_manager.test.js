@@ -8,38 +8,32 @@ const root = join(import.meta.dir, "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 
 const controller = read("src/webui/file-manager.js");
-const directHtml = read("src/webui/index.html");
-const gatewayHtml = read("src/gateway_webui/index.html");
-const directApp = read("src/webui/app.js");
-const gatewayApp = read("src/gateway_webui/app.js");
-const directStyle = read("src/webui/style.css");
-const gatewayStyle = read("src/gateway_webui/style.css");
+const sharedHtml = read("src/webui/index.html");
+const sharedApp = read("src/webui/app.js");
+const sharedStyle = read("src/webui/style.css");
+const directRuntime = read("src/webui/runtime.js");
+const gatewayRuntime = read("src/gateway_webui/runtime.js");
 const hostFiles = read("src/host_files.rs");
 const gateway = read("src/gateway.rs");
 const hostPath = read("src/host_path.rs");
 
 
 describe("per-session host file manager", () => {
-  test("both WebUIs expose the fixed Files tab and load the shared controller before app.js", () => {
-    for (const html of [directHtml, gatewayHtml]) {
-      expect(html).toContain('data-view="files"');
-      expect(html).toContain('id="files-view"');
-      expect(html).toContain('id="file-manager"');
-      expect(html.indexOf('/file-manager.js')).toBeGreaterThan(0);
-      expect(html.indexOf('/file-manager.js')).toBeLessThan(html.indexOf('/app.js'));
-    }
+  test("the shared WebUI exposes the fixed Files tab and loads its controller before app.js", () => {
+    expect(sharedHtml).toContain('data-view="files"');
+    expect(sharedHtml).toContain('id="files-view"');
+    expect(sharedHtml).toContain('id="file-manager"');
+    expect(sharedHtml.indexOf('/file-manager.js')).toBeGreaterThan(0);
+    expect(sharedHtml.indexOf('/file-manager.js')).toBeLessThan(sharedHtml.indexOf('/app.js'));
   });
 
-  test("both WebUIs present WorkMap as 工作图", () => {
-    for (const html of [directHtml, gatewayHtml]) {
-      expect(html).toContain('data-view="workmap" data-work-only>工作图</button>');
-      expect(html).toContain('<strong>工作图</strong>');
-    }
+  test("the shared WebUI presents WorkMap as 工作图", () => {
+    expect(sharedHtml).toContain('data-view="workmap" data-work-only>工作图</button>');
+    expect(sharedHtml).toContain('<strong>工作图</strong>');
   });
 
-  test("direct and Gateway identities isolate page state without persisting it", () => {
-    expect(directApp).toContain('key: `direct:${state.selectedAgent}`');
-    expect(gatewayApp).toContain('key: `${state.workspaceId}:${state.selectedAgent}`');
+  test("shared page state is isolated by Workspace and Session without persistence", () => {
+    expect(sharedApp).toContain('key: `${state.workspaceId}:${state.selectedAgent}`');
     expect(controller).toContain("this.states = new Map()");
     expect(controller).toContain("identity: { ...identity }");
     expect(controller).not.toContain("localStorage");
@@ -48,10 +42,13 @@ describe("per-session host file manager", () => {
     expect(controller).not.toContain("MeEdbCache");
   });
 
-  test("Gateway scopes only the formal files protocol to the selected Workspace", () => {
-    expect(gatewayApp).toContain('path.startsWith("/api/files/")');
-    expect(gatewayApp).toContain('api(path, options, identity.workspaceId)');
-    expect(gatewayApp).toContain('scopedApiPath(`/api/files/downloads/');
+  test("runtime adapters route only the formal files protocol", () => {
+    expect(sharedApp).toContain('api(path, options, identity.workspaceId)');
+    expect(sharedApp).toContain('frontendRuntime.apiPath(`/api/files/downloads/');
+    expect(gatewayRuntime).toContain('value.startsWith("/api/files/")');
+    expect(gatewayRuntime).toContain('/api/workspaces/${encodeURIComponent(workspaceId || "chat")}');
+    expect(directRuntime).toContain("apiPath(path)");
+    expect(directRuntime).toContain('return String(path || "")');
     expect(gateway).toContain('"files/jobs/prepare"');
     expect(gateway).toContain('"files/uploads/chunk"');
     expect(gateway).toContain('parse_file_download_content_path');
@@ -80,19 +77,17 @@ describe("per-session host file manager", () => {
     expect(selectionPath).not.toContain("this.render();");
     expect(controller).toContain('this.list.querySelectorAll(".file-manager-entry").forEach((row) => {');
     expect(controller).toContain('row.classList.toggle("selected", rowSelected);');
-    const directoryClickStart = gatewayApp.indexOf('row.addEventListener("click", () => {');
-    const directoryClickEnd = gatewayApp.indexOf('\n    row.addEventListener("dblclick"', directoryClickStart);
-    const directoryClick = gatewayApp.slice(directoryClickStart, directoryClickEnd);
+    const directoryClickStart = sharedApp.indexOf('row.addEventListener("click", () => {');
+    const directoryClickEnd = sharedApp.indexOf('\n    row.addEventListener("dblclick"', directoryClickStart);
+    const directoryClick = sharedApp.slice(directoryClickStart, directoryClickEnd);
     expect(directoryClick).toContain("updateDirectorySelection(directory, list, allEntries);");
     expect(directoryClick).not.toContain("renderDirectoryRows();");
     for (const action of ["select-all", "mkdir", "rename", "copy-path", "copy", "cut", "paste", "move", "upload", "download", "delete"]) {
       expect(controller).toContain(`actionButton("${action}",`);
     }
-    for (const style of [directStyle, gatewayStyle]) {
-      expect(style).toContain(".file-manager-icon-button svg");
-      expect(style).toContain("touch-action: manipulation");
-      expect(style).toContain("width: 40px; min-width: 40px; height: 40px");
-    }
+    expect(sharedStyle).toContain(".file-manager-icon-button svg");
+    expect(sharedStyle).toContain("touch-action: manipulation");
+    expect(sharedStyle).toContain("width: 40px; min-width: 40px; height: 40px");
   });
 
   test("copy, move and delete submit one top-level server job rather than browser recursion", () => {
@@ -117,9 +112,7 @@ describe("per-session host file manager", () => {
     expect(controller).toContain("const paths = this.selectedPaths();");
     expect(controller).toContain('await this.writeClipboard(paths.join(";"));');
     expect(controller).toContain('paths.length === 1 ? "已复制绝对路径" : `已复制 ${paths.length} 个绝对路径`');
-    for (const app of [directApp, gatewayApp]) {
-      expect(app).toContain("writeClipboard: copyTextToClipboard");
-    }
+    expect(sharedApp).toContain("writeClipboard: copyTextToClipboard");
     expect(controller).toContain("const UPLOAD_CHUNK_BYTES = 384 * 1024");
     expect(controller).toContain('this.call("/api/files/uploads/create"');
     expect(controller).toContain('this.call("/api/files/uploads/chunk"');
@@ -145,12 +138,10 @@ describe("per-session host file manager", () => {
     expect(controller).toContain('button.dataset.direction = direction === "asc" ? "↑" : direction === "desc" ? "↓" : "";');
     expect(controller).toContain('button.setAttribute("aria-label", description);');
     expect(controller).toContain("button.title = description;");
-    for (const style of [directStyle, gatewayStyle]) {
-      const rule = style.match(/\.file-manager-header > button\.active::after \{[^}]+\}/)?.[0] || "";
-      expect(rule).toContain("content: attr(data-direction)");
-      expect(rule).toContain("font-size: 14px");
-      expect(rule).not.toContain("text-transform");
-    }
+    const rule = sharedStyle.match(/\.file-manager-header > button\.active::after \{[^}]+\}/)?.[0] || "";
+    expect(rule).toContain("content: attr(data-direction)");
+    expect(rule).toContain("font-size: 14px");
+    expect(rule).not.toContain("text-transform");
   });
 
 

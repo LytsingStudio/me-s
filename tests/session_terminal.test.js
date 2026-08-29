@@ -343,7 +343,7 @@ describe("SessionTerminal browser transport", () => {
   });
 
   test("keeps the fixed native terminal distinct from dynamic Agent Terminal tool tabs", () => {
-    for (const htmlPath of ["src/webui/index.html", "src/gateway_webui/index.html"]) {
+    for (const htmlPath of ["src/webui/index.html"]) {
       const html = read(htmlPath);
       const chat = html.indexOf('data-view="chat"');
       const workmap = html.indexOf('data-view="workmap"');
@@ -361,7 +361,7 @@ describe("SessionTerminal browser transport", () => {
       expect(html).toContain('/session-terminal.js');
     }
     expect(read("src/webui/vendor/xterm-addon-unicode11.js")).toContain("Unicode11Addon");
-    for (const appPath of ["src/webui/app.js", "src/gateway_webui/app.js"]) {
+    for (const appPath of ["src/webui/app.js"]) {
       const app = read(appPath);
       expect(app).toContain('kind !== "session-terminal"');
       expect(app).toContain('kind === "terminal"');
@@ -375,7 +375,7 @@ describe("SessionTerminal browser transport", () => {
       ["^C", "03"], ["^V", "16"], ["^S", "13"], ["^D", "04"],
       ["^O", "0f"], ["^P", "10"], ["^Q", "11"], ["Enter", "0d"],
     ];
-    for (const htmlPath of ["src/webui/index.html", "src/gateway_webui/index.html"]) {
+    for (const htmlPath of ["src/webui/index.html"]) {
       const html = read(htmlPath);
       const controls = [...html.matchAll(/<button type="button" data-session-terminal-byte="([0-9a-f]{2})"[^>]*>([^<]+)<\/button>/g)]
         .map((match) => [match[2], match[1]]);
@@ -386,7 +386,7 @@ describe("SessionTerminal browser transport", () => {
       expect(html.indexOf('id="session-terminal-screen"'))
         .toBeLessThan(html.indexOf('id="session-terminal-controls"'));
     }
-    for (const stylePath of ["src/webui/style.css", "src/gateway_webui/style.css"]) {
+    for (const stylePath of ["src/webui/style.css"]) {
       const styles = read(stylePath);
       expect(styles).not.toContain(".session-terminal-toolbar");
       expect(styles).not.toContain(".session-terminal-shell");
@@ -397,7 +397,7 @@ describe("SessionTerminal browser transport", () => {
       expect(styles).toContain(".session-terminal-control-strip { display: flex; width: max-content; min-width: 100%; flex-wrap: nowrap;");
       expect(styles).toContain(".session-terminal-control-strip button { min-width: 46px; min-height: 36px; flex: 0 0 auto;");
     }
-    for (const appPath of ["src/webui/app.js", "src/gateway_webui/app.js"]) {
+    for (const appPath of ["src/webui/app.js"]) {
       const app = read(appPath);
       expect(app).not.toContain("sessionTerminalShell");
       expect(app).not.toContain("sessionTerminalState");

@@ -72,12 +72,12 @@ describe("browser-local raw EDB cache", () => {
     expect(cache.pendingWrites.size).toBe(0);
   });
 
-  test("keeps storage, hydration, validation, and settings semantics aligned in both WebUIs", () => {
+  test("keeps raw-cache persistence and shared hydration semantics aligned", () => {
     const cacheSource = readFileSync(join(import.meta.dir, "../src/webui/edb-cache.js"), "utf8");
-    const directSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    const directIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
-    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
+    const sharedSource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const sharedIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const directRuntime = readFileSync(join(import.meta.dir, "../src/webui/runtime.js"), "utf8");
+    const gatewayRuntime = readFileSync(join(import.meta.dir, "../src/gateway_webui/runtime.js"), "utf8");
 
     expect(cacheSource).toContain('createObjectStore(SESSION_STORE, { keyPath: "key" })');
     expect(cacheSource).toContain('createObjectStore(EVENT_STORE, { keyPath: ["sessionKey", "order"] })');
@@ -88,37 +88,29 @@ describe("browser-local raw EDB cache", () => {
     expect(cacheSource).not.toContain("projection:");
     expect(cacheSource).not.toContain("workmap:");
 
-    for (const source of [directSource, gatewaySource]) {
-      expect(source).toContain("cache_metadata_only: !state.edbCacheInitialized");
-      expect(source).toContain('["initial", "reconnecting"].includes(state.connectionPhase)');
-      expect(source).toContain("await hydrateEdbCache(message.snapshot)");
-      expect(source).toContain("createAgentStore(meta, valid ? cached : null)");
-      expect(source).toContain("projection: emptyProjection()");
-      expect(source).toContain("workmap: emptyWorkMap()");
-      expect(source).toContain("if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key)");
-      expect(source).toContain("if (payload.reset || payload.events.length > 0) {");
-      expect(source).toContain("persistAgentEdb(meta, store, Boolean(payload.reset))");
-      const hydrationStart = source.indexOf("async function hydrateEdbCache(snapshot) {");
-      const hydrationEnd = source.indexOf("\nfunction persistAgentEdb(", hydrationStart);
-      const hydration = source.slice(hydrationStart, hydrationEnd);
-      expect(hydration.indexOf("renderAgents();")).toBeGreaterThan(-1);
-      expect(hydration.indexOf("renderAgents();"))
-        .toBeLessThan(hydration.indexOf("await edbCache.loadScope(scope)"));
-      expect(source).toContain("startupPending: true");
-      expect(source).toContain("item.disabled = startupLoading");
-      expect(source).toContain("deleteButton.disabled = startupLoading");
-    }
+    expect(sharedSource).toContain("cache_metadata_only: !state.edbCacheInitialized");
+    expect(sharedSource).toContain('["initial", "reconnecting"].includes(state.connectionPhase)');
+    expect(sharedSource).toContain("await hydrateEdbCache(message.snapshot)");
+    expect(sharedSource).toContain("frontendRuntime.loadCachedSessions(edbCache, snapshot, scope)");
+    expect(sharedSource).toContain("createAgentStore(meta, cached || null)");
+    expect(sharedSource).toContain("projection: emptyProjection()");
+    expect(sharedSource).toContain("workmap: emptyWorkMap()");
+    expect(sharedSource).toContain("state.stores.clear()");
+    expect(sharedSource).toContain("events: store.events");
+    expect(sharedSource).toContain("delta: batch ? { ...batch, reset: replace } : null");
+    expect(sharedSource).toContain("startupPending: true");
+    expect(sharedSource).toContain("item.disabled = startupLoading");
+    expect(sharedSource).toContain("deleteButton.disabled = startupLoading");
 
-    expect(gatewaySource).toContain('api("/api/snapshot", {}, workspaceId)');
-    expect(gatewaySource).toContain("function gatewayStartupReady()");
-    expect(gatewaySource).toContain("state.startupMetadataPending = true");
-
-    for (const index of [directIndex, gatewayIndex]) {
-      expect(index.indexOf('<script src="/edb-cache.js"></script>')).toBeGreaterThan(-1);
-      expect(index.indexOf('<script src="/edb-cache.js"></script>'))
-        .toBeLessThan(index.indexOf('<script src="/app.js"></script>'));
+    for (const runtimeSource of [directRuntime, gatewayRuntime]) {
+      expect(runtimeSource).toContain("createEdbCache()");
+      expect(runtimeSource).toContain("return globalThis.MeEdbCache.create()");
+      expect(runtimeSource).toContain("return cache.loadScope(scope)");
     }
-    expect(directIndex).toContain('id="open-settings"');
-    expect(gatewaySource).toContain('id="settings-edb-cache-manager"');
+    expect(sharedIndex.indexOf('<script src="/edb-cache.js"></script>')).toBeGreaterThan(-1);
+    expect(sharedIndex.indexOf('<script src="/edb-cache.js"></script>'))
+      .toBeLessThan(sharedIndex.indexOf('<script src="/app.js"></script>'));
+    expect(sharedIndex).toContain('id="open-settings"');
+    expect(sharedSource).toContain('id="settings-edb-cache-manager"');
   });
 });

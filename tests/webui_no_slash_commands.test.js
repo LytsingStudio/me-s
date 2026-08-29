@@ -7,23 +7,15 @@ const { join } = require("node:path");
 const root = join(import.meta.dir, "..");
 const read = (path) => readFileSync(join(root, path), "utf8");
 
-const webuis = [
-  {
-    name: "direct",
-    app: read("src/webui/app.js"),
-    html: read("src/webui/index.html"),
-    style: read("src/webui/style.css"),
-  },
-  {
-    name: "gateway",
-    app: read("src/gateway_webui/app.js"),
-    html: read("src/gateway_webui/index.html"),
-    style: read("src/gateway_webui/style.css"),
-  },
-];
+const webuis = [{
+  name: "shared",
+  app: read("src/webui/app.js"),
+  html: read("src/webui/index.html"),
+  style: read("src/webui/style.css"),
+}];
 
 describe("WebUI without browser slash commands", () => {
-  test("both WebUIs omit the slash command menu, state, dispatcher and styles", () => {
+  test("the shared WebUI omits the slash command menu, state, dispatcher and styles", () => {
     for (const { app, html, style } of webuis) {
       for (const removed of [
         "const COMMANDS",

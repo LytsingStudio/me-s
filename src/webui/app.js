@@ -3,6 +3,8 @@
 const HTTP_SYNC_ACTIVE_MS = 250;
 const HTTP_SYNC_IDLE_MS = 1000;
 const HTTP_SYNC_TIMEOUT_MS = 15000;
+const BACKGROUND_SYNC_IDLE_MS = 5000;
+const BACKGROUND_SYNC_RETRY_MAX_MS = 30000;
 const EVENT_RECOVERY_THRESHOLD = 100;
 const RECONNECT_MAX_MS = 5000;
 const DRAFT_BATCH_MS = 80;
@@ -25,11 +27,32 @@ const BROWSER_PORT = browserPort();
 const SEND_SHORTCUT_COOKIE = portScopedCookieName("me_send_shortcut");
 const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
+const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";
 const API_ACTIVE = new Set(["Requesting", "Streaming", "Retrying"]);
 const API_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
 
-const edbCache = MeEdbCache.create();
+const frontendRuntime = globalThis.MeFrontendRuntime;
+if (!frontendRuntime) throw new Error("ME frontend runtime is unavailable");
+const runtimeCapabilities = Object.freeze({
+  multipleWorkspaces: false, gatewaySettings: false, targetConfiguration: false,
+  nativeDownload: false, pageTitle: "ME", brandTitle: "ME", cacheStorageLabel: "当前浏览器",
+  sessionSectionTitle: "聊天", newSessionLabel: "新建聊天",
+  ...(frontendRuntime.capabilities || {}),
+});
+const edbCache = frontendRuntime.createEdbCache();
+document.documentElement.classList.toggle("single-workspace", !runtimeCapabilities.multipleWorkspaces);
+document.documentElement.classList.toggle("target-configuration", runtimeCapabilities.targetConfiguration);
+document.title = runtimeCapabilities.pageTitle;
+const loginBrandTitle = document.querySelector(".login-brand strong");
+if (loginBrandTitle) loginBrandTitle.textContent = runtimeCapabilities.brandTitle;
+const builtinSectionTitle = document.querySelector("#builtin-section-title");
+if (builtinSectionTitle) builtinSectionTitle.textContent = runtimeCapabilities.sessionSectionTitle;
+const addAgentButton = document.querySelector("#add-agent");
+if (addAgentButton) {
+  addAgentButton.title = runtimeCapabilities.newSessionLabel;
+  addAgentButton.setAttribute("aria-label", runtimeCapabilities.newSessionLabel);
+}
 function isIosWebKit(navigatorValue = navigator) {
   const userAgent = String(navigatorValue?.userAgent || "");
   const platform = String(navigatorValue?.platform || "");
@@ -41,6 +64,20 @@ const IOS_WEBKIT = isIosWebKit();
 document.documentElement?.classList?.toggle("ios-webkit", IOS_WEBKIT);
 
 const state = {
+  gateway: { workspaces: [], selected_workspace_id: "chat", selected_agent_id: null, notices: [] },
+  workspaceId: null,
+  workspaceStates: new Map(),
+  gatewayRefreshInFlight: false,
+  lastNoticeId: 0,
+  workspaceMenu: null,
+  workspaceDisclosure: readWorkspaceDisclosure(),
+  backgroundSyncTimer: null,
+  backgroundSyncDueAt: null,
+  backgroundSyncOperation: null,
+  backgroundSyncCursor: 0,
+  startupPending: true,
+  startupMetadataPending: false,
+  activeCatchUpPending: true,
   snapshot: {
     revision: 0, environment: null, agents: [], models: [], orchestrators: [], default_orchestrator: null,
     chatbot_default_static_prompt: "",
@@ -84,7 +121,6 @@ const state = {
   authenticated: false,
   connected: false,
   connecting: false,
-  startupPending: true,
   snapshotInitialized: false,
   edbCacheInitialized: false,
   syncGeneration: 0,
@@ -108,12 +144,15 @@ const state = {
 let transcriptVirtualizer = null;
 
 
+let workspacePanelSequence = 0;
+
 const $ = (selector) => document.querySelector(selector);
 const elements = {
   app: $("#app"),
   loginScreen: $("#login-screen"),
   loginForm: $("#login-form"),
   loginPassword: $("#login-password"),
+  loginEndpoint: $("#login-endpoint"),
   loginError: $("#login-error"),
   loginSubmit: $("#login-submit"),
   connectionOverlay: $("#connection-overlay"),
@@ -123,11 +162,14 @@ const elements = {
   eventRecoveryProgressFill: $("#event-recovery-progress-fill"),
   eventRecoveryProgressLabel: $("#event-recovery-progress-label"),
   connectionRetry: $("#connection-retry"),
-  openSettings: $("#open-settings"),
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
   environment: $("#environment-footer"),
   sidebarScroll: $(".sidebar-scroll"),
+  workspaceList: $("#workspace-list"),
+  createWorkspace: $("#create-workspace"),
+  openWorkspace: $("#open-workspace"),
+  openSettings: $("#open-settings"),
   agents: $("#agent-list"),
   addAgent: $("#add-agent"),
   mobileSidebarToggle: $("#mobile-sidebar-toggle"),
@@ -168,6 +210,8 @@ const elements = {
   deleteUserTurn: $("#delete-user-turn"),
   agentMenu: $("#agent-menu"),
   deleteAgentMenu: $("#delete-agent-menu"),
+  workspaceMenu: $("#workspace-menu"),
+  closeWorkspaceMenu: $("#close-workspace-menu"),
   workmap: $("#workmap-content"),
   workmapCount: $("#workmap-count"),
   terminalScreen: $("#terminal-screen"),
@@ -244,7 +288,7 @@ function getSessionTerminalController() {
     sessionTerminalController = globalThis.MeSessionTerminal.create({
       container: elements.sessionTerminalScreen,
       controls: elements.sessionTerminalControls,
-      request: (path, options) => api(path, options),
+      request: (path, options, identity) => api(path, options, identity.workspaceId),
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
     });
   }
@@ -262,7 +306,10 @@ function getRemoteControlController() {
   if (!remoteControlController) {
     remoteControlController = globalThis.MeRemoteControl.create({
       container: elements.remoteControl,
-      request: (action, options) => fetch(`/api/remote-control/${encodeURIComponent(action)}`, { cache: "no-store", ...options }),
+      request: (action, options) => fetch(
+        frontendRuntime.apiPath(`/api/remote-control/${encodeURIComponent(action)}`, "chat"),
+        { cache: "no-store", ...options },
+      ),
       onUnauthorized: remoteControlUnauthorized,
       notify: (message, kind) => toast(message, kind === "error"),
     });
@@ -285,8 +332,12 @@ function getFileManagerController() {
   if (!fileManagerController) {
     fileManagerController = globalThis.MeFileManager.create({
       container: elements.fileManager,
-      request: (path, options) => api(path, options),
-      downloadUrl: (downloadId) => `/api/files/downloads/${encodeURIComponent(downloadId)}/content`,
+      request: (path, options, identity) => api(path, options, identity.workspaceId),
+      downloadUrl: (downloadId, identity) => frontendRuntime.apiPath(`/api/files/downloads/${encodeURIComponent(downloadId)}/content`, identity.workspaceId),
+      downloadFile: runtimeCapabilities.nativeDownload ? (download, identity) => frontendRuntime.downloadFile(
+        frontendRuntime.apiPath(`/api/files/downloads/${encodeURIComponent(download.download_id)}/content`, identity.workspaceId),
+        download.filename,
+      ) : null,
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
       writeClipboard: copyTextToClipboard,
       notify: (message, kind) => toast(message, kind === "error"),
@@ -296,11 +347,11 @@ function getFileManagerController() {
 }
 
 function syncFileManagerView() {
-  if (state.view.kind !== "files" || !state.selectedAgent || !state.snapshot.environment?.workspace) return;
+  if (state.view.kind !== "files" || !state.workspaceId || !state.selectedAgent || !state.snapshot.environment?.workspace) return;
   getFileManagerController().attach({
-    key: `direct:${state.selectedAgent}`,
+    key: `${state.workspaceId}:${state.selectedAgent}`,
+    workspaceId: state.workspaceId,
     agentId: state.selectedAgent,
-    workspaceId: null,
     defaultPath: state.snapshot.environment.workspace,
   });
 }
@@ -350,6 +401,66 @@ function sendShortcutPressed(event, mode) {
     : event.shiftKey || event.altKey;
 }
 
+function browserLocalStorage() {
+  try { return globalThis.localStorage || null; } catch (_) { return null; }
+}
+
+function readWorkspaceDisclosure(storage = browserLocalStorage()) {
+  try {
+    const raw = storage?.getItem(WORKSPACE_DISCLOSURE_STORAGE_KEY);
+    if (!raw) return new Map();
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return new Map();
+    return new Map(Object.entries(parsed).filter(([workspaceId, expanded]) =>
+      workspaceId && typeof expanded === "boolean"));
+  } catch (_) {
+    return new Map();
+  }
+}
+
+function persistWorkspaceDisclosure(disclosure, storage = browserLocalStorage()) {
+  try {
+    if (!storage) return false;
+    const entries = [...disclosure]
+      .filter(([workspaceId, expanded]) => workspaceId && typeof expanded === "boolean")
+      .sort(([left], [right]) => String(left).localeCompare(String(right)));
+    if (!entries.length) {
+      storage.removeItem(WORKSPACE_DISCLOSURE_STORAGE_KEY);
+      return true;
+    }
+    const serialized = {};
+    for (const [workspaceId, expanded] of entries) serialized[workspaceId] = expanded;
+    storage.setItem(WORKSPACE_DISCLOSURE_STORAGE_KEY, JSON.stringify(serialized));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function workspaceExpanded(workspaceId, disclosure = state.workspaceDisclosure) {
+  return disclosure.get(String(workspaceId)) !== false;
+}
+
+function setWorkspaceExpanded(workspaceId, expanded, disclosure = state.workspaceDisclosure, storage = browserLocalStorage()) {
+  const normalized = String(workspaceId || "");
+  if (!normalized) return false;
+  disclosure.set(normalized, Boolean(expanded));
+  persistWorkspaceDisclosure(disclosure, storage);
+  return true;
+}
+
+function pruneWorkspaceDisclosure(validWorkspaceIds, disclosure = state.workspaceDisclosure, storage = browserLocalStorage()) {
+  let changed = false;
+  for (const workspaceId of disclosure.keys()) {
+    if (validWorkspaceIds.has(workspaceId)) continue;
+    disclosure.delete(workspaceId);
+    changed = true;
+  }
+  if (changed) persistWorkspaceDisclosure(disclosure, storage);
+  return changed;
+}
+
+
 function agentMeta() {
   return state.snapshot.agents.find((agent) => agent.id === state.selectedAgent) || null;
 }
@@ -370,10 +481,53 @@ function edbCacheScope(snapshot = state.snapshot) {
   return String(snapshot?.environment?.workspace || "");
 }
 
-function createAgentStore(meta, cached = null) {
+function cacheEntriesByAgent(snapshot, entries) {
+  const byAgent = new Map(entries
+    .filter((entry) => entry?.agentId)
+    .map((entry) => [entry.agentId, entry]));
+  return new Map((snapshot.agents || []).map((meta) => [meta.id, byAgent.get(meta.id)]));
+}
+
+function cacheEntryEventCount(entry) {
+  if (!entry) return 0;
+  if (Number.isFinite(Number(entry.eventCount))) return Math.max(0, Number(entry.eventCount));
+  return Array.isArray(entry.events) ? entry.events.length : 0;
+}
+
+function cacheEntryValid(cached, meta) {
+  if (!cached) return false;
+  const eventCount = cacheEntryEventCount(cached);
+  const authoritativeCount = Number(meta.event_count || 0);
+  return (!cached.edbId || cached.edbId === meta.edb_id)
+    && cached.mutationRevision === Number(meta.mutation_revision || 0)
+    && eventCount <= authoritativeCount
+    && (eventCount === 0 || typeof cached.lastEventHash === "string")
+    && (eventCount !== authoritativeCount
+      || cached.lastEventHash === (meta.last_event_hash ?? null));
+}
+
+async function loadEdbCacheEntries(snapshot) {
+  const scope = edbCacheScope(snapshot);
+  return scope ? frontendRuntime.loadCachedSessions(edbCache, snapshot, scope) : [];
+}
+
+function discardStoredAgentEdb(snapshot, agentId, store = null) {
+  const scope = edbCacheScope(snapshot);
+  const key = store?.cacheKey || (scope
+    ? frontendRuntime.cacheKey(scope, agentId, store?.edbId || "")
+    : "");
+  if (key) void edbCache.discardSession(key);
+}
+
+function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
   const events = Array.isArray(cached?.events) ? cached.events : [];
+  const scope = edbCacheScope(snapshot);
+  const edbId = String(meta.edb_id || "");
   return {
+    edbId,
+    cacheKey: cached?.key || (scope ? frontendRuntime.cacheKey(scope, meta.id, edbId) : ""),
     events,
+    eventCount: events.length,
     mutationRevision: cached ? Number(cached.mutationRevision) || 0 : meta.mutation_revision,
     lastEventHash: cached?.lastEventHash ?? null,
     promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
@@ -394,24 +548,22 @@ async function hydrateEdbCache(snapshot) {
   state.snapshotInitialized = true;
   reconcileAgents();
   renderAgents();
-  const scope = edbCacheScope(snapshot);
-  const entries = scope ? await edbCache.loadScope(scope) : [];
+  const entries = await loadEdbCacheEntries(snapshot);
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
   for (const entry of entries) {
-    if (!agentIds.has(entry.agentId)) void edbCache.discardSession(entry.key);
+    if (entry.agentId && !agentIds.has(entry.agentId) && entry.key) void edbCache.discardSession(entry.key);
   }
-  const cachedByAgent = new Map(entries.map((entry) => [entry.agentId, entry]));
+  const cachedByAgent = cacheEntriesByAgent(snapshot, entries);
+  for (const meta of snapshot.agents || []) {
+    const cached = cachedByAgent.get(meta.id);
+    if (!cached || cacheEntryValid(cached, meta)) continue;
+    cachedByAgent.delete(meta.id);
+    if (cached.key) await edbCache.discardSession(cached.key);
+  }
   state.stores.clear();
   for (const meta of snapshot.agents || []) {
     const cached = cachedByAgent.get(meta.id);
-    const valid = Boolean(cached)
-      && cached.mutationRevision === Number(meta.mutation_revision || 0)
-      && cached.events.length <= Number(meta.event_count || 0)
-      && (cached.events.length === 0 || typeof cached.lastEventHash === "string")
-      && (cached.events.length !== Number(meta.event_count || 0)
-        || cached.lastEventHash === (meta.last_event_hash ?? null));
-    if (cached && !valid) void edbCache.discardSession(cached.key);
-    state.stores.set(meta.id, createAgentStore(meta, valid ? cached : null));
+    state.stores.set(meta.id, createAgentStore(meta, cached || null));
     state.drafts.set(meta.id, String(meta.input_draft || ""));
   }
   state.edbCacheInitialized = true;
@@ -420,17 +572,26 @@ async function hydrateEdbCache(snapshot) {
   renderConnectionOverlayForPhase();
 }
 
-function persistAgentEdb(meta, store, replace = false) {
-  const scope = edbCacheScope();
-  if (!scope || !store) return;
+function persistWorkspaceAgentEdb(snapshot, meta, store, replace = false, batch = null) {
+  const scope = edbCacheScope(snapshot);
+  if (!store || !scope || !store.edbId) return;
   edbCache.saveSession({
+    edbId: store.edbId,
     scope,
     agentId: meta.id,
     mutationRevision: store.mutationRevision,
     lastEventHash: store.lastEventHash,
+    gatewayLabel: frontendRuntime.endpoint || "",
+    workspaceLabel: MeEdbCache.workspaceName(scope),
+    sessionLabel: meta.title || meta.id,
     events: store.events,
     replace,
+    delta: batch ? { ...batch, reset: replace } : null,
   });
+}
+
+function persistAgentEdb(meta, store, replace = false, batch = null) {
+  persistWorkspaceAgentEdb(state.snapshot, meta, store, replace, batch);
 }
 
 function currentStore() {
@@ -459,8 +620,8 @@ function emptyProjection() {
   };
 }
 
-async function api(path, options = {}) {
-  const response = await fetch(path, { cache: "no-store", ...options });
+async function api(path, options = {}, workspaceId = state.workspaceId) {
+  const response = await fetch(frontendRuntime.apiPath(path, workspaceId), { cache: "no-store", ...options });
   const payload = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
   if (!response.ok || payload.ok === false) {
     const error = new Error(payload.error || `HTTP ${response.status}`);
@@ -468,6 +629,539 @@ async function api(path, options = {}) {
     throw error;
   }
   return payload;
+}
+
+let gatewaySelectionSave = Promise.resolve();
+
+function persistGatewaySelection(workspaceId, agentId) {
+  gatewaySelectionSave = gatewaySelectionSave
+    .catch(() => {})
+    .then(() => frontendRuntime.persistSelection(api, workspaceId, agentId))
+    .catch((error) => {
+      if (error.status === 401) showLogin("登录已失效，请重新登录");
+    });
+  return gatewaySelectionSave;
+}
+
+function emptyGatewayWorkspaceState() {
+  return {
+    snapshot: {
+      revision: 0, environment: null, agents: [], models: [], orchestrators: [], default_orchestrator: null,
+      chatbot_default_static_prompt: "",
+      tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] },
+    },
+    stores: new Map(), drafts: new Map(), draftSync: new Map(), promptDrafts: new Map(), selectedAgent: null,
+    apiActivity: { agentId: null, active: false, receivedSseEvents: 0 },
+    eventRecovery: null,
+    pendingAgentSelection: null, view: { kind: "chat", sessionId: null }, terminals: [],
+    terminalRevisions: new Map(), terminalFollowBottom: true, expandedTools: new Set(),
+    expandedHistoryObjectives: new Set(), workerActivityIndexes: new Map(),
+    terminalFrames: new Map(), terminalFramesUnavailable: new Set(), snapshotInitialized: false,
+    edbCacheInitialized: false, cacheValidated: false, catchUpPending: true,
+    backgroundNextSyncAt: 0, backgroundFailures: 0,
+    scrollTop: 0, followBottom: true,
+  };
+}
+
+function gatewayWorkspaceState(workspaceId) {
+  let workspace = state.workspaceStates.get(workspaceId);
+  if (!workspace) {
+    workspace = emptyGatewayWorkspaceState();
+    state.workspaceStates.set(workspaceId, workspace);
+  }
+  return workspace;
+}
+
+function captureActiveWorkspace() {
+  if (!state.workspaceId) return;
+  const workspace = gatewayWorkspaceState(state.workspaceId);
+  Object.assign(workspace, {
+    snapshot: state.snapshot, stores: state.stores, drafts: state.drafts, draftSync: state.draftSync,
+    promptDrafts: state.promptDrafts, selectedAgent: state.selectedAgent,
+    apiActivity: state.apiActivity, eventRecovery: state.eventRecovery,
+    pendingAgentSelection: state.pendingAgentSelection, view: state.view, terminals: state.terminals,
+    terminalRevisions: state.terminalRevisions, terminalFollowBottom: state.terminalFollowBottom,
+    expandedTools: state.expandedTools, expandedHistoryObjectives: state.expandedHistoryObjectives,
+    workerActivityIndexes: state.workerActivityIndexes, terminalFrames: state.terminalFrames,
+    terminalFramesUnavailable: state.terminalFramesUnavailable, snapshotInitialized: state.snapshotInitialized,
+    edbCacheInitialized: state.edbCacheInitialized, catchUpPending: state.activeCatchUpPending,
+    backgroundNextSyncAt: 0,
+    scrollTop: elements.transcript.scrollTop, followBottom: transcriptBottomFollower.isFollowing(),
+  });
+  for (const sync of workspace.draftSync.values()) {
+    clearDraftBatch(sync);
+    sync.paused = true;
+  }
+}
+
+
+function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = true) {
+  if (!workspaceId) return;
+  if (state.workspaceId === workspaceId) {
+    if (preferredAgent) selectAgent(preferredAgent);
+    return;
+  }
+  cancelBackgroundWorkspaceSync();
+  deactivateSessionTerminalView();
+  stopHttpPolling();
+  saveDraft();
+  captureActiveWorkspace();
+  closeContextDrawer();
+  closeChoiceDrawer();
+  closeModal();
+  closeUserMessageMenu();
+  closeAgentMenu();
+  closeWorkspaceMenu();
+  const workspace = gatewayWorkspaceState(workspaceId);
+  for (const sync of workspace.draftSync.values()) sync.paused = false;
+  state.workspaceId = workspaceId;
+  state.snapshot = workspace.snapshot;
+  state.stores = workspace.stores;
+  state.drafts = workspace.drafts;
+  state.draftSync = workspace.draftSync;
+  state.promptDrafts = workspace.promptDrafts;
+  state.selectedAgent = preferredAgent || workspace.selectedAgent;
+  state.apiActivity = workspace.apiActivity;
+  state.pendingAgentSelection = workspace.pendingAgentSelection;
+  state.eventRecovery = workspace.eventRecovery;
+  state.view = workspace.view;
+  state.terminals = workspace.terminals;
+  state.terminalRevisions = workspace.terminalRevisions;
+  state.terminalFollowBottom = workspace.terminalFollowBottom;
+  state.expandedTools = workspace.expandedTools;
+  state.expandedHistoryObjectives = workspace.expandedHistoryObjectives;
+  state.workerActivityIndexes = workspace.workerActivityIndexes;
+  state.terminalFrames = workspace.terminalFrames;
+  state.terminalFramesUnavailable = workspace.terminalFramesUnavailable;
+  state.snapshotInitialized = workspace.snapshotInitialized;
+  state.edbCacheInitialized = workspace.edbCacheInitialized;
+  state.activeCatchUpPending = !workspace.edbCacheInitialized || workspace.catchUpPending;
+  const selectedMeta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
+  prepareSelectedEventRecovery(selectedMeta, null, true);
+  resetConnectionForInitialSync();
+  state.pendingRender = emptyRenderRequest();
+  state.composing = false;
+  delete elements.terminalScreen.dataset.terminalKey;
+  delete elements.terminalScreen.dataset.revision;
+  restoreDraft();
+  transcriptBottomFollower.restore(workspace.followBottom);
+  transcriptVirtualizer?.prepareScroll(workspace.scrollTop, workspace.followBottom);
+  renderAll();
+  requestAnimationFrame(() => {
+    elements.transcript.scrollTop = workspace.followBottom ? elements.transcript.scrollHeight : workspace.scrollTop;
+    transcriptVirtualizer?.noteScroll();
+    transcriptBottomFollower.restore(workspace.followBottom);
+  });
+  persistGatewaySelection(workspaceId, state.selectedAgent);
+  if (state.workspaceId !== workspaceId) return;
+  const meta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
+  prepareSelectedEventRecovery(meta, null, true);
+  renderAll();
+  if (beginPolling) startHttpPolling();
+  scheduleBackgroundWorkspaceSync(0);
+}
+
+function backgroundSyncProgressSignature(workspace) {
+  return JSON.stringify({
+    snapshotRevision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
+    agents: [...workspace.stores]
+      .map(([id, store]) => [id, store.eventCount ?? store.events.length, store.mutationRevision])
+      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
+  });
+}
+
+function backgroundSyncRequestBody(workspace) {
+  return {
+    snapshot_revision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
+    agents: [...workspace.stores].map(([id, store]) => ({
+      id,
+      event_count: store.eventCount ?? store.events.length,
+      mutation_revision: store.mutationRevision,
+      cursor_event_hash: workspace.cacheValidated ? null : store.lastEventHash ?? null,
+    })),
+    cache_metadata_only: !workspace.edbCacheInitialized,
+    selected_agent: null,
+    terminal_session: null,
+    terminal_revision: null,
+  };
+}
+
+function backgroundSyncCanRun() {
+  return !state.pageClosing
+    && !state.startupMetadataPending
+    && (!state.authRequired || state.authenticated)
+    && state.connectionPhase === "connected"
+    && !state.activeCatchUpPending;
+}
+
+function backgroundSyncOperationCurrent(operation) {
+  return state.backgroundSyncOperation === operation
+    && !state.pageClosing
+    && state.workspaceId !== operation.workspaceId
+    && state.workspaceStates.get(operation.workspaceId) === operation.workspace;
+}
+
+function cancelBackgroundWorkspaceSync(workspaceId = null) {
+  if (workspaceId === null) {
+    clearTimeout(state.backgroundSyncTimer);
+    state.backgroundSyncTimer = null;
+    state.backgroundSyncDueAt = null;
+  }
+  const operation = state.backgroundSyncOperation;
+  if (!operation || (workspaceId !== null && operation.workspaceId !== workspaceId)) return;
+  state.backgroundSyncOperation = null;
+  operation.controller?.abort();
+}
+
+function scheduleBackgroundWorkspaceSync(delay = 0) {
+  if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
+  const dueAt = Date.now() + Math.max(0, Number(delay) || 0);
+  if (state.backgroundSyncTimer !== null && state.backgroundSyncDueAt <= dueAt) return;
+  clearTimeout(state.backgroundSyncTimer);
+  state.backgroundSyncDueAt = dueAt;
+  state.backgroundSyncTimer = setTimeout(() => {
+    state.backgroundSyncTimer = null;
+    state.backgroundSyncDueAt = null;
+    void requestBackgroundWorkspaceSync();
+  }, Math.max(0, dueAt - Date.now()));
+}
+
+function nextBackgroundWorkspace(now = Date.now()) {
+  const ids = (state.gateway.workspaces || [])
+    .map((workspace) => workspace.id)
+    .filter((workspaceId) => workspaceId !== state.workspaceId);
+  if (!ids.length) return { workspaceId: null, workspace: null, wait: BACKGROUND_SYNC_IDLE_MS };
+  const start = state.backgroundSyncCursor % ids.length;
+  let earliest = Number.POSITIVE_INFINITY;
+  for (let offset = 0; offset < ids.length; offset += 1) {
+    const index = (start + offset) % ids.length;
+    const workspaceId = ids[index];
+    const workspace = gatewayWorkspaceState(workspaceId);
+    const nextAt = Math.max(0, Number(workspace.backgroundNextSyncAt) || 0);
+    earliest = Math.min(earliest, nextAt);
+    if (nextAt <= now) {
+      state.backgroundSyncCursor = (index + 1) % ids.length;
+      return { workspaceId, workspace, wait: 0 };
+    }
+  }
+  return {
+    workspaceId: null,
+    workspace: null,
+    wait: Math.max(0, Number.isFinite(earliest) ? earliest - now : BACKGROUND_SYNC_IDLE_MS),
+  };
+}
+
+function observeBackgroundInputDraft(workspace, meta, store) {
+  if (store.pendingPromptSubmission) return false;
+  const revision = Number(meta.input_draft_revision || 0);
+  if (revision <= store.inputDraftRevision) return false;
+  const content = String(meta.input_draft || "");
+  const sync = workspace.draftSync.get(meta.id);
+  store.inputDraftRevision = revision;
+  if (sync && (sync.inFlight || sync.desired !== sync.sent)) {
+    sync.sent = content;
+    return false;
+  }
+  workspace.drafts.set(meta.id, content);
+  if (sync) {
+    sync.desired = content;
+    sync.sent = content;
+    sync.pendingRemote = null;
+  }
+  return true;
+}
+
+function reconcileBackgroundAgents(workspace, snapshot) {
+  const ids = new Set((snapshot.agents || []).map((agent) => agent.id));
+  let changed = false;
+  for (const id of workspace.stores.keys()) {
+    if (ids.has(id)) continue;
+    discardStoredAgentEdb(snapshot, id, workspace.stores.get(id));
+    workspace.stores.delete(id);
+    workspace.drafts.delete(id);
+    clearDraftBatch(workspace.draftSync.get(id));
+    workspace.draftSync.delete(id);
+    workspace.workerActivityIndexes.delete(id);
+    changed = true;
+  }
+  for (const meta of snapshot.agents || []) {
+    let store = workspace.stores.get(meta.id);
+    if (!store) {
+      store = createAgentStore(meta, null, snapshot);
+      workspace.stores.set(meta.id, store);
+      workspace.drafts.set(meta.id, String(meta.input_draft || ""));
+      changed = true;
+    } else {
+      observeBackgroundInputDraft(workspace, meta, store);
+      store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
+    }
+  }
+  if (workspace.pendingAgentSelection && ids.has(workspace.pendingAgentSelection)) {
+    workspace.selectedAgent = workspace.pendingAgentSelection;
+    workspace.pendingAgentSelection = null;
+  }
+  if (!workspace.selectedAgent || !ids.has(workspace.selectedAgent)) {
+    workspace.selectedAgent = (snapshot.agents || []).find((agent) => agent.id === "main")?.id
+      || snapshot.agents?.[0]?.id || null;
+  }
+  return changed;
+}
+
+async function hydrateBackgroundEdbCache(operation, snapshot) {
+  if (!snapshot) throw new Error("同步响应未提供缓存元数据");
+  if (!backgroundSyncOperationCurrent(operation)) return false;
+  const workspace = operation.workspace;
+  workspace.snapshot = snapshot;
+  reconcileBackgroundAgents(workspace, snapshot);
+  renderAgents();
+  const entries = await loadEdbCacheEntries(snapshot);
+  if (!backgroundSyncOperationCurrent(operation)) return false;
+  const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
+  for (const entry of entries) {
+    if (entry.agentId && !agentIds.has(entry.agentId) && entry.key) void edbCache.discardSession(entry.key);
+  }
+  const cachedByAgent = cacheEntriesByAgent(snapshot, entries);
+  workspace.snapshot = snapshot;
+  workspace.snapshotInitialized = true;
+  workspace.stores.clear();
+  for (const meta of snapshot.agents || []) {
+    const cached = cachedByAgent.get(meta.id);
+    const valid = cacheEntryValid(cached, meta);
+    if (cached && !valid && cached.key) await edbCache.discardSession(cached.key);
+    workspace.stores.set(meta.id, createAgentStore(meta, valid ? cached : null, snapshot));
+    workspace.drafts.set(meta.id, String(meta.input_draft || ""));
+  }
+  workspace.edbCacheInitialized = true;
+  workspace.cacheValidated = false;
+  workspace.catchUpPending = true;
+  reconcileBackgroundAgents(workspace, snapshot);
+  return true;
+}
+
+function syncBackgroundAgentEvents(workspace, meta, payload) {
+  let store = workspace.stores.get(meta.id);
+  let changed = false;
+  if (!store) {
+    store = createAgentStore(meta, null, workspace.snapshot);
+    workspace.stores.set(meta.id, store);
+    workspace.drafts.set(meta.id, String(meta.input_draft || ""));
+    changed = true;
+  }
+  observeBackgroundInputDraft(workspace, meta, store);
+  store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
+  if (!payload && store.eventCount === meta.event_count
+      && store.mutationRevision === meta.mutation_revision) {
+    return { changed, summaryChanged: false };
+  }
+  if (!payload) return { changed, summaryChanged: false };
+  const previousSummary = JSON.stringify(store.summary);
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  const previousEventCount = store.eventCount;
+  const previousMutationRevision = store.mutationRevision;
+  if (payload.reset) {
+    store.events = events;
+    store.eventCount = events.length;
+    store.summary = projectAgentSummary(events);
+    store.projectedOrder = 0;
+    store.needsReplay = true;
+    workspace.workerActivityIndexes.delete(meta.id);
+  } else {
+    store.events.push(...events);
+    store.eventCount = previousEventCount + events.length;
+    updateAgentSummary(store.summary, events);
+  }
+  store.mutationRevision = payload.mutation_revision;
+  store.lastEventHash = payload.cursor_event_hash ?? null;
+  if (payload.reset || events.length > 0) {
+    persistWorkspaceAgentEdb(workspace.snapshot, meta, store, Boolean(payload.reset), {
+      startOrder: payload.reset ? 0 : previousEventCount,
+      eventCount: Number(payload.event_count ?? store.eventCount),
+      expectedEventCount: previousEventCount,
+      expectedMutationRevision: previousMutationRevision,
+      events,
+    });
+  }
+  return { changed: true, summaryChanged: previousSummary !== JSON.stringify(store.summary) };
+}
+
+function applyBackgroundSyncState(workspace, payload) {
+  const previousSnapshot = workspace.snapshot;
+  if (payload.snapshot) {
+    workspace.snapshot = payload.snapshot;
+    workspace.snapshotInitialized = true;
+  }
+  if (!workspace.snapshotInitialized) throw new Error("同步响应未提供初始状态");
+  const presentationChanged = snapshotPresentationSignature(previousSnapshot)
+    !== snapshotPresentationSignature(workspace.snapshot);
+  const structureChanged = reconcileBackgroundAgents(workspace, workspace.snapshot);
+  const updates = new Map((payload.event_updates || []).map((update) => [update.agent_id, update]));
+  const eventChanges = workspace.snapshot.agents.map((meta) =>
+    syncBackgroundAgentEvents(workspace, meta, updates.get(meta.id)));
+  workspace.cacheValidated = true;
+  return presentationChanged || structureChanged
+    || eventChanges.some((change) => change.changed || change.summaryChanged);
+}
+
+async function requestBackgroundWorkspaceSync() {
+  if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
+  const candidate = nextBackgroundWorkspace();
+  if (!candidate.workspaceId) {
+    scheduleBackgroundWorkspaceSync(candidate.wait);
+    return;
+  }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const operation = {
+    workspaceId: candidate.workspaceId, workspace: candidate.workspace, controller,
+  };
+  state.backgroundSyncOperation = operation;
+  const progressBefore = backgroundSyncProgressSignature(candidate.workspace);
+  const timeout = setTimeout(() => controller?.abort(), HTTP_SYNC_TIMEOUT_MS);
+  let sidebarChanged = false;
+  try {
+    const message = await api("/api/sync", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      signal: controller?.signal,
+      body: JSON.stringify(backgroundSyncRequestBody(candidate.workspace)),
+    }, candidate.workspaceId);
+    if (!backgroundSyncOperationCurrent(operation)) return;
+    if (message.cache_metadata_only) {
+      if (!await hydrateBackgroundEdbCache(operation, message.snapshot)) return;
+      sidebarChanged = true;
+      candidate.workspace.backgroundFailures = 0;
+      candidate.workspace.backgroundNextSyncAt = 0;
+      candidate.workspace.catchUpPending = true;
+    } else {
+      sidebarChanged = applyBackgroundSyncState(candidate.workspace, message);
+      if (!backgroundSyncOperationCurrent(operation)) return;
+      const madeProgress = progressBefore !== backgroundSyncProgressSignature(candidate.workspace);
+      candidate.workspace.backgroundFailures = 0;
+      candidate.workspace.catchUpPending = Boolean(message.more_events);
+      candidate.workspace.backgroundNextSyncAt = message.more_events && madeProgress
+        ? 0 : Date.now() + (message.more_events ? HTTP_SYNC_ACTIVE_MS : BACKGROUND_SYNC_IDLE_MS);
+    }
+    const startupCompleted = noteGatewayStartupProgress();
+    if (sidebarChanged || startupCompleted) renderAgents();
+  } catch (error) {
+    if (!backgroundSyncOperationCurrent(operation)) return;
+    if (error.status === 401) {
+      showLogin("登录已失效，请重新登录");
+      return;
+    }
+    candidate.workspace.backgroundFailures += 1;
+    const retry = Math.min(
+      BACKGROUND_SYNC_RETRY_MAX_MS,
+      HTTP_SYNC_IDLE_MS * (2 ** Math.min(candidate.workspace.backgroundFailures - 1, 5)),
+    );
+    candidate.workspace.backgroundNextSyncAt = Date.now() + retry;
+  } finally {
+    clearTimeout(timeout);
+    if (state.backgroundSyncOperation === operation) {
+      state.backgroundSyncOperation = null;
+      scheduleBackgroundWorkspaceSync(0);
+    }
+  }
+}
+
+function applyGatewaySnapshot(snapshot) {
+  state.gateway = snapshot;
+  const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
+  for (const workspace of snapshot.workspaces || []) gatewayWorkspaceState(workspace.id);
+  for (const notice of snapshot.notices || []) {
+    if (Number(notice.id) > state.lastNoticeId) toast(notice.message, true);
+    state.lastNoticeId = Math.max(state.lastNoticeId, Number(notice.id) || 0);
+  }
+  if (state.workspaceId && !ids.has(state.workspaceId)) activateWorkspace("chat");
+  for (const id of state.workspaceStates.keys()) {
+    if (ids.has(id)) continue;
+    cancelBackgroundWorkspaceSync(id);
+    state.workspaceStates.delete(id);
+  }
+  noteGatewayStartupProgress();
+  renderAgents();
+}
+
+async function refreshGatewayState() {
+  if (state.gatewayRefreshInFlight || !state.authenticated) return;
+  state.gatewayRefreshInFlight = true;
+  try {
+    const snapshot = await frontendRuntime.loadGatewayState(api);
+    applyGatewaySnapshot(snapshot);
+    scheduleBackgroundWorkspaceSync(0);
+  } catch (error) {
+    if (error.status === 401) showLogin("登录已失效，请重新登录");
+  } finally {
+    state.gatewayRefreshInFlight = false;
+  }
+}
+
+function sessionStartupLocked() {
+  return state.startupPending;
+}
+
+function gatewayStartupReady() {
+  if (!state.startupPending) return true;
+  if (state.startupMetadataPending || !state.edbCacheInitialized || state.activeCatchUpPending) return false;
+  return (state.gateway.workspaces || []).every((workspace) => {
+    if (workspace.id === state.workspaceId) return true;
+    const bucket = state.workspaceStates.get(workspace.id);
+    return Boolean(bucket?.edbCacheInitialized) && !bucket.catchUpPending;
+  });
+}
+
+function noteGatewayStartupProgress() {
+  if (!state.startupPending || !gatewayStartupReady()) return false;
+  state.startupPending = false;
+  return true;
+}
+
+function applyGatewayStartupMetadata(workspaceId, snapshot) {
+  const workspace = gatewayWorkspaceState(workspaceId);
+  if (workspace.edbCacheInitialized) return;
+  workspace.snapshot = snapshot;
+  const ids = new Set((snapshot.agents || []).map((agent) => agent.id));
+  if (!workspace.selectedAgent || !ids.has(workspace.selectedAgent)) {
+    workspace.selectedAgent = (snapshot.agents || []).find((agent) => agent.id === "main")?.id
+      || snapshot.agents?.[0]?.id || null;
+  }
+}
+
+async function loadGatewayStartupMetadata(activeWorkspaceId) {
+  state.startupMetadataPending = true;
+  try {
+    const workspaceIds = (state.gateway.workspaces || [])
+      .map((workspace) => workspace.id)
+      .filter((workspaceId) => workspaceId !== activeWorkspaceId);
+    for (const workspaceId of workspaceIds) {
+      if (state.pageClosing || !state.authenticated) break;
+      try {
+        const snapshot = await api("/api/snapshot", {}, workspaceId);
+        if (workspaceId === state.workspaceId
+            || !(state.gateway.workspaces || []).some((workspace) => workspace.id === workspaceId)) continue;
+        applyGatewayStartupMetadata(workspaceId, snapshot);
+        renderAgents();
+      } catch (error) {
+        if (error.status === 401) {
+          showLogin("登录已失效，请重新登录");
+          return;
+        }
+      }
+    }
+  } finally {
+    state.startupMetadataPending = false;
+    if (noteGatewayStartupProgress()) renderAgents();
+    scheduleBackgroundWorkspaceSync(0);
+  }
+}
+
+async function initializeGateway() {
+  const snapshot = await frontendRuntime.loadGatewayState(api);
+  applyGatewaySnapshot(snapshot);
+  const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
+  const workspaceId = ids.has(snapshot.selected_workspace_id) ? snapshot.selected_workspace_id : "chat";
+  activateWorkspace(workspaceId, snapshot.selected_agent_id, false);
+  if (state.startupPending) void loadGatewayStartupMetadata(workspaceId);
+  else scheduleBackgroundWorkspaceSync(0);
 }
 
 function showLogin(message = "") {
@@ -478,6 +1172,7 @@ function showLogin(message = "") {
 
   deactivateSessionTerminalView();
   stopHttpPolling();
+  cancelBackgroundWorkspaceSync();
   state.authenticated = false;
   state.connectionHadSuccess = false;
   state.reconnectAttempt = 0;
@@ -485,7 +1180,9 @@ function showLogin(message = "") {
   hideConnectionOverlay();
   elements.app.classList.add("hidden");
   elements.loginScreen.classList.remove("hidden");
-  elements.loginPassword.focus();
+  const target = runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint
+    ? elements.loginEndpoint : elements.loginPassword;
+  target?.focus();
 }
 
 function showApplication() {
@@ -493,11 +1190,19 @@ function showApplication() {
   elements.app.classList.remove("hidden");
   elements.loginError.textContent = "";
   elements.addAgent.disabled = sessionStartupLocked();
-  renderAgents();
 }
 
 async function initializeAuthentication() {
   try {
+    const bootstrap = await frontendRuntime.initialize();
+    if (runtimeCapabilities.targetConfiguration) {
+      state.authRequired = true;
+      if (elements.loginEndpoint) elements.loginEndpoint.value = bootstrap.endpoint || "";
+      if (!bootstrap.endpoint) {
+        showLogin();
+        return;
+      }
+    }
     const status = await api("/api/auth/status");
     state.authRequired = Boolean(status.required);
     state.authenticated = Boolean(status.authenticated);
@@ -506,10 +1211,12 @@ async function initializeAuthentication() {
       return;
     }
     showApplication();
+    await initializeGateway();
     restoreDraft();
     startHttpPolling();
   } catch (error) {
-    showLogin(`无法读取登录状态：${error.message}`);
+    showLogin(runtimeCapabilities.targetConfiguration
+      ? error.message : `无法读取登录状态：${error.message}`);
   }
 }
 
@@ -518,22 +1225,34 @@ async function submitLogin(event) {
   elements.loginSubmit.disabled = true;
   elements.loginError.textContent = "";
   try {
-    await api("/api/auth/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        password: elements.loginPassword.value,
-        browser_port: BROWSER_PORT,
-      }),
-    });
+    if (runtimeCapabilities.targetConfiguration) {
+      const configured = await frontendRuntime.configureTarget(elements.loginEndpoint?.value);
+      if (elements.loginEndpoint) elements.loginEndpoint.value = configured.endpoint;
+      const status = await api("/api/auth/status");
+      state.authRequired = Boolean(status.required);
+      state.authenticated = Boolean(status.authenticated);
+    }
+    if (!runtimeCapabilities.targetConfiguration || (state.authRequired && !state.authenticated)) {
+      await api("/api/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          password: elements.loginPassword.value,
+          browser_port: BROWSER_PORT,
+        }),
+      });
+      elements.loginPassword.value = "";
+      state.authenticated = true;
+    }
     elements.loginPassword.value = "";
-    state.authenticated = true;
     showApplication();
+    await initializeGateway();
     restoreDraft();
     startHttpPolling();
   } catch (error) {
     showLogin(error.message);
-    elements.loginPassword.select();
+    if (runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint) elements.loginEndpoint?.select();
+    else elements.loginPassword.select();
   } finally {
     elements.loginSubmit.disabled = false;
   }
@@ -573,6 +1292,7 @@ function cancelActiveHttpSync() {
 
 function resetConnectionForInitialSync() {
   cancelActiveHttpSync();
+  state.activeCatchUpPending = true;
   clearDegradedTimer();
   state.connectionHadSuccess = false;
   state.connectionFailureDetail = "";
@@ -684,6 +1404,9 @@ function enterDegraded(error) {
 function handlePollingFailure(error, { timedOut = false } = {}) {
   const phase = state.connectionPhase;
   cancelActiveHttpSync();
+  if (typeof cancelBackgroundWorkspaceSync === "function") {
+    cancelBackgroundWorkspaceSync();
+  }
   if (state.pageClosing || (state.authRequired && !state.authenticated) || phase === "failed") return;
   if (!timedOut && state.connectionHadSuccess
       && (phase === "connected" || phase === "degraded")) {
@@ -697,6 +1420,9 @@ function failHttpSync(title, error) {
   const detail = error instanceof Error ? error.message : String(error || "未知错误");
   console.error(title, error);
   cancelActiveHttpSync();
+  if (typeof cancelBackgroundWorkspaceSync === "function") {
+    cancelBackgroundWorkspaceSync();
+  }
   clearDegradedTimer();
   state.connectionFailureDetail = detail;
   state.stabilizingSince = null;
@@ -833,7 +1559,7 @@ function httpSyncProgressSignature() {
   return JSON.stringify({
     snapshotRevision: state.snapshotInitialized ? state.snapshot.revision : null,
     agents: [...state.stores]
-      .map(([id, store]) => [id, store.events.length, store.mutationRevision])
+      .map(([id, store]) => [id, store.eventCount ?? store.events.length, store.mutationRevision])
       .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
     selectedAgent: state.selectedAgent,
     terminalSession: state.view.kind === "terminal" ? state.view.sessionId : null,
@@ -860,7 +1586,7 @@ async function requestHttpSync() {
         snapshot_revision: state.snapshotInitialized ? state.snapshot.revision : null,
         agents: [...state.stores].map(([id, store]) => ({
           id,
-          event_count: store.events.length,
+          event_count: store.eventCount ?? store.events.length,
           mutation_revision: store.mutationRevision,
           cursor_event_hash: ["initial", "reconnecting"].includes(state.connectionPhase)
             ? store.lastEventHash ?? null : null,
@@ -870,13 +1596,14 @@ async function requestHttpSync() {
         terminal_session: state.view.kind === "terminal" ? state.view.sessionId : null,
         terminal_revision: terminalKey ? state.terminalRevisions.get(terminalKey) ?? null : null,
       }),
-    });
+    }, state.workspaceId);
     if (generation !== state.syncGeneration || state.pageClosing) return;
     if (message.cache_metadata_only) {
       await hydrateEdbCache(message.snapshot);
       if (generation !== state.syncGeneration || state.pageClosing) return;
       state.syncInFlight = false;
       state.syncController = null;
+      captureActiveWorkspace();
       scheduleHttpSync(0);
       return;
     }
@@ -887,12 +1614,17 @@ async function requestHttpSync() {
     } catch (error) {
       return failHttpSync("无法更新界面", error);
     }
+    state.activeCatchUpPending = Boolean(message.more_events)
+      || (message.selected_agent ?? null) !== state.selectedAgent;
+    if (noteGatewayStartupProgress()) renderAgents();
+    if (!state.activeCatchUpPending) scheduleBackgroundWorkspaceSync(0);
     const madeProgress = progressBefore !== httpSyncProgressSignature();
     const delay = state.connectionPhase === "stabilizing"
       || message.more_events || state.apiActivity.active || state.view.kind === "terminal"
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
     scheduleHttpSync(message.more_events && madeProgress ? 0 : delay);
   } catch (error) {
+    state.activeCatchUpPending = true;
     if (generation !== state.syncGeneration || state.pageClosing) return;
     state.syncInFlight = false;
     state.syncController = null;
@@ -969,12 +1701,11 @@ function applySyncState(payload) {
     responseMatchesSelection,
     responseMatchesSelection && !payload.more_events,
   );
-  const startupCompleted = noteStartupProgress(payload.more_events, responseMatchesSelection);
   const connectionChanged = phaseBefore !== state.connectionPhase;
   requestRender({
     full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged),
     connection: connectionChanged,
-    agents: presentationChanged || agentSummaryChanged || startupCompleted,
+    agents: presentationChanged || agentSummaryChanged,
     tabs: presentationChanged || terminalChanged,
     currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged,
     workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged,
@@ -1096,17 +1827,6 @@ function syncApiActivity(next) {
   return changed;
 }
 
-function sessionStartupLocked() {
-  return state.startupPending;
-}
-
-function noteStartupProgress(moreEvents, responseMatchesSelection) {
-  if (!state.startupPending || !state.edbCacheInitialized
-      || Boolean(moreEvents) || !responseMatchesSelection) return false;
-  state.startupPending = false;
-  return true;
-}
-
 function requestRender(update) {
   for (const key of Object.keys(state.pendingRender)) {
     if (!state.pendingRender[key]) state.pendingRender[key] = Boolean(update[key]);
@@ -1140,8 +1860,7 @@ function reconcileAgents() {
   const ids = new Set(state.snapshot.agents.map((agent) => agent.id));
   for (const id of state.stores.keys()) {
     if (!ids.has(id)) {
-      const scope = edbCacheScope();
-      if (scope) void edbCache.discardSession(MeEdbCache.sessionKey(scope, id));
+      discardStoredAgentEdb(state.snapshot, id, state.stores.get(id));
       state.stores.delete(id);
       state.drafts.delete(id);
       clearDraftBatch(state.draftSync.get(id));
@@ -1185,7 +1904,7 @@ function syncAgentEvents(meta, payload) {
     changed = true;
   }
   observeInputDraft(meta, store);
-  if (!payload && store.events.length === meta.event_count
+  if (!payload && store.eventCount === meta.event_count
       && store.mutationRevision === meta.mutation_revision) {
     observePromptSubmission(meta, store);
     return { agentId: meta.id, changed, summaryChanged: false };
@@ -1194,20 +1913,31 @@ function syncAgentEvents(meta, payload) {
   // batch in this response remain pending and are requested again immediately.
   if (!payload) return { agentId: meta.id, changed, summaryChanged: false };
   const previousSummary = JSON.stringify(store.summary);
+  const events = Array.isArray(payload.events) ? payload.events : [];
+  const previousEventCount = store.eventCount;
+  const previousMutationRevision = store.mutationRevision;
   if (payload.reset) {
-    store.events = payload.events;
-    store.summary = projectAgentSummary(store.events);
+    store.events = events;
+    store.eventCount = events.length;
+    store.summary = projectAgentSummary(events);
     store.projectedOrder = 0;
     store.needsReplay = true;
     state.workerActivityIndexes.delete(meta.id);
   } else {
-    store.events.push(...payload.events);
-    updateAgentSummary(store.summary, payload.events);
+    store.events.push(...events);
+    store.eventCount = previousEventCount + events.length;
+    updateAgentSummary(store.summary, events);
   }
   store.mutationRevision = payload.mutation_revision;
   store.lastEventHash = payload.cursor_event_hash ?? null;
-  if (payload.reset || payload.events.length > 0) {
-    persistAgentEdb(meta, store, Boolean(payload.reset));
+  if (payload.reset || events.length > 0) {
+    persistAgentEdb(meta, store, Boolean(payload.reset), {
+      startOrder: payload.reset ? 0 : previousEventCount,
+      eventCount: Number(payload.event_count ?? store.eventCount),
+      expectedEventCount: previousEventCount,
+      expectedMutationRevision: previousMutationRevision,
+      events,
+    });
   }
   if (payload.turn_history_updated) store.turnHistory = payload.turn_history ?? null;
   observePromptSubmission(meta, store);
@@ -2136,53 +2866,152 @@ function renderConnection() {
 }
 
 function renderAgents() {
-  const agents = state.snapshot.agents;
+  const workspaces = state.gateway.workspaces || [];
   const startupLoading = sessionStartupLocked();
   elements.addAgent.disabled = startupLoading;
+  const chat = workspaces.find((workspace) => workspace.builtin);
+  const external = workspaces.filter((workspace) => !workspace.builtin);
+  const externalIds = new Set(external.map((workspace) => workspace.id));
+  pruneWorkspaceDisclosure(externalIds);
+  if (!external.length) {
+    if (!elements.workspaceList.querySelector(":scope > .empty-state")) {
+      elements.workspaceList.innerHTML = `<div class="empty-state">暂无工作区</div>`;
+    }
+  } else {
+    if (elements.workspaceList.querySelector(":scope > .empty-state")) replaceElementChildren(elements.workspaceList);
+    for (let index = 0; index < external.length; index += 1) {
+      const workspace = external[index];
+      let group = elements.workspaceList.children[index];
+      if (!group || group.dataset.workspaceGroup !== workspace.id) {
+        while (elements.workspaceList.children.length > index) elements.workspaceList.lastElementChild.remove();
+        group = createWorkspaceGroup(workspace);
+        elements.workspaceList.append(group);
+      }
+      updateWorkspaceGroup(group, workspace);
+      renderWorkspaceAgentRows(group.querySelector("[data-workspace-agents]"), workspace.id);
+    }
+    while (elements.workspaceList.children.length > external.length) elements.workspaceList.lastElementChild.remove();
+  }
+  renderWorkspaceAgentRows(elements.agents, chat?.id || "chat");
+  if (state.workspaceMenu) {
+    const trigger = [...elements.workspaceList.querySelectorAll("[data-workspace-menu]")]
+      .find((button) => button.dataset.workspaceMenu === state.workspaceMenu.workspaceId);
+    if (trigger) {
+      state.workspaceMenu.trigger = trigger;
+      trigger.setAttribute("aria-expanded", "true");
+    } else closeWorkspaceMenu();
+  }
+}
+
+function createWorkspaceGroup(workspace) {
+  const template = document.createElement("template");
+  template.innerHTML = `<section class="workspace-group" data-workspace-group="${escapeAttr(workspace.id)}">
+    <header class="workspace-row">
+      <button class="workspace-select" type="button" data-workspace-select="${escapeAttr(workspace.id)}" aria-expanded="${workspaceExpanded(workspace.id)}">
+        <svg class="workspace-disclosure-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg>
+        <svg class="workspace-folder-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7.5h6l1.8 2h9.2l-1.6 8.5H4.4L3.5 7.5Z"/><path d="M4 7.5V5.5h5.2l1.8 2"/></svg>
+        <span class="workspace-name"></span>
+      </button>
+      <button class="workspace-add-agent" type="button" data-workspace-add="${escapeAttr(workspace.id)}">＋</button>
+      <button class="workspace-actions" type="button" data-workspace-menu="${escapeAttr(workspace.id)}" aria-haspopup="menu" aria-expanded="false">···</button>
+    </header>
+    <div class="workspace-agent-list" data-workspace-agents="${escapeAttr(workspace.id)}" hidden></div>
+  </section>`;
+  const group = template.content.firstElementChild;
+  const panelId = `workspace-agents-${++workspacePanelSequence}`;
+  group.querySelector("[data-workspace-select]").setAttribute("aria-controls", panelId);
+  group.querySelector("[data-workspace-agents]").id = panelId;
+  group.querySelector("[data-workspace-select]").addEventListener("click", () => {
+    setWorkspaceExpanded(workspace.id, !workspaceExpanded(workspace.id));
+    updateWorkspaceGroup(group, workspace);
+  });
+  group.querySelector("[data-workspace-add]").addEventListener("click", () => {
+    if (sessionStartupLocked(workspace.id)) return;
+    activateWorkspace(workspace.id);
+    openAddAgent();
+  });
+  group.querySelector("[data-workspace-menu]").addEventListener("click", (event) => {
+    event.stopPropagation();
+    openWorkspaceMenu(event.currentTarget, workspace.id);
+  });
+  return group;
+}
+
+function updateWorkspaceGroup(group, workspace) {
+  const expanded = workspaceExpanded(workspace.id);
+  const startupLoading = sessionStartupLocked(workspace.id);
+  group.classList.toggle("expanded", expanded);
+  const select = group.querySelector("[data-workspace-select]");
+  const add = group.querySelector("[data-workspace-add]");
+  const actions = group.querySelector("[data-workspace-menu]");
+  const agents = group.querySelector("[data-workspace-agents]");
+  const title = select.querySelector(".workspace-name");
+  if (title.textContent !== workspace.name) title.textContent = workspace.name;
+  select.setAttribute("aria-expanded", String(expanded));
+  select.setAttribute("aria-label", `${expanded ? "折叠" : "展开"} ${workspace.name}`);
+  select.title = `${expanded ? "折叠" : "展开"} ${workspace.name}`;
+  agents.hidden = !expanded;
+  add.disabled = startupLoading;
+  add.setAttribute("aria-label", `在 ${workspace.name}中新建会话`);
+  add.title = startupLoading ? "正在加载会话" : `在 ${workspace.name}中新建会话`;
+  actions.setAttribute("aria-label", `打开 ${workspace.name} 的工作区选项`);
+  actions.title = `打开 ${workspace.name} 的工作区选项`;
+}
+
+function renderWorkspaceAgentRows(container, workspaceId) {
+  if (!container) return;
+  const bucket = workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
+  const agents = bucket.snapshot?.agents || [];
   if (!agents.length) {
-    const label = startupLoading && !state.snapshot.environment ? "正在加载会话" : "暂无会话";
-    let empty = elements.agents.querySelector(":scope > .empty-state");
+    const label = state.startupPending && !bucket.snapshot?.environment ? "正在加载会话" : "暂无会话";
+    let empty = container.querySelector(":scope > .empty-state");
     if (!empty) {
-      elements.agents.innerHTML = `<div class="empty-state"></div>`;
-      empty = elements.agents.querySelector(":scope > .empty-state");
+      container.innerHTML = `<div class="empty-state"></div>`;
+      empty = container.querySelector(":scope > .empty-state");
     }
     if (empty.textContent !== label) empty.textContent = label;
     return;
   }
-  if (elements.agents.querySelector(":scope > .empty-state")) replaceElementChildren(elements.agents);
+  if (container.querySelector(":scope > .empty-state")) replaceElementChildren(container);
   for (let index = 0; index < agents.length; index += 1) {
     const agent = agents[index];
-    const summary = state.stores.get(agent.id)?.summary;
-    const active = !startupLoading && sidebarAgentActive(summary);
-    const label = agent.title || agent.id;
-    let row = elements.agents.children[index];
-    if (!row || row.dataset.agentRow !== agent.id) {
-      while (elements.agents.children.length > index) elements.agents.lastElementChild.remove();
-      row = createAgentRow(agent);
-      elements.agents.append(row);
+    let row = container.children[index];
+    if (!row || row.dataset.agentRow !== agent.id || row.dataset.workspaceId !== workspaceId) {
+      while (container.children.length > index) container.lastElementChild.remove();
+      row = createAgentRow(agent, workspaceId);
+      container.append(row);
     }
-    row.classList.toggle("startup-loading", startupLoading);
-    row.classList.toggle("active", !startupLoading && agent.id === state.selectedAgent);
-    row.setAttribute("aria-busy", String(startupLoading));
-    const item = row.querySelector(".agent-item");
-    item.disabled = startupLoading;
-    item.title = startupLoading ? "正在加载会话" : "";
-    const dot = row.querySelector(".agent-dot");
-    dot.classList.toggle("startup-loading", startupLoading);
-    dot.classList.toggle("active", active);
-    const title = row.querySelector(".agent-label");
-    if (title.textContent !== label) title.textContent = label;
-    const deleteButton = row.querySelector(".agent-delete");
-    deleteButton.disabled = startupLoading;
-    deleteButton.setAttribute("aria-label", startupLoading ? `${label} 正在加载` : `删除 ${label}`);
-    deleteButton.title = startupLoading ? "正在加载会话" : `删除 ${label}`;
+    updateAgentRow(row, agent, workspaceId, bucket);
   }
-  while (elements.agents.children.length > agents.length) elements.agents.lastElementChild.remove();
+  while (container.children.length > agents.length) container.lastElementChild.remove();
 }
 
-function createAgentRow(agent) {
+function updateAgentRow(row, agent, workspaceId, bucket) {
+  const startupLoading = sessionStartupLocked(workspaceId, agent.id);
+  const summary = bucket.stores.get(agent.id)?.summary;
+  const active = !startupLoading && sidebarAgentActive(summary);
+  const label = agent.title || agent.id;
+  row.classList.toggle("startup-loading", startupLoading);
+  row.classList.toggle("active", !startupLoading
+    && workspaceId === state.workspaceId && agent.id === state.selectedAgent);
+  row.setAttribute("aria-busy", String(startupLoading));
+  const item = row.querySelector(".agent-item");
+  item.disabled = startupLoading;
+  item.title = startupLoading ? "正在加载会话" : "";
+  const dot = row.querySelector(".agent-dot");
+  dot.classList.toggle("startup-loading", startupLoading);
+  dot.classList.toggle("active", active);
+  const title = row.querySelector(".agent-label");
+  if (title.textContent !== label) title.textContent = label;
+  const deleteButton = row.querySelector(".agent-delete");
+  deleteButton.disabled = startupLoading;
+  deleteButton.setAttribute("aria-label", startupLoading ? `${label} 正在加载` : `删除 ${label}`);
+  deleteButton.title = startupLoading ? "正在加载会话" : `删除 ${label}`;
+}
+
+function createAgentRow(agent, workspaceId = state.workspaceId) {
   const template = document.createElement("template");
-  template.innerHTML = `<div class="agent-row" data-agent-row="${escapeAttr(agent.id)}">
+  template.innerHTML = `<div class="agent-row" data-agent-row="${escapeAttr(agent.id)}" data-workspace-id="${escapeAttr(workspaceId)}">
     <button class="agent-item" type="button" data-agent="${escapeAttr(agent.id)}">
       <span class="agent-dot" aria-hidden="true"></span>
       <span class="agent-label"></span>
@@ -2192,21 +3021,28 @@ function createAgentRow(agent) {
     </button>
   </div>`;
   const row = template.content.firstElementChild;
-  row.querySelector(".agent-item").addEventListener("click", (event) => selectAgent(event.currentTarget.dataset.agent));
+  row.querySelector(".agent-item").addEventListener("click", () => selectWorkspaceAgent(workspaceId, agent.id));
   row.querySelector(".agent-delete").addEventListener("click", (event) => {
     event.stopPropagation();
-    closeMobileSidebar();
-    void openDeleteAgent(agent.id);
+    selectWorkspaceAgent(workspaceId, agent.id);
+    requestAnimationFrame(() => void openDeleteAgent(agent.id));
   });
   return row;
 }
 
-function selectAgent(id) {
-  if (sessionStartupLocked()) return;
+function selectWorkspaceAgent(workspaceId, agentId) {
+  if (sessionStartupLocked(workspaceId, agentId)) return;
+  closeMobileSidebar();
+  if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
+  else selectAgent(agentId);
+}
+
+function finishAgentSelection(id) {
   closeContextDrawer();
   closeMobileSidebar();
   closeUserMessageMenu();
   closeAgentMenu();
+  closeWorkspaceMenu();
   deactivateSessionTerminalView();
   saveDraft();
   state.selectedAgent = id;
@@ -2221,7 +3057,13 @@ function selectAgent(id) {
   const meta = state.snapshot.agents.find((agent) => agent.id === id);
   if (prepareSelectedEventRecovery(meta, null, true)) showEventRecoveryOverlay();
   else renderAll();
+  persistGatewaySelection(state.workspaceId, id);
   requestHttpSyncNow();
+}
+
+function selectAgent(id) {
+  if (sessionStartupLocked(state.workspaceId, id)) return;
+  finishAgentSelection(id);
 }
 
 function deactivateSessionTerminalView() {
@@ -2230,20 +3072,19 @@ function deactivateSessionTerminalView() {
 }
 
 function syncSessionTerminalView() {
-  if (state.view.kind !== "session-terminal" || !state.selectedAgent) {
+  if (state.view.kind !== "session-terminal" || !state.workspaceId || !state.selectedAgent) {
     if (sessionTerminalIdentityKey !== null) deactivateSessionTerminalView();
     return;
   }
-  const key = `direct:${state.selectedAgent}`;
+  const key = `${state.workspaceId}:${state.selectedAgent}`;
   if (sessionTerminalIdentityKey === key) return;
   getSessionTerminalController().attach({
     key,
+    workspaceId: state.workspaceId,
     agentId: state.selectedAgent,
-    workspaceId: null,
   });
   sessionTerminalIdentityKey = key;
 }
-
 
 function renderTabs() {
   const chatbot = isChatbotAgent();
@@ -2401,9 +3242,10 @@ function lastPhysicalEventId(agentId) {
 }
 
 async function submitSystemPromptChange(mode) {
+  const workspaceId = state.workspaceId;
   const agentId = state.selectedAgent;
   const context = systemPromptEditorState(agentId);
-  if (!context || context.draft.pending) return;
+  if (!workspaceId || !context || context.draft.pending) return;
   const content = mode === "Custom" ? context.draft.content : null;
   if (mode === "Custom") {
     if (!content.trim()) return toast("内容不能为空", true);
@@ -2412,24 +3254,27 @@ async function submitSystemPromptChange(mode) {
     }
   }
   context.draft.pending = {
-    mode, content, afterEventId: lastPhysicalEventId(agentId), status: "submitting",
+    mode, content, workspaceId, afterEventId: lastPhysicalEventId(agentId), status: "submitting",
   };
   renderSystemPromptEditor();
   try {
     await sendCommand({
       command: "change_system_static_prompt", agent_id: agentId, mode, content,
-    });
+    }, workspaceId);
     if (context.draft.pending) context.draft.pending.status = "waiting";
   } catch (error) {
     if (commandResultIsUnknown(error)) {
       if (context.draft.pending) context.draft.pending.status = "unknown";
-      requestHttpSyncNow();
+      if (workspaceId === state.workspaceId) requestHttpSyncNow();
+      else scheduleBackgroundWorkspaceSync(0);
       renderSystemPromptEditor();
       return;
     }
     context.draft.pending = null;
     toast(error.message, true);
   }
+  if (workspaceId === state.workspaceId) requestHttpSyncNow();
+  else scheduleBackgroundWorkspaceSync(0);
   renderSystemPromptEditor();
 }
 
@@ -2468,7 +3313,7 @@ function renderTranscript(forceFull = false, changedFrom = 0) {
     return;
   }
   transcriptVirtualizer.update(messages, {
-    scopeKey: state.selectedAgent || "",
+    scopeKey: `${state.workspaceId || ""}:${state.selectedAgent || ""}`,
     changedFrom: forceFull ? 0 : changedFrom,
     force: forceFull,
     following: transcriptBottomFollower.isFollowing(),
@@ -2477,7 +3322,7 @@ function renderTranscript(forceFull = false, changedFrom = 0) {
 
 function renderEmptyTranscript(container) {
   const environment = state.snapshot.environment;
-  const rendered = `<div class="empty-state"><div><strong>ME-S</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
+  const rendered = `<div class="empty-state"><div><strong>${escapeHtml(runtimeCapabilities.brandTitle)}</strong><p>从这里开始一段对话。</p>${environment ? `<small>${escapeHtml(environment.workspace)}<br>${escapeHtml(environment.system)}</small>` : ""}</div></div>`;
   MeTranscript.reconcileHtmlChildren(container, rendered);
 }
 
@@ -2718,6 +3563,30 @@ function closeAgentMenu() {
   state.agentMenu?.trigger?.setAttribute("aria-expanded", "false");
   state.agentMenu = null;
   elements.agentMenu.classList.add("hidden");
+}
+
+function openWorkspaceMenu(trigger, workspaceId) {
+  closeUserMessageMenu();
+  closeAgentMenu();
+  closeWorkspaceMenu();
+  state.workspaceMenu = { workspaceId, trigger };
+  trigger.setAttribute("aria-expanded", "true");
+  elements.workspaceMenu.classList.remove("hidden");
+  const triggerRect = trigger.getBoundingClientRect();
+  const menuRect = elements.workspaceMenu.getBoundingClientRect();
+  const margin = 8;
+  const left = Math.max(margin, Math.min(triggerRect.right - menuRect.width, window.innerWidth - menuRect.width - margin));
+  const below = triggerRect.bottom + 5;
+  const top = below + menuRect.height <= window.innerHeight - margin
+    ? below : Math.max(margin, triggerRect.top - menuRect.height - 5);
+  elements.workspaceMenu.style.left = `${left}px`;
+  elements.workspaceMenu.style.top = `${top}px`;
+}
+
+function closeWorkspaceMenu() {
+  state.workspaceMenu?.trigger?.setAttribute("aria-expanded", "false");
+  state.workspaceMenu = null;
+  elements.workspaceMenu.classList.add("hidden");
 }
 
 async function copyTextToClipboard(content) {
@@ -3083,7 +3952,8 @@ function renderObjective() {
     MeTranscript.reconcileHtmlChildren(elements.objective, "");
     return;
   }
-  const disclosure = syncObjectiveDisclosure(state.objectiveDisclosure, state.selectedAgent, current.objective.id);
+  const scopeId = JSON.stringify([state.workspaceId, state.selectedAgent]);
+  const disclosure = syncObjectiveDisclosure(state.objectiveDisclosure, scopeId, current.objective.id);
   if (state.view.kind !== "chat") {
     setObjectiveDisclosureControl();
     elements.objective.classList.add("hidden");
@@ -3571,19 +4441,437 @@ async function selectDrawerChoice(value) {
   }
 }
 
-function resolveEdbCacheLabel(entry) {
-  const sameWorkspace = entry.scope === edbCacheScope();
-  const meta = sameWorkspace
-    ? state.snapshot.agents.find((agent) => agent.id === entry.agentId) : null;
+const DIRECTORY_NAME_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+const DIRECTORY_DATE_FORMATTER = new Intl.DateTimeFormat(undefined, {
+  year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit",
+});
+const DIRECTORY_FILE_TYPES = {
+  txt: "文本文件", md: "Markdown 文档", markdown: "Markdown 文档", pdf: "PDF 文档",
+  doc: "Word 文档", docx: "Word 文档", xls: "Excel 工作簿", xlsx: "Excel 工作簿",
+  ppt: "PowerPoint 演示文稿", pptx: "PowerPoint 演示文稿", csv: "CSV 表格",
+  png: "PNG 图像", jpg: "JPEG 图像", jpeg: "JPEG 图像", gif: "GIF 图像", webp: "WebP 图像", svg: "SVG 图像",
+  mp3: "MP3 音频", wav: "WAV 音频", m4a: "M4A 音频", mp4: "MP4 视频", mov: "QuickTime 视频",
+  zip: "ZIP 归档", gz: "GZip 归档", tar: "TAR 归档", zst: "Zstandard 归档",
+  json: "JSON 文件", toml: "TOML 配置", yaml: "YAML 配置", yml: "YAML 配置", xml: "XML 文件",
+  js: "JavaScript 文件", mjs: "JavaScript 文件", ts: "TypeScript 文件", tsx: "TypeScript 文件",
+  html: "HTML 文档", css: "CSS 样式表", rs: "Rust 源文件", py: "Python 文件", sh: "Shell 脚本",
+  log: "日志文件", lock: "锁定文件",
+};
+
+function directoryEntryType(entry) {
+  if (entry?.kind === "drive") return "磁盘";
+  if (entry?.kind === "directory") return "文件夹";
+  const name = String(entry?.name || "");
+  const dot = name.lastIndexOf(".");
+  if (dot <= 0 || dot === name.length - 1) return "文件";
+  const extension = name.slice(dot + 1).toLowerCase();
+  return DIRECTORY_FILE_TYPES[extension] || `${extension.toUpperCase()} 文件`;
+}
+
+function formatDirectorySize(sizeBytes, kind = "file") {
+  const bytes = Number(sizeBytes);
+  if (kind !== "file" || sizeBytes == null || !Number.isFinite(bytes) || bytes < 0) return "—";
+  if (bytes < 1024) return `${Math.round(bytes)} B`;
+  const units = ["KB", "MB", "GB", "TB", "PB"];
+  const unit = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, units.length - 1);
+  const value = bytes / (1024 ** (unit + 1));
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+function formatDirectoryModified(modifiedAtMs) {
+  const value = Number(modifiedAtMs);
+  if (modifiedAtMs == null || !Number.isFinite(value) || value < 0) return "—";
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "—" : DIRECTORY_DATE_FORMATTER.format(date);
+}
+
+function filterDirectoryEntries(entries, query) {
+  const normalized = String(query || "").trim().toLocaleLowerCase();
+  if (!normalized) return [...(entries || [])];
+  return (entries || []).filter((entry) => String(entry.name || "").toLocaleLowerCase().includes(normalized));
+}
+
+function directorySortValue(entry, sortKey) {
+  if (sortKey === "modified") return entry.modified_at_ms != null && Number.isFinite(Number(entry.modified_at_ms)) ? Number(entry.modified_at_ms) : null;
+  if (sortKey === "type") return directoryEntryType(entry);
+  if (sortKey === "size") return entry.kind === "file" && entry.size_bytes != null && Number.isFinite(Number(entry.size_bytes)) ? Number(entry.size_bytes) : null;
+  return String(entry.name || "");
+}
+
+function sortDirectoryEntries(entries, sortKey = "name", direction = "asc") {
+  const multiplier = direction === "desc" ? -1 : 1;
+  return [...(entries || [])].sort((left, right) => {
+    const leftGroup = left.kind === "file" ? 1 : 0;
+    const rightGroup = right.kind === "file" ? 1 : 0;
+    if (leftGroup !== rightGroup) return leftGroup - rightGroup;
+    const leftValue = directorySortValue(left, sortKey);
+    const rightValue = directorySortValue(right, sortKey);
+    const leftMissing = leftValue == null;
+    const rightMissing = rightValue == null;
+    if (leftMissing !== rightMissing) return leftMissing ? 1 : -1;
+    let primary = 0;
+    if (!leftMissing) primary = typeof leftValue === "number"
+      ? leftValue - rightValue
+      : DIRECTORY_NAME_COLLATOR.compare(String(leftValue), String(rightValue));
+    if (primary) return primary * multiplier;
+    return DIRECTORY_NAME_COLLATOR.compare(String(left.name || ""), String(right.name || ""));
+  });
+}
+
+function directoryParentRequest(listing) {
+  if (listing.parent) return { path: listing.parent, roots: false };
+  if (listing.parent_is_root_selector) return { path: null, roots: true };
+  return null;
+}
+
+
+function directoryEntryIcon(entry) {
+  if (entry.kind === "drive") return `<svg class="directory-file-icon drive" viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="5" width="17" height="14" rx="2"/><path d="M3.5 14h17"/><circle cx="17" cy="16.5" r=".8"/></svg>`;
+  if (entry.kind === "directory") return `<svg class="directory-file-icon folder" viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 6.5h6l2 2h9v9.5a2 2 0 0 1-2 2h-15v-13.5Z"/><path d="M3.5 10h17"/></svg>`;
+  return `<svg class="directory-file-icon file" viewBox="0 0 24 24" aria-hidden="true"><path d="M6 3.5h8l4 4V20H6z"/><path d="M14 3.5V8h4"/></svg>`;
+}
+
+function directoryVisibleEntries(directory) {
+  return sortDirectoryEntries(
+    filterDirectoryEntries(directory.listing.entries || [], directory.searchQuery),
+    directory.sortKey,
+    directory.sortDirection,
+  );
+}
+
+async function openDirectoryBrowser(mode) {
+  try {
+    const listing = await api("/api/gateway/directories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path: state.gateway.gateway_root || null }),
+    });
+    openModal({
+      kind: "directory",
+      title: mode === "create" ? "新建工作区" : "打开工作区",
+      choices: [], selected: null, confirmLabel: mode === "create" ? "创建并打开" : "打开",
+      html: `<div class="directory-browser"></div>`,
+      directory: {
+        mode, listing, selectedPath: null, searchQuery: "", sortKey: "name", sortDirection: "asc",
+        workspaceName: "", creatingFolder: false,
+      },
+      onOpen: renderDirectoryBrowser,
+      onConfirm: async () => {
+        const directoryModal = state.modal;
+        const directory = directoryModal?.directory;
+        const current = directory?.listing?.path;
+        if (!current) throw new Error("请选择目录");
+        let result;
+        if (mode === "create") {
+          const name = String(directory.workspaceName || "").trim();
+          if (!name) throw new Error("请输入工作区名称");
+          result = await api("/api/gateway/workspaces/create", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ parent: current, name }),
+          });
+        } else {
+          result = await api("/api/gateway/workspaces/open", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ path: current, initialize: false }),
+          });
+          if (result.status === "requires_initialization") {
+            openWorkspaceInitializationConfirm(directoryModal, result.path || current);
+            return;
+          }
+        }
+        await refreshGatewayState();
+        activateWorkspace(result.workspace_id);
+      },
+    });
+  } catch (error) { toast(error.message, true); }
+}
+
+function openWorkspaceInitializationConfirm(directoryModal, path) {
+  openModal({
+    title: "创建工作区？",
+    description: `所选目录“${path}”尚不是 ME 工作区。是否在此创建并打开？`,
+    choices: [], selected: null, confirmLabel: "创建并打开",
+    onCancel: () => openModal(directoryModal),
+    onConfirm: async () => {
+      const result = await api("/api/gateway/workspaces/open", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, initialize: true }),
+      });
+      if (result.status !== "opened" || !result.workspace_id) throw new Error("无法创建该工作区");
+      await refreshGatewayState();
+      activateWorkspace(result.workspace_id);
+    },
+  });
+}
+
+async function loadDirectoryListing(path, roots = false, preserveState = false) {
+  const directory = state.modal?.directory;
+  if (!directory) return;
+  const browser = elements.modalContent.querySelector(".directory-browser");
+  const controls = [...elements.modalContent.querySelectorAll("[data-directory-control]")];
+  browser?.classList.add("loading");
+  controls.forEach((control) => { control.disabled = true; });
+  try {
+    const listing = await api("/api/gateway/directories", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ path, roots }),
+    });
+    if (state.modal?.directory !== directory) return;
+    const previousSelection = preserveState ? directory.selectedPath : null;
+    directory.listing = listing;
+    directory.selectedPath = (listing.entries || []).some((entry) => entry.path === previousSelection) ? previousSelection : null;
+    if (!preserveState) directory.searchQuery = "";
+    directory.creatingFolder = false;
+    renderDirectoryBrowser();
+  } catch (error) {
+    browser?.classList.remove("loading");
+    controls.forEach((control) => { control.disabled = false; });
+    toast(error.message, true);
+  }
+}
+
+function directorySortHeader(key, label, directory) {
+  const active = directory.sortKey === key;
+  const ariaSort = active ? (directory.sortDirection === "asc" ? "ascending" : "descending") : "none";
+  const indicator = active ? (directory.sortDirection === "asc" ? "↑" : "↓") : "";
+  return `<button type="button" class="directory-sort${active ? " active" : ""}" data-directory-sort="${key}" aria-sort="${ariaSort}" data-directory-control><span>${label}</span><span class="directory-sort-indicator" aria-hidden="true">${indicator}</span></button>`;
+}
+
+function renderDirectoryBrowser() {
+  const directory = state.modal?.directory;
+  if (!directory) return;
+  const listing = directory.listing;
+  const rootSelector = listing.root_selector === true;
+  const parentRequest = directoryParentRequest(listing);
+  const currentLocation = rootSelector ? "此电脑" : String(listing.path || "");
+  const locationIcon = directoryEntryIcon({ kind: rootSelector ? "drive" : "directory" });
+  elements.modalContent.innerHTML = `<div class="directory-browser${rootSelector ? " root-selector" : ""}">
+    <div class="directory-toolbar">
+      <div class="directory-navigation">
+        <button type="button" class="directory-control directory-up" aria-label="返回上一级" title="返回上一级" ${parentRequest ? "data-directory-up" : "disabled"} data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
+        <div class="directory-current">
+          <span class="directory-location-icon">${locationIcon}</span>
+          <span class="directory-current-path" title="${escapeAttr(currentLocation)}">${escapeHtml(currentLocation)}</span>
+          <span class="directory-count"></span>
+        </div>
+      </div>
+      <div class="directory-tools">
+        <button type="button" class="directory-control directory-new-folder" aria-label="新建文件夹" title="新建文件夹" ${listing.path ? "data-directory-new-folder" : "disabled"} data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7h6l2 2h9v9.5a2 2 0 0 1-2 2h-15z"/><path d="M12 12v6m-3-3h6"/></svg></button>
+        <button type="button" class="directory-control directory-refresh" aria-label="刷新" title="刷新" data-directory-refresh data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M19 8a7 7 0 1 0 1 5"/><path d="M19 4v4h-4"/></svg></button>
+        <label class="directory-search">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="6.5"/><path d="m16 16 4 4"/></svg>
+          <input type="search" value="${escapeAttr(directory.searchQuery)}" placeholder="筛选当前目录" aria-label="筛选当前目录">
+          <button type="button" class="directory-search-clear${directory.searchQuery ? "" : " hidden"}" aria-label="清空筛选" title="清空筛选">×</button>
+        </label>
+      </div>
+    </div>
+    ${directory.creatingFolder ? `<form class="directory-new-folder-form"><label>新建文件夹<input id="directory-new-folder-name" autocomplete="off" placeholder="文件夹名称"></label><button type="submit" class="ghost-button">创建</button><button type="button" class="ghost-button" data-directory-new-folder-cancel>取消</button></form>` : ""}
+    <div class="directory-table">
+      <div class="directory-list-header" role="row">
+        ${directorySortHeader("name", "名称", directory)}
+        ${directorySortHeader("modified", "修改时间", directory)}
+        ${directorySortHeader("type", "类型", directory)}
+        ${directorySortHeader("size", "大小", directory)}
+        <span aria-hidden="true"></span>
+      </div>
+      <div class="directory-list" role="listbox" aria-label="${rootSelector ? "磁盘" : "当前目录内容"}"></div>
+    </div>
+    ${directory.mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(directory.workspaceName)}" placeholder="例如：my-project"></label>` : `<div class="directory-selection-summary"><span class="directory-target">当前目录将作为工作区打开。</span><span class="directory-selected-item"></span></div>`}
+  </div>`;
+  elements.modalConfirm.disabled = !listing.path;
+  elements.modalContent.querySelector("[data-directory-up]")?.addEventListener("click", () => {
+    void loadDirectoryListing(parentRequest.path, parentRequest.roots);
+  });
+  elements.modalContent.querySelector("[data-directory-refresh]")?.addEventListener("click", () => {
+    void loadDirectoryListing(listing.path, rootSelector, true);
+  });
+  elements.modalContent.querySelector("[data-directory-new-folder]")?.addEventListener("click", () => {
+    directory.creatingFolder = true;
+    renderDirectoryBrowser();
+    elements.modalContent.querySelector("#directory-new-folder-name")?.focus();
+  });
+  elements.modalContent.querySelector("[data-directory-new-folder-cancel]")?.addEventListener("click", () => {
+    directory.creatingFolder = false;
+    renderDirectoryBrowser();
+  });
+  elements.modalContent.querySelector(".directory-new-folder-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const name = elements.modalContent.querySelector("#directory-new-folder-name")?.value.trim();
+    if (!name) { toast("请输入文件夹名称", true); return; }
+    try {
+      await api("/api/gateway/directories/create", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ parent: listing.path, name }),
+      });
+      await loadDirectoryListing(listing.path);
+    } catch (error) { toast(error.message, true); }
+  });
+  const search = elements.modalContent.querySelector(".directory-search input");
+  search?.addEventListener("input", () => {
+    directory.searchQuery = search.value;
+    renderDirectoryRows();
+    elements.modalContent.querySelector(".directory-search-clear")?.classList.toggle("hidden", !directory.searchQuery);
+  });
+  elements.modalContent.querySelector(".directory-search-clear")?.addEventListener("click", () => {
+    directory.searchQuery = "";
+    search.value = "";
+    renderDirectoryRows();
+    elements.modalContent.querySelector(".directory-search-clear")?.classList.add("hidden");
+    search.focus();
+  });
+  elements.modalContent.querySelectorAll("[data-directory-sort]").forEach((button) => button.addEventListener("click", () => {
+    const key = button.dataset.directorySort;
+    if (directory.sortKey === key) directory.sortDirection = directory.sortDirection === "asc" ? "desc" : "asc";
+    else { directory.sortKey = key; directory.sortDirection = "asc"; }
+    renderDirectoryBrowser();
+    elements.modalContent.querySelector(`[data-directory-sort="${key}"]`)?.focus();
+  }));
+  const workspaceName = elements.modalContent.querySelector("#new-workspace-name");
+  workspaceName?.addEventListener("input", () => { directory.workspaceName = workspaceName.value; });
+  renderDirectoryRows();
+  if (directory.creatingFolder) elements.modalContent.querySelector("#directory-new-folder-name")?.focus();
+  else if (directory.mode === "create") workspaceName?.focus();
+}
+
+function updateDirectorySelection(directory, list, allEntries = directory.listing.entries || []) {
+  list.querySelectorAll("[data-directory-entry]").forEach((row) => {
+    const selected = row.dataset.directoryEntry === directory.selectedPath;
+    row.classList.toggle("selected", selected);
+    row.setAttribute("aria-selected", String(selected));
+  });
+  const selectedEntry = allEntries.find((entry) => entry.path === directory.selectedPath);
+  const selectedItem = elements.modalContent.querySelector(".directory-selected-item");
+  if (selectedItem) selectedItem.textContent = selectedEntry
+    ? selectedEntry.kind === "file" ? `已选择“${selectedEntry.name}”（文件仅供查看）` : `已选择“${selectedEntry.name}”（双击进入）`
+    : "双击文件夹进入；文件仅供查看。";
+}
+
+
+function renderDirectoryRows() {
+  const directory = state.modal?.directory;
+  const list = elements.modalContent.querySelector(".directory-list");
+  if (!directory || !list) return;
+  const entries = directoryVisibleEntries(directory);
+  const allEntries = directory.listing.entries || [];
+  const rootSelector = directory.listing.root_selector === true;
+  const queryActive = String(directory.searchQuery || "").trim().length > 0;
+  list.innerHTML = entries.map((entry) => {
+    const navigable = entry.kind !== "file";
+    const selected = entry.path === directory.selectedPath;
+    const modified = formatDirectoryModified(entry.modified_at_ms);
+    const type = directoryEntryType(entry);
+    const size = formatDirectorySize(entry.size_bytes, entry.kind);
+    const label = navigable ? `${type} ${entry.name}，双击进入` : `文件 ${entry.name}，仅供查看`;
+    return `<div class="directory-entry${selected ? " selected" : ""}" role="option" tabindex="0" aria-selected="${selected}" aria-label="${escapeAttr(label)}" data-directory-entry="${escapeAttr(entry.path)}" data-entry-kind="${entry.kind}">
+      <span class="directory-entry-name"><span class="directory-entry-icon">${directoryEntryIcon(entry)}</span><span class="directory-entry-copy"><span class="directory-entry-title" title="${escapeAttr(entry.name)}">${escapeHtml(entry.name)}</span><span class="directory-entry-mobile-meta"><span>${escapeHtml(modified)}</span><span>${escapeHtml(type)}</span><span>${escapeHtml(size)}</span></span></span></span>
+      <span class="directory-entry-modified">${escapeHtml(modified)}</span>
+      <span class="directory-entry-type">${escapeHtml(type)}</span>
+      <span class="directory-entry-size">${escapeHtml(size)}</span>
+      ${navigable ? `<button type="button" class="directory-entry-enter" data-directory-enter="${escapeAttr(entry.path)}" aria-label="进入 ${escapeAttr(entry.name)}" title="进入"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m9 6 6 6-6 6"/></svg></button>` : `<span class="directory-entry-action" aria-hidden="true"></span>`}
+    </div>`;
+  }).join("");
+  if (!entries.length) {
+    const title = queryActive ? "没有匹配项" : rootSelector ? "没有可用磁盘" : "此目录为空";
+    const detail = queryActive ? "请尝试其他筛选词。" : rootSelector ? "当前宿主机没有可浏览的逻辑盘符。" : "可以在此新建文件夹，或返回上一级。";
+    list.innerHTML = `<div class="directory-empty"><span class="directory-entry-icon">${directoryEntryIcon({ kind: rootSelector ? "drive" : "directory" })}</span><strong>${title}</strong><span>${detail}</span></div>`;
+  }
+  const count = elements.modalContent.querySelector(".directory-count");
+  if (count) count.textContent = queryActive ? `${entries.length} / ${allEntries.length} 项` : `${allEntries.length} 项`;
+  updateDirectorySelection(directory, list, allEntries);
+  list.querySelectorAll("[data-directory-entry]").forEach((row) => {
+    row.addEventListener("click", () => {
+      directory.selectedPath = row.dataset.directoryEntry;
+      updateDirectorySelection(directory, list, allEntries);
+      row.focus();
+    });
+    row.addEventListener("dblclick", () => {
+      if (row.dataset.entryKind !== "file") void loadDirectoryListing(row.dataset.directoryEntry);
+    });
+    row.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && row.dataset.entryKind !== "file") {
+        event.preventDefault();
+        void loadDirectoryListing(row.dataset.directoryEntry);
+      } else if (event.key === " ") {
+        event.preventDefault();
+        directory.selectedPath = row.dataset.directoryEntry;
+        updateDirectorySelection(directory, list, allEntries);
+      }
+    });
+  });
+  list.querySelectorAll("[data-directory-enter]").forEach((button) => button.addEventListener("click", (event) => {
+    event.stopPropagation();
+    void loadDirectoryListing(button.dataset.directoryEnter);
+  }));
+}
+
+function blankGatewayModel() {
   return {
-    workspace: MeEdbCache.workspaceName(entry.scope),
-    title: meta?.title || null,
+    original_name: null, name: "", provider: "openai-compatible", reserve_output_context: false,
+    base_url: "", endpoint: "/chat/completions", api_key_env: null, credential_file: null,
+    model: "", source_url: null, timeout_seconds: 120,
+    capabilities: { context_window: 128000, max_output_tokens: null, input_modalities: ["text"], output_modalities: ["text"], reasoning_modes: [], reasoning_efforts: ["unset"], tools: true, streaming: true },
+    parameters: {}, effort_parameters: {}, api_key: null, clear_inline_api_key: false,
   };
 }
 
-function renderEdbCacheSettings(container) {
+function modelSettingsHtml(model, index) {
+  const value = (name) => escapeAttr(model[name] ?? "");
+  return `<details class="settings-model" data-settings-model="${index}">
+    <summary>
+      <span class="settings-model-title">
+        <svg class="settings-model-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg>
+        <strong>${escapeHtml(model.name || "新模型")}</strong>
+      </span>
+      <span class="settings-model-provider">${escapeHtml(model.provider)}</span>
+    </summary>
+    <div class="settings-grid">
+      <label>显示名称<input data-setting="name" value="${value("name")}"></label>
+      <label>Provider<select data-setting="provider"><option value="openai-compatible" ${model.provider === "openai-compatible" ? "selected" : ""}>OpenAI Compatible</option><option value="anthropic" ${model.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="codex-oauth" ${model.provider === "codex-oauth" ? "selected" : ""}>Codex OAuth</option></select></label>
+      <label>Base URL<input data-setting="base_url" value="${value("base_url")}"></label>
+      <label>Endpoint<input data-setting="endpoint" value="${value("endpoint")}"></label>
+      <label>模型标识<input data-setting="model" value="${value("model")}"></label>
+      <label>请求超时（秒）<input data-setting="timeout_seconds" type="number" min="1" value="${Number(model.timeout_seconds) || 120}"></label>
+      <label>API Key 环境变量<input data-setting="api_key_env" value="${value("api_key_env")}"></label>
+      <label>凭据文件<input data-setting="credential_file" value="${value("credential_file")}"></label>
+      <label>来源地址<input data-setting="source_url" value="${value("source_url")}"></label>
+      <label>API Key<input data-setting="api_key" type="text" autocomplete="off" value="${value("api_key")}" placeholder="留空表示不设置"></label>
+      <label class="settings-check"><input data-setting="reserve_output_context" type="checkbox" ${model.reserve_output_context ? "checked" : ""}>为输出预留上下文</label>
+      <label class="settings-check"><input data-setting="clear_inline_api_key" type="checkbox" ${model.clear_inline_api_key ? "checked" : ""}>清除已保存的 API Key</label>
+    </div>
+    <label>能力配置（JSON）<textarea data-setting="capabilities" rows="7">${escapeHtml(JSON.stringify(model.capabilities, null, 2))}</textarea></label>
+    <label>请求参数（JSON）<textarea data-setting="parameters" rows="5">${escapeHtml(JSON.stringify(model.parameters || {}, null, 2))}</textarea></label>
+    <label>推理强度参数（JSON）<textarea data-setting="effort_parameters" rows="5">${escapeHtml(JSON.stringify(model.effort_parameters || {}, null, 2))}</textarea></label>
+    <button type="button" class="ghost-button danger settings-remove-model" data-remove-model="${index}">移除模型</button>
+  </details>`;
+}
+
+function resolveGatewayEdbCacheLabel(entry) {
+  let workspaceId = null;
+  let snapshot = null;
+  if (state.snapshot?.environment?.workspace === entry.scope) {
+    workspaceId = state.workspaceId;
+    snapshot = state.snapshot;
+  } else {
+    for (const [candidateId, workspace] of state.workspaceStates) {
+      if (workspace.snapshot?.environment?.workspace !== entry.scope) continue;
+      workspaceId = candidateId;
+      snapshot = workspace.snapshot;
+      break;
+    }
+  }
+  const meta = snapshot?.agents?.find((agent) => agent.id === entry.agentId);
+  const gatewayWorkspace = state.gateway.workspaces?.find((item) => item.id === workspaceId);
+  return {
+    workspace: gatewayWorkspace?.name || entry.workspaceLabel || MeEdbCache.workspaceName(entry.scope),
+    title: meta?.title || entry.sessionLabel || null,
+  };
+}
+
+function renderGatewayEdbCacheSettings() {
+  const container = elements.modalContent.querySelector("#settings-edb-cache-manager");
+  if (!container) return;
   void edbCache.renderManager(container, {
-    resolveLabel: resolveEdbCacheLabel,
+    resolveLabel: resolveGatewayEdbCacheLabel,
+    storageLabel: runtimeCapabilities.cacheStorageLabel,
     onRemoved: () => toast("会话缓存已清除"),
     onError: (error) => toast(error?.message || "无法清除会话缓存", true),
   });
@@ -3592,15 +4880,117 @@ function renderEdbCacheSettings(container) {
 function openEdbCacheSettings() {
   openModal({
     title: "设置",
-    description: "管理当前浏览器保存的原始 EDB 会话缓存。",
+    description: "管理此设备保存的会话缓存。",
     choices: [],
     selected: null,
     confirmLabel: null,
-    cancelLabel: "关闭",
-    html: "<div class=\"edb-cache-manager\"></div>",
-    onOpen: renderEdbCacheSettings,
+    html: "<div id=\"settings-edb-cache-manager\" class=\"edb-cache-manager\"></div>",
+    onOpen: renderGatewayEdbCacheSettings,
   });
 }
+
+function renderSettingsModal() {
+  const settings = state.modal?.settings;
+  if (!settings) return;
+  elements.modalContent.innerHTML = `<div class="settings-editor">
+    <label>默认模型<select id="settings-default-model">${settings.models.map((model) => `<option value="${escapeAttr(model.name)}" ${model.name === settings.default_model ? "selected" : ""}>${escapeHtml(model.name || "未命名模型")}</option>`).join("")}</select></label>
+    <div class="settings-models">${settings.models.map(modelSettingsHtml).join("")}</div>
+    <button id="settings-add-model" type="button" class="ghost-button">新增模型</button>
+    <p class="settings-help">保存后不会更改正在运行的工作区。请重启 ME Gateway 以使用新设置。</p>
+    <div id="settings-edb-cache-manager" class="edb-cache-manager"></div>
+  </div>`;
+  elements.modalContent.querySelector("#settings-add-model")?.addEventListener("click", () => {
+    if (!captureSettingsEditor()) return;
+    state.modal.settings.models.push(blankGatewayModel());
+    renderSettingsModal();
+  });
+  elements.modalContent.querySelectorAll("[data-remove-model]").forEach((button) => button.addEventListener("click", () => {
+    if (!captureSettingsEditor()) return;
+    state.modal.settings.models.splice(Number(button.dataset.removeModel), 1);
+    renderSettingsModal();
+  }));
+  renderGatewayEdbCacheSettings();
+}
+
+function parseSettingsJson(value, label) {
+  try { return JSON.parse(value || "{}"); }
+  catch (_) { throw new Error(`${label}不是有效的 JSON`); }
+}
+
+function resolveEditedDefaultModel(previousModels, editedModels, selectedDefault) {
+  const index = previousModels.findIndex((model) => model.name === selectedDefault);
+  return index >= 0 ? editedModels[index]?.name || "" : selectedDefault;
+}
+
+function collectSettings() {
+  const settings = state.modal?.settings;
+  if (!settings) throw new Error("设置页面已关闭");
+  const cards = [...elements.modalContent.querySelectorAll("[data-settings-model]")];
+  const models = cards.map((card, index) => {
+    const previous = settings.models[index];
+    const field = (name) => card.querySelector(`[data-setting="${name}"]`);
+    const optional = (name) => field(name).value.trim() || null;
+    return {
+      ...previous, original_name: previous.original_name, name: field("name").value.trim(),
+      provider: field("provider").value, reserve_output_context: field("reserve_output_context").checked,
+      base_url: field("base_url").value.trim(), endpoint: field("endpoint").value.trim(),
+      api_key_env: optional("api_key_env"), credential_file: optional("credential_file"),
+      model: field("model").value.trim(), source_url: optional("source_url"),
+      timeout_seconds: Number(field("timeout_seconds").value),
+      capabilities: parseSettingsJson(field("capabilities").value, "能力配置"),
+      parameters: parseSettingsJson(field("parameters").value, "请求参数"),
+      effort_parameters: parseSettingsJson(field("effort_parameters").value, "推理强度参数"),
+      api_key: optional("api_key"), clear_inline_api_key: field("clear_inline_api_key").checked,
+    };
+  });
+  const selectedDefault = elements.modalContent.querySelector("#settings-default-model")?.value || "";
+  return {
+    version: settings.version,
+    default_model: resolveEditedDefaultModel(settings.models, models, selectedDefault),
+    models,
+  };
+}
+
+function captureSettingsEditor() {
+  try {
+    state.modal.settings = collectSettings();
+    return true;
+  } catch (error) {
+    toast(error.message, true);
+    return false;
+  }
+}
+
+async function openGatewaySettings() {
+  try {
+    const settings = await api("/api/gateway/settings");
+    openModal({
+      title: "设置", description: "编辑 ME 的全局模型设置。",
+      choices: [], selected: null, confirmLabel: "保存设置", html: `<div class="settings-editor"></div>`,
+      settings, onOpen: renderSettingsModal,
+      onConfirm: async () => {
+        await api("/api/gateway/settings", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(collectSettings()),
+        });
+        toast("设置已保存；重启 ME Gateway 后生效");
+      },
+    });
+  } catch (error) { toast(error.message, true); }
+}
+
+async function closeExternalWorkspace(workspaceId) {
+  const workspace = (state.gateway.workspaces || []).find((item) => item.id === workspaceId);
+  if (!workspace || workspace.builtin) return;
+  openConfirm("关闭工作区？", `“${workspace.name}”将从工作列表中移除，正在运行的会话也会停止。工作目录不会被删除。`, "关闭工作区", async () => {
+    await api(`/api/gateway/workspaces/${encodeURIComponent(workspaceId)}/close`, {
+      method: "POST", headers: { "Content-Type": "application/json" }, body: "{}",
+    });
+    await refreshGatewayState();
+    if (state.workspaceId === workspaceId) activateWorkspace("chat");
+  }, true);
+}
+
 
 function openConfirm(title, description, confirmLabel, onConfirm, danger = false) {
   openModal({ title, description, choices: [], selected: null, confirmLabel, onConfirm, danger });
@@ -3608,23 +4998,26 @@ function openConfirm(title, description, confirmLabel, onConfirm, danger = false
 
 function openModal(modal) {
   const choices = modal.choices || [];
-  const messageOnly = modal.html == null && choices.length === 0;
-  state.modal = { ...modal, choices };
+  const messageOnly = modal.html == null && !choices.length;
+  state.modal = { ...modal, choices, busy: false };
   elements.modalTitle.textContent = modal.title;
   elements.modalDescription.textContent = modal.description || "";
   elements.modalDescription.classList.toggle("hidden", !modal.description);
+  elements.modalConfirm.disabled = false;
+  elements.modalCancel.disabled = false;
+  elements.modalClose.disabled = false;
   elements.modalConfirm.textContent = modal.confirmLabel || "确认";
   elements.modalConfirm.classList.toggle("danger", !!modal.danger);
   elements.modalConfirm.classList.toggle("hidden", modal.confirmLabel === null);
-  elements.modalCancel.textContent = modal.cancelLabel || "取消";
   elements.modalContent.innerHTML = modal.html != null ? modal.html
     : choices.length ? `<div class="choice-list">${choices.map((choice) => `<label class="choice ${String(choice.value) === String(modal.selected) ? "selected" : ""}"><input type="radio" name="modal-choice" value="${escapeAttr(choice.value)}" ${String(choice.value) === String(modal.selected) ? "checked" : ""}><span>${escapeHtml(choice.label)}${choice.detail ? `<small>${escapeHtml(choice.detail)}</small>` : ""}</span></label>`).join("")}</div>` : "";
-  elements.modalContent.classList.toggle("hidden", modal.html == null && choices.length === 0);
+  elements.modalContent.classList.toggle("hidden", modal.html == null && !choices.length);
   if (modal.html == null) elements.modalContent.querySelectorAll("input").forEach((input) => input.addEventListener("change", () => {
     state.modal.selected = input.value;
     elements.modalContent.querySelectorAll(".choice").forEach((choice) => choice.classList.toggle("selected", choice.contains(input)));
   }));
   elements.modalBackdrop.classList.toggle("message-modal-backdrop", messageOnly);
+  elements.modalBackdrop.classList.toggle("directory-modal-backdrop", modal.kind === "directory");
   elements.modalBackdrop.classList.remove("hidden");
   state.modal.onOpen?.(elements.modalContent);
 }
@@ -3632,23 +5025,40 @@ function openModal(modal) {
 function closeModal() {
   state.modal = null;
   elements.modalBackdrop.classList.add("hidden");
-  elements.modalBackdrop.classList.remove("message-modal-backdrop");
+  elements.modalBackdrop.classList.remove("directory-modal-backdrop", "message-modal-backdrop");
+}
+
+function cancelModal() {
+  const modal = state.modal;
+  if (!modal || modal.busy) return;
+  if (modal.onCancel) modal.onCancel();
+  else closeModal();
 }
 
 async function confirmModal() {
   const modal = state.modal;
-  if (!modal) return;
-  if (!modal.onConfirm) { closeModal(); return; }
+  if (!modal || modal.busy) return;
+  modal.busy = true;
   elements.modalConfirm.disabled = true;
+  elements.modalCancel.disabled = true;
+  elements.modalClose.disabled = true;
   try {
-    await modal.onConfirm(modal.selected);
-    closeModal();
-  } catch (error) { toast(error.message, true); }
-  finally { elements.modalConfirm.disabled = false; }
+    if (modal.onConfirm) await modal.onConfirm(modal.selected);
+    if (state.modal === modal) closeModal();
+  } catch (error) {
+    if (state.modal === modal) toast(error.message, true);
+  } finally {
+    if (state.modal === modal) {
+      modal.busy = false;
+      elements.modalConfirm.disabled = false;
+      elements.modalCancel.disabled = false;
+      elements.modalClose.disabled = false;
+    }
+  }
 }
 
-async function sendCommand(payload, { refresh = true } = {}) {
-  if (!state.connected) {
+async function sendCommand(payload, workspaceId = state.workspaceId, { refresh = true } = {}) {
+  if (workspaceId === state.workspaceId && !state.connected) {
     const error = new Error("连接尚未恢复，请稍候");
     error.commandResultKnown = true;
     throw error;
@@ -3658,12 +5068,12 @@ async function sendCommand(payload, { refresh = true } = {}) {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
-    });
-    if (refresh) requestHttpSyncNow();
+    }, workspaceId);
+    if (refresh && workspaceId === state.workspaceId) requestHttpSyncNow();
     return response;
   } catch (error) {
     if (error.status === 401) showLogin("登录已失效，请重新登录");
-    else if (!error.status || [502, 503, 504].includes(error.status)) handlePollingFailure(error);
+    else if (workspaceId === state.workspaceId && (!error.status || [502, 503, 504].includes(error.status))) handlePollingFailure(error);
     throw error;
   }
 }
@@ -3684,18 +5094,20 @@ function commandResultIsUnknown(error) {
 }
 
 function cancelPendingPromptSubmission(agentId, pending) {
-  const store = state.stores.get(agentId);
+  const workspaceId = pending.workspaceId || state.workspaceId;
+  const bucket = workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
+  const store = bucket.stores.get(agentId);
   if (!store || store.pendingPromptSubmission !== pending) return false;
   pending.settled = true;
   store.pendingPromptSubmission = null;
-  state.drafts.set(agentId, pending.displayContent);
-  const sync = state.draftSync.get(agentId);
+  bucket.drafts.set(agentId, pending.displayContent);
+  const sync = bucket.draftSync.get(agentId);
   if (sync) {
-    sync.paused = false;
+    sync.paused = workspaceId !== state.workspaceId;
     sync.desired = pending.displayContent;
-    if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
+    if (!sync.paused && sync.sent !== sync.desired) void runDraftSync(agentId, sync);
   }
-  if (state.selectedAgent === agentId) {
+  if (workspaceId === state.workspaceId && state.selectedAgent === agentId) {
     elements.input.value = pending.displayContent;
     autoSizeInput(true);
     requestAnimationFrame(() => elements.input.focus());
@@ -3704,24 +5116,28 @@ function cancelPendingPromptSubmission(agentId, pending) {
 }
 
 function finishPendingPromptSubmission(agentId) {
-  const store = state.stores.get(agentId);
-  const pending = store?.pendingPromptSubmission;
-  if (!store || !pending) return false;
+  const activeStore = state.stores.get(agentId);
+  const pending = activeStore?.pendingPromptSubmission;
+  if (!pending) return false;
+  const workspaceId = pending.workspaceId || state.workspaceId;
+  const bucket = workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
+  const store = bucket.stores.get(agentId);
+  if (!store || store.pendingPromptSubmission !== pending) return false;
   pending.settled = true;
   store.pendingPromptSubmission = null;
-  const meta = state.snapshot.agents.find((agent) => agent.id === agentId);
+  const meta = bucket.snapshot.agents.find((agent) => agent.id === agentId);
   const observedRevision = Number(meta?.input_draft_revision);
   const hasCurrentDraft = Number.isSafeInteger(observedRevision)
     && observedRevision >= store.inputDraftRevision;
   const revision = hasCurrentDraft ? observedRevision : store.inputDraftRevision;
   const content = hasCurrentDraft ? String(meta?.input_draft || "") : "";
-  const sync = state.draftSync.get(agentId);
-  if (sync) sync.paused = false;
+  const sync = bucket.draftSync.get(agentId);
+  if (sync) sync.paused = workspaceId !== state.workspaceId;
   adoptInputDraft(agentId, store, revision, content);
-  if (sync && sync.sent !== sync.desired) void runDraftSync(agentId, sync);
-  if (state.selectedAgent === agentId) {
+  if (sync && !sync.paused && sync.sent !== sync.desired) void runDraftSync(agentId, sync);
+  if (workspaceId === state.workspaceId && state.selectedAgent === agentId) {
     requestAnimationFrame(() => {
-      if (state.selectedAgent === agentId && !store.pendingPromptSubmission) elements.input.focus();
+      if (state.workspaceId === workspaceId && state.selectedAgent === agentId && !store.pendingPromptSubmission) elements.input.focus();
     });
   }
   return true;
@@ -3731,10 +5147,12 @@ async function submitPrompt() {
   const displayContent = elements.input.value;
   const content = displayContent.trim();
   if (!content || !state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
+  const workspaceId = state.workspaceId;
   const agentId = state.selectedAgent;
   const store = currentStore();
   if (!store || store.pendingPromptSubmission) return;
   const pending = {
+    workspaceId,
     content,
     displayContent,
     afterEventId: promptSubmissionBoundary(agentMeta(), store),
@@ -3746,7 +5164,7 @@ async function submitPrompt() {
   renderComposer();
   await pauseDraftSyncForSubmission(agentId);
   try {
-    const response = await sendCommand({ command: "submit_user_prompt", agent_id: agentId, content });
+    const response = await sendCommand({ command: "submit_user_prompt", agent_id: agentId, content }, workspaceId);
     const revision = Number(response?.receipt?.prompt_submission_revision);
     const inputDraftRevision = Number(response?.receipt?.input_draft_revision);
     if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(inputDraftRevision)) {
@@ -3758,16 +5176,16 @@ async function submitPrompt() {
     store.inputDraftRevision = Math.max(store.inputDraftRevision, inputDraftRevision);
     if (pending.settled) return;
     pending.status = "accepted";
-    if (state.selectedAgent === agentId) renderComposer();
+    if (state.workspaceId === workspaceId && state.selectedAgent === agentId) renderComposer();
   } catch (error) {
     if (pending.settled) return;
     if (commandResultIsUnknown(error)) {
       pending.status = "confirming";
-      if (state.selectedAgent === agentId) renderComposer();
+      if (state.workspaceId === workspaceId && state.selectedAgent === agentId) renderComposer();
       return;
     }
     cancelPendingPromptSubmission(agentId, pending);
-    if (state.selectedAgent === agentId) renderComposer();
+    if (state.workspaceId === workspaceId && state.selectedAgent === agentId) renderComposer();
     toast(error.message, true);
   }
 }
@@ -3823,6 +5241,7 @@ function saveDraft() {
     let sync = state.draftSync.get(agentId);
     if (!sync) {
       sync = {
+        workspaceId: state.workspaceId,
         desired: content, sent: previous, sending: false, paused: false,
         inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
       };
@@ -3844,6 +5263,7 @@ function beginInputComposition() {
   }
   const content = elements.input.value;
   state.draftSync.set(agentId, {
+    workspaceId: state.workspaceId,
     desired: content, sent: content, sending: false, paused: false,
     inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
   });
@@ -3883,6 +5303,7 @@ function queueDraftUpdate(agentId, content) {
   let sync = state.draftSync.get(agentId);
   if (!sync) {
     sync = {
+      workspaceId: state.workspaceId,
       desired: content, sent: null, sending: false, paused: false,
       inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
     };
@@ -3894,16 +5315,21 @@ function queueDraftUpdate(agentId, content) {
 async function runDraftSync(agentId, sync) {
   if (sync.sending) return;
   clearDraftBatch(sync);
-  if (sync.paused || !state.connected
+  const workspaceId = sync.workspaceId || state.workspaceId;
+  sync.workspaceId = workspaceId;
+  const active = workspaceId === state.workspaceId;
+  if (sync.paused || !active || !state.connected
       || (sync.retryAfter && Date.now() < sync.retryAfter)) return;
+  const bucket = gatewayWorkspaceState(workspaceId);
   sync.sending = true;
   let failed = false;
   try {
     while (!sync.paused
+        && workspaceId === state.workspaceId
         && !(state.composing && state.selectedAgent === agentId)
         && sync.sent !== sync.desired) {
       const content = sync.desired;
-      const store = state.stores.get(agentId);
+      const store = bucket.stores.get(agentId);
       if (!store) return;
       const expectedRevision = store.inputDraftRevision;
       const flight = { expectedRevision, content };
@@ -3915,7 +5341,7 @@ async function runDraftSync(agentId, sync) {
           agent_id: agentId,
           expected_revision: expectedRevision,
           content,
-        }, { refresh: false });
+        }, workspaceId, { refresh: false });
       } finally {
         if (sync.inFlight === flight) sync.inFlight = null;
       }
@@ -3937,7 +5363,7 @@ async function runDraftSync(agentId, sync) {
     failed = true;
     sync.sent = null;
     sync.retryAfter = Date.now() + 1000;
-    if (state.connected && !sync.errorNotified) {
+    if (workspaceId === state.workspaceId && state.connected && !sync.errorNotified) {
       sync.errorNotified = true;
       toast(`输入同步失败：${error.message}`, true);
     }
@@ -3946,7 +5372,7 @@ async function runDraftSync(agentId, sync) {
     sync.sending = false;
     const waiters = sync.waiters.splice(0);
     waiters.forEach((resolve) => resolve());
-    if (!failed && state.connected && !sync.paused
+    if (!failed && workspaceId === state.workspaceId && state.connected && !sync.paused
         && !(state.composing && state.selectedAgent === agentId) && shouldRetry) {
       scheduleDraftSync(agentId, sync);
     }
@@ -3957,6 +5383,7 @@ async function pauseDraftSyncForSubmission(agentId) {
   let sync = state.draftSync.get(agentId);
   if (!sync) {
     sync = {
+      workspaceId: state.workspaceId,
       desired: "", sent: null, sending: false, paused: true,
       inFlight: null, pendingRemote: null, waiters: [], batchTimer: null,
     };
@@ -3976,33 +5403,31 @@ function restoreDraft() {
 }
 
 function flushDraftBeforePageCloses() {
-  const drafts = new Map();
-  for (const [agentId, sync] of state.draftSync) {
-    if (state.stores.get(agentId)?.pendingPromptSubmission) continue;
-    if (sync.sent !== sync.desired) drafts.set(agentId, sync.desired);
-  }
-  if (state.selectedAgent && agentMeta()?.kind !== "sub-agent"
-      && !currentStore()?.pendingPromptSubmission) {
-    drafts.set(state.selectedAgent, elements.input.value);
-  }
-  for (const [agentId, content] of drafts) {
-    const expectedRevision = state.stores.get(agentId)?.inputDraftRevision ?? 0;
-    const body = JSON.stringify({
-      command: "update_input_draft",
-      agent_id: agentId,
-      expected_revision: expectedRevision,
-      content,
-    });
-    try {
-      const data = typeof Blob === "function" ? new Blob([body], { type: "application/json" }) : null;
-      if (data && navigator.sendBeacon?.("/api/command", data)) continue;
-      void fetch("/api/command", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body,
-        keepalive: true,
+  captureActiveWorkspace();
+  for (const [workspaceId, bucket] of state.workspaceStates) {
+    const drafts = new Map();
+    for (const [agentId, sync] of bucket.draftSync) {
+      if (bucket.stores.get(agentId)?.pendingPromptSubmission) continue;
+      if (sync.sent !== sync.desired) drafts.set(agentId, sync.desired);
+    }
+    if (workspaceId === state.workspaceId && state.selectedAgent
+        && agentMeta()?.kind !== "sub-agent" && !currentStore()?.pendingPromptSubmission) {
+      drafts.set(state.selectedAgent, elements.input.value);
+    }
+    for (const [agentId, content] of drafts) {
+      const expectedRevision = bucket.stores.get(agentId)?.inputDraftRevision ?? 0;
+      const body = JSON.stringify({
+        command: "update_input_draft", agent_id: agentId, expected_revision: expectedRevision, content,
       });
-    } catch (_) {}
+      const url = frontendRuntime.apiPath("/api/command", workspaceId);
+      try {
+        const data = typeof Blob === "function" ? new Blob([body], { type: "application/json" }) : null;
+        if (data && navigator.sendBeacon?.(url, data)) continue;
+        void fetch(url, {
+          method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true,
+        });
+      } catch (_) {}
+    }
   }
 }
 
@@ -4103,8 +5528,16 @@ elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
 elements.connectionRetry.addEventListener("click", retryConnectionNow);
-elements.addAgent.addEventListener("click", () => { if (!sessionStartupLocked()) { closeMobileSidebar(); openAddAgent(); } });
-elements.openSettings.addEventListener("click", () => { closeMobileSidebar(); openEdbCacheSettings(); });
+elements.addAgent.addEventListener("click", () => { if (!sessionStartupLocked()) { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); } });
+if (runtimeCapabilities.multipleWorkspaces) {
+  elements.createWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("create"); });
+  elements.openWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("open"); });
+}
+elements.openSettings.addEventListener("click", () => {
+  closeMobileSidebar();
+  if (runtimeCapabilities.gatewaySettings) void openGatewaySettings();
+  else openEdbCacheSettings();
+});
 elements.mobileSidebarToggle.addEventListener("click", openMobileSidebar);
 elements.mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);
 if (typeof PORTRAIT_LAYOUT.addEventListener === "function") {
@@ -4117,6 +5550,12 @@ elements.deleteAgentMenu.addEventListener("click", () => {
   closeAgentMenu();
   closeMobileSidebar();
   if (menu) void openDeleteAgent(menu.agentId);
+});
+elements.closeWorkspaceMenu.addEventListener("click", () => {
+  const menu = state.workspaceMenu;
+  closeWorkspaceMenu();
+  closeMobileSidebar();
+  if (menu) void closeExternalWorkspace(menu.workspaceId);
 });
 elements.copyUserMessage.addEventListener("click", async () => {
   const menu = state.userMenu;
@@ -4172,10 +5611,10 @@ elements.input.addEventListener("keydown", (event) => {
     event.preventDefault(); escapeAction();
   }
 });
-elements.modalClose.addEventListener("click", closeModal);
-elements.modalCancel.addEventListener("click", closeModal);
+elements.modalClose.addEventListener("click", cancelModal);
+elements.modalCancel.addEventListener("click", cancelModal);
 elements.modalConfirm.addEventListener("click", confirmModal);
-elements.modalBackdrop.addEventListener("click", (event) => { if (event.target === elements.modalBackdrop) closeModal(); });
+elements.modalBackdrop.addEventListener("click", (event) => { if (event.target === elements.modalBackdrop) cancelModal(); });
 elements.drawerClose.addEventListener("click", closeChoiceDrawer);
 elements.drawerBackdrop.addEventListener("click", (event) => { if (event.target === elements.drawerBackdrop) closeChoiceDrawer(); });
 elements.contextDrawerClose.addEventListener("click", closeContextDrawer);
@@ -4198,14 +5637,16 @@ elements.compactSummaryBackdrop.addEventListener("click", (event) => { if (event
 document.addEventListener("click", (event) => {
   if (state.userMenu && !elements.userMessageMenu.contains(event.target)) closeUserMessageMenu();
   if (state.agentMenu && !elements.agentMenu.contains(event.target)) closeAgentMenu();
+  if (state.workspaceMenu && !elements.workspaceMenu.contains(event.target)) closeWorkspaceMenu();
 });
 window.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
-  if (!elements.compactSummaryBackdrop.classList.contains("hidden")) closeCompactSummary(); else if (state.contextDrawerOpen) closeContextDrawer(); else if (state.drawer) closeChoiceDrawer(); else if (state.modal) closeModal(); else if (state.userMenu) closeUserMessageMenu(); else if (state.agentMenu) closeAgentMenu();
+  if (!elements.compactSummaryBackdrop.classList.contains("hidden")) closeCompactSummary(); else if (state.contextDrawerOpen) closeContextDrawer(); else if (state.drawer) closeChoiceDrawer(); else if (state.modal) cancelModal(); else if (state.userMenu) closeUserMessageMenu(); else if (state.agentMenu) closeAgentMenu(); else if (state.workspaceMenu) closeWorkspaceMenu();
 });
 window.addEventListener("resize", () => {
   closeUserMessageMenu();
   closeAgentMenu();
+  closeWorkspaceMenu();
   positionToastRegion();
   updateScrollToBottomButton();
   transcriptVirtualizer?.layoutChanged();
@@ -4216,6 +5657,7 @@ window.addEventListener("resize", () => {
 });
 window.addEventListener("pagehide", () => {
   state.pageClosing = true;
+  cancelBackgroundWorkspaceSync();
   stopUiAnimation();
   deactivateSessionTerminalView();
   deactivateRemoteControlView();
@@ -4225,6 +5667,7 @@ window.addEventListener("pageshow", () => {
   state.pageClosing = false;
   syncUiAnimationScheduler();
   if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
+  scheduleBackgroundWorkspaceSync(0);
   if (state.view.kind === "session-terminal" || state.view.kind === "remote-control") renderTabs();
 });
 document.addEventListener("visibilitychange", () => {
@@ -4255,6 +5698,7 @@ elements.transcript.addEventListener("scroll", () => {
   transcriptVirtualizer.noteScroll();
 }, { passive: true });
 elements.agents.addEventListener("scroll", closeAgentMenu, { passive: true });
+elements.workspaceList.addEventListener("scroll", closeWorkspaceMenu, { passive: true });
 elements.transcript.addEventListener("wheel", suspendTranscriptAutoFollow, { passive: true });
 if (typeof window.PointerEvent === "function") {
   elements.transcript.addEventListener("pointerdown", beginTranscriptUserInteraction, { passive: true });
@@ -4331,6 +5775,11 @@ function refreshUiAnimation() {
     });
   }
   syncUiAnimationScheduler();
+}
+if (runtimeCapabilities.multipleWorkspaces) {
+  setInterval(() => {
+    if (state.authenticated && !state.pageClosing) void refreshGatewayState();
+  }, 1500);
 }
 
 initializeAuthentication();

@@ -5,16 +5,18 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { createTranscriptBottomFollower } = require("../src/webui/transcript.js");
 require("../src/webui/edb-cache.js");
+const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 
 function loadPromptConfirmationRuntime() {
+  installDirectFrontendRuntime();
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI prompt-confirmation runtime");
   const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
     return { beginConfirmedPromptRender };`);
   return factory(
-    { querySelector: () => null },
+    { querySelector: () => null, documentElement: { classList: { toggle() {} } } },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
   );

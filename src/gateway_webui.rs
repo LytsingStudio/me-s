@@ -22,9 +22,10 @@ use crate::{
 
 pub const DEFAULT_GATEWAY_PORT: u16 = 38200;
 pub const GATEWAY_BIND_ADDRESS: &str = "0.0.0.0";
-const INDEX_HTML: &str = include_str!("gateway_webui/index.html");
-const APP_JS: &str = include_str!("gateway_webui/app.js");
-const STYLE_CSS: &str = include_str!("gateway_webui/style.css");
+const INDEX_HTML: &str = include_str!("webui/index.html");
+const APP_JS: &str = include_str!("webui/app.js");
+const STYLE_CSS: &str = include_str!("webui/style.css");
+const RUNTIME_JS: &str = include_str!("gateway_webui/runtime.js");
 const FILE_MANAGER_JS: &str = include_str!("webui/file-manager.js");
 const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
@@ -186,6 +187,9 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
         }
         (&Method::Get, "/app.js") => {
             return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
+        }
+        (&Method::Get, "/runtime.js") => {
+            return Ok(text_response("text/javascript; charset=utf-8", RUNTIME_JS));
         }
         (&Method::Get, "/file-manager.js") => {
             return Ok(text_response(

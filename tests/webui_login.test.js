@@ -37,6 +37,7 @@ function loadShowLogin(relative) {
   const factory = new Function(
     "state", "elements", "deactivateSessionTerminalView", "stopHttpPolling",
     "cancelBackgroundWorkspaceSync", "setConnectionPhase", "hideConnectionOverlay",
+    "runtimeCapabilities", "frontendRuntime",
     `${source.slice(start, end)}\nreturn showLogin;`,
   );
   const showLogin = factory(
@@ -47,6 +48,8 @@ function loadShowLogin(relative) {
     () => { counters.background += 1; },
     () => { counters.phase += 1; },
     () => { counters.overlay += 1; },
+    { targetConfiguration: false },
+    { endpoint: "" },
   );
   return { showLogin, state, elements, counters };
 }
@@ -65,7 +68,7 @@ function loadSubmitLogin(relative, browserPort = 45182) {
   };
   const factory = new Function(
     "BROWSER_PORT", "elements", "api", "showApplication", "restoreDraft",
-    "startHttpPolling", "initializeGateway", "showLogin",
+    "startHttpPolling", "initializeGateway", "showLogin", "runtimeCapabilities", "frontendRuntime",
     `${source.slice(start, end)}\nreturn submitLogin;`,
   );
   const submitLogin = factory(
@@ -77,51 +80,49 @@ function loadSubmitLogin(relative, browserPort = 45182) {
     () => {},
     async () => {},
     () => {},
+    { targetConfiguration: false },
+    { endpoint: "" },
   );
   return { submitLogin, elements, calls };
 }
 
 describe("WebUI login transition", () => {
-  for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
-    test(`${relative} makes repeated 401 login transitions idempotent`, () => {
-      const runtime = loadShowLogin(relative);
-      runtime.showLogin("登录已失效，请重新登录");
-      expect(runtime.state.authenticated).toBe(false);
-      expect(runtime.elements.app.classList.contains("hidden")).toBe(true);
-      expect(runtime.elements.loginScreen.classList.contains("hidden")).toBe(false);
-      expect(runtime.elements.loginError.textContent).toBe("登录已失效，请重新登录");
-      expect(runtime.counters.terminal).toBe(1);
-      expect(runtime.counters.polling).toBe(1);
-      expect(runtime.counters.background).toBe(relative.includes("gateway_webui") ? 1 : 0);
-      expect(runtime.counters.phase).toBe(1);
-      expect(runtime.counters.overlay).toBe(1);
-      expect(runtime.counters.focus).toBe(1);
+  test("the shared core makes repeated 401 login transitions idempotent", () => {
+    const runtime = loadShowLogin("../src/webui/app.js");
+    runtime.showLogin("登录已失效，请重新登录");
+    expect(runtime.state.authenticated).toBe(false);
+    expect(runtime.elements.app.classList.contains("hidden")).toBe(true);
+    expect(runtime.elements.loginScreen.classList.contains("hidden")).toBe(false);
+    expect(runtime.elements.loginError.textContent).toBe("登录已失效，请重新登录");
+    expect(runtime.counters.terminal).toBe(1);
+    expect(runtime.counters.polling).toBe(1);
+    expect(runtime.counters.background).toBe(1);
+    expect(runtime.counters.phase).toBe(1);
+    expect(runtime.counters.overlay).toBe(1);
+    expect(runtime.counters.focus).toBe(1);
 
-      runtime.elements.loginPassword.value = "a";
-      runtime.showLogin("另一个在途请求也返回了 401");
-      expect(runtime.elements.loginError.textContent).toBe("另一个在途请求也返回了 401");
-      expect(runtime.elements.loginPassword.value).toBe("a");
-      expect(runtime.counters.terminal).toBe(1);
-      expect(runtime.counters.polling).toBe(1);
-      expect(runtime.counters.background).toBe(relative.includes("gateway_webui") ? 1 : 0);
-      expect(runtime.counters.phase).toBe(1);
-      expect(runtime.counters.overlay).toBe(1);
-      expect(runtime.counters.focus).toBe(1);
-    });
-  }
+    runtime.elements.loginPassword.value = "a";
+    runtime.showLogin("另一个在途请求也返回了 401");
+    expect(runtime.elements.loginError.textContent).toBe("另一个在途请求也返回了 401");
+    expect(runtime.elements.loginPassword.value).toBe("a");
+    expect(runtime.counters.terminal).toBe(1);
+    expect(runtime.counters.polling).toBe(1);
+    expect(runtime.counters.background).toBe(1);
+    expect(runtime.counters.phase).toBe(1);
+    expect(runtime.counters.overlay).toBe(1);
+    expect(runtime.counters.focus).toBe(1);
+  });
 
-  for (const relative of ["../src/webui/app.js", "../src/gateway_webui/app.js"]) {
-    test(`${relative} submits the browser-visible port with the passkey`, async () => {
-      const runtime = loadSubmitLogin(relative);
-      await runtime.submitLogin({ preventDefault() {} });
-      expect(runtime.calls).toHaveLength(1);
-      expect(runtime.calls[0].path).toBe("/api/auth/login");
-      expect(JSON.parse(runtime.calls[0].options.body)).toEqual({
-        password: "correct horse",
-        browser_port: 45182,
-      });
-      expect(runtime.elements.loginPassword.value).toBe("");
-      expect(runtime.elements.loginSubmit.disabled).toBe(false);
+  test("the shared core submits the browser-visible port with the passkey", async () => {
+    const runtime = loadSubmitLogin("../src/webui/app.js");
+    await runtime.submitLogin({ preventDefault() {} });
+    expect(runtime.calls).toHaveLength(1);
+    expect(runtime.calls[0].path).toBe("/api/auth/login");
+    expect(JSON.parse(runtime.calls[0].options.body)).toEqual({
+      password: "correct horse",
+      browser_port: 45182,
     });
-  }
+    expect(runtime.elements.loginPassword.value).toBe("");
+    expect(runtime.elements.loginSubmit.disabled).toBe(false);
+  });
 });

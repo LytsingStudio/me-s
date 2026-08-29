@@ -124,45 +124,35 @@ describe("shared WebUI themes", () => {
     expect(announcements.at(-1)).toBe("已切换至浅色模式");
   });
 
-  test("loads the shared no-flash runtime and all eighteen palettes in both WebUIs", () => {
+  test("loads the shared no-flash runtime and all eighteen palettes", () => {
     const themeStyles = readFileSync(join(import.meta.dir, "../src/webui/theme.css"), "utf8");
-    const singleIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
-    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
-    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
-    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    const singleApp = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const gatewayApp = readFileSync(join(import.meta.dir, "../src/gateway_webui/app.js"), "utf8");
-    const singleServer = readFileSync(join(import.meta.dir, "../src/webui.rs"), "utf8");
+    const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const app = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const directServer = readFileSync(join(import.meta.dir, "../src/webui.rs"), "utf8");
     const gatewayServer = readFileSync(join(import.meta.dir, "../src/gateway_webui.rs"), "utf8");
 
-    for (const index of [singleIndex, gatewayIndex]) {
-      expect(index.indexOf('<script src="/theme.js"></script>')).toBeLessThan(index.indexOf('href="/style.css"'));
-      expect(index.indexOf('href="/style.css"')).toBeLessThan(index.indexOf('href="/theme.css"'));
-      expect(index).not.toContain('<header class="brand">');
-      expect(index).not.toContain('id="connection-label"');
-      const sidebarFooterStart = index.indexOf('<footer class="sidebar-footer">');
-      const sidebarFooter = index.slice(sidebarFooterStart, index.indexOf("</footer>", sidebarFooterStart));
-      expect(sidebarFooter).toContain('class="sidebar-appearance" role="group" aria-label="外观设置"');
-      expect(sidebarFooter).toContain('id="theme-cycle" class="theme-control theme-cycle"');
-      expect(sidebarFooter).toContain('class="theme-icon theme-icon-shirt"');
-      expect(sidebarFooter).toContain('id="theme-mode" class="theme-control theme-mode"');
-      expect(sidebarFooter.indexOf('id="theme-cycle"')).toBeLessThan(sidebarFooter.indexOf('id="theme-mode"'));
-      expect(sidebarFooter).toContain('class="theme-icon theme-icon-sun"');
-      expect(sidebarFooter).toContain('class="theme-icon theme-icon-moon"');
-    }
-    expect(singleIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-scroll">\n        <div class="sidebar-heading">');
-    expect(gatewayIndex).toContain('<aside class="sidebar">\n      <div class="sidebar-scroll">\n        <section class="sidebar-section workspace-section">');
-    for (const styles of [singleStyles, gatewayStyles]) {
-      expect(styles).not.toContain(".brand {");
-      expect(styles).not.toContain(".brand-copy");
-      expect(styles).not.toContain(".brand strong");
-      expect(styles).not.toContain(".brand span");
-      expect(styles).toContain(".brand-mark {");
-    }
-    for (const app of [singleApp, gatewayApp]) {
-      expect(app).toContain("globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode");
-    }
-    for (const server of [singleServer, gatewayServer]) {
+    expect(index.indexOf('<script src="/theme.js"></script>')).toBeLessThan(index.indexOf('href="/style.css"'));
+    expect(index.indexOf('href="/style.css"')).toBeLessThan(index.indexOf('href="/theme.css"'));
+    expect(index).not.toContain('<header class="brand">');
+    expect(index).not.toContain('id="connection-label"');
+    const sidebarFooterStart = index.indexOf('<footer class="sidebar-footer">');
+    const sidebarFooter = index.slice(sidebarFooterStart, index.indexOf("</footer>", sidebarFooterStart));
+    expect(sidebarFooter).toContain('class="sidebar-appearance" role="group" aria-label="外观设置"');
+    expect(sidebarFooter).toContain('id="theme-cycle" class="theme-control theme-cycle"');
+    expect(sidebarFooter).toContain('class="theme-icon theme-icon-shirt"');
+    expect(sidebarFooter).toContain('id="theme-mode" class="theme-control theme-mode"');
+    expect(sidebarFooter.indexOf('id="theme-cycle"')).toBeLessThan(sidebarFooter.indexOf('id="theme-mode"'));
+    expect(sidebarFooter).toContain('class="theme-icon theme-icon-sun"');
+    expect(sidebarFooter).toContain('class="theme-icon theme-icon-moon"');
+    expect(index).toContain('<aside class="sidebar">\n      <div class="sidebar-scroll">\n        <section class="sidebar-section workspace-section" data-multiple-workspaces>');
+    expect(styles).not.toContain(".brand {");
+    expect(styles).not.toContain(".brand-copy");
+    expect(styles).not.toContain(".brand strong");
+    expect(styles).not.toContain(".brand span");
+    expect(styles).toContain(".brand-mark {");
+    expect(app).toContain("globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode");
+    for (const server of [directServer, gatewayServer]) {
       expect(server).toContain('include_str!("webui/theme.js")');
       expect(server).toContain('include_str!("webui/theme.css")');
       expect(server).toContain('(&Method::Get, "/theme.js")');
@@ -176,8 +166,8 @@ describe("shared WebUI themes", () => {
   });
 
   test("keeps gateway work and chat in one natural scrolling flow above fixed controls", () => {
-    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/gateway_webui/index.html"), "utf8");
-    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
+    const gatewayIndex = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     expect(gatewayIndex.indexOf('id="workspace-list"')).toBeLessThan(gatewayIndex.indexOf('class="sidebar-divider"'));
     expect(gatewayIndex.indexOf('class="sidebar-divider"')).toBeLessThan(gatewayIndex.indexOf('class="sidebar-heading chat-heading"'));
     expect(gatewayIndex.indexOf('class="sidebar-heading chat-heading"')).toBeLessThan(gatewayIndex.indexOf('<footer class="sidebar-footer">'));
@@ -188,25 +178,22 @@ describe("shared WebUI themes", () => {
     expect(gatewayStyles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%; flex: 0 0 auto;");
   });
 
-  test("themes common and gateway-only surfaces through semantic tokens", () => {
-    const singleStyles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
-    const gatewayStyles = readFileSync(join(import.meta.dir, "../src/gateway_webui/style.css"), "utf8");
-    for (const styles of [singleStyles, gatewayStyles]) {
-      expect(styles).toContain("background: var(--sidebar);");
-      expect(styles).toContain("background: var(--terminal-bg);");
-      expect(styles).toContain("background: var(--modal-backdrop-bg);");
-      expect(styles).toContain("background: linear-gradient(135deg, var(--brand-start), var(--brand-mid), var(--brand-end));");
-      expect(styles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%;");
-      expect(styles).toContain(".sidebar-footer > #environment-footer { min-width: 0; flex: 1 1 0;");
-      expect(styles).toContain(".sidebar-appearance { display: flex;");
-      expect(styles).toContain(".theme-control { display: grid;");
-      expect(styles).toContain(".status-model-selector { display: inline-flex; min-width: 0; max-width: 100%;");
-      expect(styles).toContain("#status-model { display: block; min-width: 0; flex: 0 1 auto; padding-right: 2px;");
-      expect(styles).toContain(".theme-cycle:focus-visible, .theme-mode:focus-visible");
-    }
-    expect(gatewayStyles).toContain("background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%);");
-    expect(gatewayStyles).toContain("background: var(--directory-table-bg);");
-    expect(gatewayStyles).toContain("background: var(--panel); color: var(--text);");
+  test("themes common and capability-gated surfaces through semantic tokens", () => {
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    expect(styles).toContain("background: var(--sidebar);");
+    expect(styles).toContain("background: var(--terminal-bg);");
+    expect(styles).toContain("background: var(--modal-backdrop-bg);");
+    expect(styles).toContain("background: linear-gradient(135deg, var(--brand-start), var(--brand-mid), var(--brand-end));");
+    expect(styles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%;");
+    expect(styles).toContain(".sidebar-footer > #environment-footer { min-width: 0; flex: 1 1 0;");
+    expect(styles).toContain(".sidebar-appearance { display: flex;");
+    expect(styles).toContain(".theme-control { display: grid;");
+    expect(styles).toContain(".status-model-selector { display: inline-flex; min-width: 0; max-width: 100%;");
+    expect(styles).toContain("#status-model { display: block; min-width: 0; flex: 0 1 auto; padding-right: 2px;");
+    expect(styles).toContain(".theme-cycle:focus-visible, .theme-mode:focus-visible");
+    expect(styles).toContain("background: linear-gradient(180deg, var(--directory-modal-top) 0%, var(--directory-modal-bottom) 100%);");
+    expect(styles).toContain("background: var(--directory-table-bg);");
+    expect(styles).toContain("background: var(--panel); color: var(--text);");
   });
 
   test("keeps text and primary actions readable in every palette", () => {

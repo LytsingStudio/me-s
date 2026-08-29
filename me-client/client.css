@@ -1,0 +1,24 @@
+html.me-client,
+html.me-client body {
+  overscroll-behavior: none;
+}
+
+.me-client .login-card {
+  width: min(420px, calc(100vw - 32px));
+}
+
+.client-endpoint-field {
+  display: grid;
+  gap: 8px;
+}
+
+.client-endpoint-field input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.me-client #environment-footer {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

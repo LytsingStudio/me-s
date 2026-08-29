@@ -341,7 +341,7 @@
       if (!this.available) {
         const unavailable = documentValue.createElement("div");
         unavailable.className = "edb-cache-empty";
-        unavailable.textContent = this.disabledReason || "当前浏览器不支持本地 EDB 缓存。";
+        unavailable.textContent = this.disabledReason || `${options.storageLabel || "当前浏览器"}不支持本地 EDB 缓存。`;
         section.appendChild(unavailable);
         return;
       }
@@ -351,7 +351,7 @@
       if (!entries.length) {
         const empty = documentValue.createElement("div");
         empty.className = "edb-cache-empty";
-        empty.textContent = "当前浏览器还没有会话缓存。";
+        empty.textContent = `${options.storageLabel || "当前浏览器"}还没有会话缓存。`;
         section.appendChild(empty);
         return;
       }

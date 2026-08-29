@@ -16,6 +16,7 @@
       this.container = options.container;
       this.request = options.request;
       this.downloadUrl = options.downloadUrl;
+      this.downloadFile = options.downloadFile || null;
       this.writeClipboard = options.writeClipboard;
       this.onUnauthorized = options.onUnauthorized || (() => {});
       this.notify = options.notify || (() => {});
@@ -702,13 +703,18 @@
         view.download.done = download.size_bytes || 1;
         view.download.total = download.size_bytes || 1;
         if (this.state === view) this.renderTask();
-        const anchor = document.createElement("a");
-        anchor.href = this.downloadUrl(download.download_id, identity);
-        anchor.download = download.filename;
-        anchor.rel = "noopener";
-        document.body.append(anchor);
-        anchor.click();
-        anchor.remove();
+        if (this.downloadFile) {
+          const saved = await this.downloadFile(download, identity);
+          this.notify(`已保存到 ${saved.path}`, "success");
+        } else {
+          const anchor = document.createElement("a");
+          anchor.href = this.downloadUrl(download.download_id, identity);
+          anchor.download = download.filename;
+          anchor.rel = "noopener";
+          document.body.append(anchor);
+          anchor.click();
+          anchor.remove();
+        }
         view.download = null;
         if (this.state === view) this.renderTask();
       } catch (error) {
