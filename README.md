@@ -1,9 +1,10 @@
 # ME
 
-ME 是一个简单、轻量的本地 AI Agent 产品，尤其适合需要连续工作较长时间的任务。它由同一版本的两个可执行程序组成：
+ME 是一个简单、轻量的本地 AI Agent 产品，尤其适合需要连续工作较长时间的任务。一个 ME 版本由三个职责独立的程序组成：
 
 - `me-s`：面向单个工作区的直接入口，在当前目录启动 TUI 与 WebUI；
-- `me-gateway`：面向多个工作区的 Web 工作台，负责打开、恢复和关闭各个工作区。
+- `me-gateway`：面向多个工作区的 Web 工作台，负责打开、恢复和关闭各个工作区；
+- `me-client`：可选桌面客户端，连接远程 `me-gateway`，使用与浏览器 WebUI 相同的产品界面。
 
 ME 可以操作文件、运行命令、浏览网页、查看图片，并支持多个 Agent 协作。不同界面可以同时观察同一个运行中的工作区，实时同步会话、输入草稿和执行状态。
 
@@ -13,9 +14,9 @@ ME 本身也是开发者使用 me-s，通过 vibe coding 协作开发的项目�
 
 ## 特点
 
-- **两种使用入口**：既可在项目目录直接运行 `me-s`，也可通过 `me-gateway` 管理多个工作区。
+- **三种使用入口**：既可在项目目录直接运行 `me-s`，也可通过 `me-gateway` 管理多个工作区，或使用 `me-client` 连接 Gateway。
 - **适合长任务**：可记录工作计划和进展，并在上下文接近上限时进行压缩。
-- **多端同步**：`me-s` 同时提供 TUI 与 WebUI；Gateway WebUI 可从一个页面访问多个工作区。
+- **多端同步**：`me-s` 同时提供 TUI 与 WebUI；Gateway WebUI 与 me-client 可从一个界面访问多个工作区。
 - **多 Agent 协作**：支持普通会话，以及 Manager 与 Worker 协作完成复杂工作。
 - **完整的本地工具**：支持终端、文件、网页、图片等常用操作。
 - **真实浏览器**：可以访问实际网页，必要时允许用户临时接管浏览器。
@@ -24,12 +25,28 @@ ME 本身也是开发者使用 me-s，通过 vibe coding 协作开发的项目�
 
 ## 安装
 
-预编译文件发布在 [GitHub Releases](https://github.com/LytsingStudio/me-s/releases)。安装脚本会自动识别系统与处理器架构，下载并校验同一版本的 `me-s` 与 `me-gateway`，然后一起安装。任何必要资产校验或部署失败时，安装不会宣称成功。
+预编译版本发布在 [GitHub Releases](https://github.com/LytsingStudio/me-s/releases)。每个平台安装包都包含同一版本的 `me-s`、`me-gateway` 和 `me-client`；引导脚本只下载当前平台的一个完整产品包与 `SHA256SUMS`，验证完整包后再调用系统安装器。
 
 ### macOS
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/releases/latest/download/install.sh | sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/LytsingStudio/me-s/s/install.sh | sh
+```
+
+一个通用安装包同时支持 Apple Silicon 与 Intel，固定安装到：
+
+```text
+/usr/local/bin/me-s
+/usr/local/bin/me-gateway
+/Applications/ME Client.app
+```
+
+安装过程中会请求管理员权限。macOS 产品包不支持通过 `ME_INSTALL_DIR` 更改安装位置。
+
+### Linux
+
+```bash
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/LytsingStudio/me-s/s/install.sh | sh
 ```
 
 默认安装到：
@@ -37,44 +54,40 @@ curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/rele
 ```text
 /usr/local/bin/me-s
 /usr/local/bin/me-gateway
+/usr/local/bin/me-client
 ```
 
-需要时脚本会请求管理员权限。如需安装到其他目录：
+x86_64 与 arm64 分别使用各自的完整 `.run` 包。`me-client` 是 AppImage 客户端入口；安装程序不会启动图形界面，因此无桌面环境的服务器仍可正常安装和使用 `me-s`、`me-gateway`。CLI 程序兼容 glibc 2.17 及以上系统。
+
+如需安装到其他目录：
 
 ```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/releases/latest/download/install.sh | ME_INSTALL_DIR="$HOME/.local/bin" sh
+curl --proto '=https' --tlsv1.2 -fsSL https://raw.githubusercontent.com/LytsingStudio/me-s/s/install.sh | ME_INSTALL_DIR="$HOME/.local/bin" sh
 ```
-
-### Linux
-
-```bash
-curl --proto '=https' --tlsv1.2 -fsSL https://github.com/LytsingStudio/me-s/releases/latest/download/install.sh | sh
-```
-
-默认安装到 `/usr/local/bin/me-s` 与 `/usr/local/bin/me-gateway`。Linux 版本兼容 glibc 2.17 及以上系统。
 
 ### Windows
 
 在 PowerShell 中执行：
 
 ```powershell
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://github.com/LytsingStudio/me-s/releases/latest/download/install.ps1 | iex
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12; irm https://raw.githubusercontent.com/LytsingStudio/me-s/s/install.ps1 | iex
 ```
 
-脚本默认安装到：
+x64 安装程序固定使用当前用户目录：
 
 ```text
-%LOCALAPPDATA%\Programs\me-s\me-s.exe
-%LOCALAPPDATA%\Programs\me-s\me-gateway.exe
+%LOCALAPPDATA%\Programs\ME\me-s.exe
+%LOCALAPPDATA%\Programs\ME\me-gateway.exe
+%LOCALAPPDATA%\Programs\ME\me-client.exe
 ```
 
-安装目录会加入用户 `PATH`。如果当前窗口尚未识别命令，请重新打开终端。
+安装目录会加入用户 `PATH`，开始菜单会创建 ME Client 与卸载入口。如果当前窗口尚未识别命令，请重新打开终端。
 
 安装 ME 不会覆盖或删除已有的 `me`/`me.exe`。旧 `me` 与当前 ME 可以同时存在，并共同使用现有的 me 全局配置目录和工作区格式。
 
 ### 从源码构建
 
-需要安装 Rust：
+构建两个 CLI 程序需要 Rust：
 
 ```bash
 git clone https://github.com/LytsingStudio/me-s.git
@@ -82,16 +95,17 @@ cd me-s
 cargo build --locked --release --bins
 ```
 
-构建产物：
+产物位于 `target/release/me-s` 与 `target/release/me-gateway`。构建桌面客户端还需要 Bun 与 Tauri 的平台依赖：
 
-```text
-target/release/me-s
-target/release/me-gateway
+```bash
+cd me-client
+bun run build
+bunx @tauri-apps/cli@2.11.3 build
 ```
 
 ## 首次初始化
 
-两个入口共享同一份全局模型配置。首次使用前先执行：
+三个程序共享同一份全局模型配置。首次使用前先执行：
 
 ```bash
 me-s init
@@ -167,6 +181,17 @@ Gateway 设置页直接编辑与 `me-s` 相同的全局模型配置。已有 inl
 
 保存设置不会热更新已经运行的工作区。重启 `me-gateway` 后，新启动的工作区会读取新配置。
 
+## 使用 me-client
+
+`me-client` 是可选的 Gateway 桌面前端。启动后输入目标 `me-gateway` 地址和访问密码即可连接：
+
+- macOS：打开 `/Applications/ME Client.app`；
+- Windows：从开始菜单打开 **ME Client**，或运行安装目录中的 `me-client.exe`；
+- Linux：运行 `me-client`。
+
+客户端只负责连接与呈现，不会启动本机 `me-s`、`me-gateway`、Agent、模型或工具。关闭、断开或崩溃都不会停止远端 Gateway 或工作区。不能安装客户端时，仍可直接使用 me-gateway 浏览器 WebUI。
+
+
 ## 工作模式
 
 创建新会话时可以选择：
@@ -214,7 +239,7 @@ TUI 常用快捷键：
 - `/clear`：清空当前上下文；
 - `/rewind`：回到之前的位置。
 
-`me-s` WebUI 与 Gateway WebUI 都提供对应的会话、模型、上下文、终端和多 Agent 操作。两套页面布局可以不同，但对同一工作区消息历史的解释保持一致。
+`me-s` WebUI、Gateway WebUI 与 me-client 直接复用同一权威前端核心，因此会话、渲染和交互行为保持一致；Gateway 只通过薄运行时适配增加多工作区与宿主管理入口。
 
 ## 常用 CLI
 
@@ -251,9 +276,9 @@ me-s update
 me-gateway update
 ```
 
-更新器会下载当前平台同一 Release 的 `me-s`、`me-gateway` 与 `SHA256SUMS`；两项都通过摘要校验、能够执行并精确报告同一 Release 版本后才部署。Unix 使用同目录暂存、备份和失败回滚；Windows 在发起程序退出后由辅助进程替换两个程序，失败时恢复旧版本并写入安装目录中的 `.me-update-error.log`。
+更新器会解析最新公开 ME Release，选择当前系统与架构对应的一个完整产品包，下载 `SHA256SUMS` 并验证整包，然后调用平台安装器一起升级或修复 `me-s`、`me-gateway` 和 `me-client`。macOS 使用通用 pkg，Linux 使用对应架构的 `.run`，Windows 在发起命令的进程退出后静默运行 NSIS 安装器。
 
-如果当前版本已经是 latest，但两个程序缺失或版本不一致，update 会重新下载并修复完整安装。更新和安装都不会修改全局配置、工作区或已有 `me`/`me.exe`。
+即使版本号已经是 latest，只要任一 CLI 缺失、两项 CLI 没有精确报告当前产品版本，或客户端文件缺失，update 都会执行同版本修复。安装与更新不会修改全局模型配置、凭据、工作区 `.me`、EDB 或 Gateway 远端资源。
 
 ## 配置模型
 
@@ -309,11 +334,25 @@ Codex OAuth 不需要手写预设。运行 `me-s codex login` 后，可用模型
 ```bash
 cargo fmt --all -- --check
 cargo test --all-targets
-bun test tests/gateway_webui.test.js tests/webui_*.test.js
-bash tests/install_scripts.sh
+bun test tests/gateway_webui.test.js tests/webui_*.test.js tests/me_client.test.js
+sh tests/install_scripts.sh
 ```
 
-项目的跨平台 Release 由仓库中的 `release.sh` 在 macOS 本地构建并发布。一次 Release 同时包含五个平台的 `me-s` 与 `me-gateway`。
+跨平台 Release 完全由 Apple Silicon macOS 主机本地构建，不使用 GitHub Actions 或外部 Windows 构建机。正式构建需要 Rust 与 Bun、Docker Buildx、LLVM、`cargo-xwin`、NSIS `makensis` 和 7-Zip：
+
+- macOS：原生构建 arm64/x86_64 CLI 与 Tauri universal App，再生成一个 pkg；
+- Windows：通过 `cargo-xwin`/LLVM 交叉构建 MSVC ABI x64 的三个 PE 程序，再由 macOS `makensis` 生成 NSIS setup；
+- Linux：通过本机 Docker Buildx 的 `linux/amd64` 与 `linux/arm64` 环境分别构建 CLI、AppImage 和 `.run`。
+
+开发过程中可执行 `./release.sh --build-only` 只生成 `dist/`。正式执行 `./release.sh` 还会验证干净且已推送的 `s` 分支、统一产品版本、tag/Release 不存在；只有四个包全部构建完并通过文件大小、格式、架构、静态包内容与 SHA-256 检查后，才创建 tag 和 GitHub Release。构建验收不会运行 Windows/Linux 目标程序、AppImage、`.run` 或安装器。Release 恰好包含：
+
+```text
+ME-macos-universal.pkg
+ME-windows-x86_64-setup.exe
+ME-linux-x86_64.run
+ME-linux-arm64.run
+SHA256SUMS
+```
 
 ## License
 

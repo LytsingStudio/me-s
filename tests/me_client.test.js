@@ -1,7 +1,8 @@
 "use strict";
 
 const { describe, expect, test } = require("bun:test");
-const { readFileSync } = require("node:fs");
+const { existsSync, readFileSync } = require("node:fs");
+const { execFileSync } = require("node:child_process");
 const { join } = require("node:path");
 
 function loadClientRuntime() {
@@ -189,5 +190,65 @@ describe("ME Client native adapter", () => {
     expect(shared).toContain("store.events.push(...events)");
     expect(shared).not.toContain("materializeClientAgentStore");
     expect(shared).not.toContain("releaseClientAgentStore");
+  });
+
+  test("locks one product version and one complete package per release target", () => {
+    const root = join(import.meta.dir, "..");
+    const productVersion = execFileSync(
+      "node", [join(root, "scripts/product-version.cjs"), "--print"],
+      { cwd: root, encoding: "utf8" },
+    ).trim();
+    const packageJson = JSON.parse(readFileSync(join(root, "me-client/package.json"), "utf8"));
+    const tauriConfig = JSON.parse(readFileSync(join(root, "me-client/src-tauri/tauri.conf.json"), "utf8"));
+    const clientCargo = readFileSync(join(root, "me-client/src-tauri/Cargo.toml"), "utf8");
+    const clientLock = readFileSync(join(root, "me-client/src-tauri/Cargo.lock"), "utf8");
+    const clientMain = readFileSync(join(root, "me-client/src-tauri/src/main.rs"), "utf8");
+    expect(packageJson.version).toBe(productVersion);
+    expect(tauriConfig.version).toBe(productVersion);
+    expect(clientCargo).toMatch(new RegExp(`^version = "${productVersion.replaceAll(".", "\\.")}"$`, "m"));
+    expect(clientLock).toContain(`name = "me-client"\nversion = "${productVersion}"`);
+    expect(clientMain).toContain('argument == "version" || argument == "--version"');
+    expect(clientMain).toContain('println!("me-client {}", env!("CARGO_PKG_VERSION"))');
+
+    const release = readFileSync(join(root, "release.sh"), "utf8");
+    const linuxDockerfile = readFileSync(join(root, "packaging/linux/Dockerfile"), "utf8");
+    const linuxBuilder = readFileSync(join(root, "packaging/linux/build-container.sh"), "utf8");
+    const runBuilder = readFileSync(join(root, "packaging/linux/build-run.sh"), "utf8");
+    const windowsBuilder = readFileSync(join(root, "packaging/windows/build-installer.sh"), "utf8");
+    const verifier = readFileSync(join(root, "scripts/verify-release-artifacts.sh"), "utf8");
+    const unixInstall = readFileSync(join(root, "install.sh"), "utf8");
+    const windowsInstall = readFileSync(join(root, "install.ps1"), "utf8");
+    const updater = readFileSync(join(root, "src/updater.rs"), "utf8");
+    const packageAssets = [
+      "ME-macos-universal.pkg",
+      "ME-windows-x86_64-setup.exe",
+      "ME-linux-x86_64.run",
+      "ME-linux-arm64.run",
+    ];
+    expect(existsSync(join(root, ".github/workflows/release.yml"))).toBe(false);
+    for (const asset of packageAssets) {
+      expect(release).toContain(asset);
+      expect(verifier).toContain(asset);
+      expect(updater).toContain(asset);
+    }
+    expect(release).toContain("cargo xwin build");
+    expect(release).toContain("packaging/linux/build-container.sh");
+    expect(release).toContain("scripts/verify-release-artifacts.sh");
+    expect(release).toContain("gh release create");
+    expect(release).not.toMatch(/gh (?:workflow|run)|GitHub Actions|release\.yml/);
+    expect(linuxDockerfile).toContain("cargo zigbuild");
+    expect(linuxDockerfile).toContain("build --no-bundle");
+    expect(linuxDockerfile).toContain("bundle --verbose --bundles appimage");
+    expect(linuxBuilder).toContain("docker buildx build");
+    expect(windowsBuilder).toContain("makensis");
+    expect(verifier).toContain("Nullsoft Installer self-extracting archive");
+    expect(verifier).toContain("file format coff-x86-64");
+    expect(runBuilder).not.toMatch(/\$OUTPUT["']?\s+--(?:version|extract-dir)/);
+    expect(release).toContain("ME-linux-arm64.run\\nME-linux-x86_64.run\\nME-macos-universal.pkg\\nME-windows-x86_64-setup.exe\\nSHA256SUMS");
+    expect(unixInstall).toContain("ME-macos-universal.pkg");
+    expect(windowsInstall).toContain("ME-windows-x86_64-setup.exe");
+    for (const source of [release, unixInstall, windowsInstall, updater]) {
+      expect(source).not.toMatch(/me-(?:s|gateway)-(?:macos|linux|windows)/);
+    }
   });
 });

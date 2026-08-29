@@ -1,0 +1,13 @@
+.git
+.github
+target
+dist
+.build
+.me
+me-client/frontend-dist
+me-client/src-tauri/gen
+me-client/src-tauri/target
+me-client/node_modules
+me-gui.old
+me-gui.2.old
+.DS_Store

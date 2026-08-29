@@ -1,28 +1,21 @@
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Get-MeSReleaseAssets {
+function Get-MeProductAsset {
     param([string]$Architecture)
-
     $normalized = $Architecture.Trim().ToUpperInvariant()
     if ($normalized -eq "AMD64" -or $normalized -eq "X86_64") {
-        return @("me-s-windows-x86_64.exe", "me-gateway-windows-x86_64.exe")
+        return "ME-windows-x86_64-setup.exe"
     }
-    throw "ME does not provide a Windows release for $Architecture"
+    throw "ME does not provide a Windows package for $Architecture"
 }
 
-function Get-MeSExpectedChecksum {
-    param(
-        [string]$Manifest,
-        [string]$Asset
-    )
-
+function Get-MeExpectedChecksum {
+    param([string]$Manifest, [string]$Asset)
     $entries = @()
     foreach ($line in [System.IO.File]::ReadLines($Manifest)) {
-        if ($line -match '^([0-9A-Fa-f]{64})\s+\*?(.+?)\s*$') {
-            if ($Matches[2] -ceq $Asset) {
-                $entries += $Matches[1].ToLowerInvariant()
-            }
+        if ($line -match '^([0-9A-Fa-f]{64})\s+\*?(.+?)\s*$' -and $Matches[2] -ceq $Asset) {
+            $entries += $Matches[1].ToLowerInvariant()
         }
     }
     if ($entries.Count -ne 1) {
@@ -31,12 +24,8 @@ function Get-MeSExpectedChecksum {
     return $entries[0]
 }
 
-function Invoke-MeSDownload {
-    param(
-        [string]$Uri,
-        [string]$OutFile
-    )
-
+function Invoke-MeDownload {
+    param([string]$Uri, [string]$OutFile)
     $arguments = @{
         Uri                = $Uri
         OutFile            = $OutFile
@@ -49,55 +38,10 @@ function Invoke-MeSDownload {
     Invoke-WebRequest @arguments
 }
 
-function Add-MeSToUserPath {
-    param([string]$Directory)
-
-    $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-    $entries = @($userPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $alreadyPresent = $false
-    foreach ($entry in $entries) {
-        if ([string]::Equals(
-                $entry.TrimEnd('\'),
-                $Directory.TrimEnd('\'),
-                [StringComparison]::OrdinalIgnoreCase)) {
-            $alreadyPresent = $true
-            break
-        }
-    }
-    if (-not $alreadyPresent) {
-        $newUserPath = if ([string]::IsNullOrWhiteSpace($userPath)) {
-            $Directory
-        } else {
-            "$($userPath.TrimEnd(';'));$Directory"
-        }
-        [Environment]::SetEnvironmentVariable("Path", $newUserPath, "User")
-    }
-
-    $processEntries = @($env:Path -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
-    $processHasDirectory = $false
-    foreach ($entry in $processEntries) {
-        if ([string]::Equals(
-                $entry.TrimEnd('\'),
-                $Directory.TrimEnd('\'),
-                [StringComparison]::OrdinalIgnoreCase)) {
-            $processHasDirectory = $true
-            break
-        }
-    }
-    if (-not $processHasDirectory) {
-        $env:Path = if ([string]::IsNullOrWhiteSpace($env:Path)) {
-            $Directory
-        } else {
-            "$env:Path;$Directory"
-        }
-    }
-}
-
-function Install-MeS {
+function Install-MeProduct {
     if ($PSVersionTable.PSVersion.Major -lt 6) {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
     }
-
     $architecture = if (-not [string]::IsNullOrWhiteSpace($env:ME_INSTALL_ARCH)) {
         $env:ME_INSTALL_ARCH
     } elseif (-not [string]::IsNullOrWhiteSpace($env:PROCESSOR_ARCHITEW6432)) {
@@ -105,8 +49,7 @@ function Install-MeS {
     } else {
         $env:PROCESSOR_ARCHITECTURE
     }
-    $assets = @(Get-MeSReleaseAssets $architecture)
-
+    $asset = Get-MeProductAsset $architecture
     $repository = if ([string]::IsNullOrWhiteSpace($env:ME_INSTALL_REPOSITORY)) {
         "LytsingStudio/me-s"
     } else {
@@ -117,137 +60,56 @@ function Install-MeS {
     } else {
         $env:ME_INSTALL_BASE_URL.TrimEnd('/')
     }
-    $installDirectory = if ([string]::IsNullOrWhiteSpace($env:ME_INSTALL_DIR)) {
-        Join-Path $env:LOCALAPPDATA "Programs\me-s"
-    } else {
-        $env:ME_INSTALL_DIR
+    $installDirectory = Join-Path $env:LOCALAPPDATA "Programs\ME"
+    if (-not [string]::IsNullOrWhiteSpace($env:ME_INSTALL_DIR)) {
+        $requested = [IO.Path]::GetFullPath($env:ME_INSTALL_DIR)
+        if (-not [string]::Equals($requested.TrimEnd('\'), $installDirectory.TrimEnd('\'), [StringComparison]::OrdinalIgnoreCase)) {
+            throw "the Windows product installer uses $installDirectory and does not support ME_INSTALL_DIR"
+        }
     }
-    $installDirectory = [System.IO.Path]::GetFullPath($installDirectory)
 
-    $temporaryDirectory = Join-Path ([System.IO.Path]::GetTempPath()) "me-install-$([Guid]::NewGuid().ToString('N'))"
+    $temporaryDirectory = Join-Path ([IO.Path]::GetTempPath()) "me-install-$([Guid]::NewGuid().ToString('N'))"
+    $package = Join-Path $temporaryDirectory $asset
     $manifest = Join-Path $temporaryDirectory "SHA256SUMS"
-    $downloaded = @(
-        (Join-Path $temporaryDirectory $assets[0]),
-        (Join-Path $temporaryDirectory $assets[1])
-    )
-    $destinations = @(
-        (Join-Path $installDirectory "me-s.exe"),
-        (Join-Path $installDirectory "me-gateway.exe")
-    )
-    $transactionId = [Guid]::NewGuid().ToString('N')
-    $staging = @(
-        (Join-Path $installDirectory ".me-s-install-$transactionId.exe"),
-        (Join-Path $installDirectory ".me-gateway-install-$transactionId.exe")
-    )
-    $backups = @(
-        (Join-Path $installDirectory ".me-s-backup-$transactionId.exe"),
-        (Join-Path $installDirectory ".me-gateway-backup-$transactionId.exe")
-    )
-    $hadOriginal = @($false, $false)
-    $installed = @($false, $false)
-    $programNames = @("me-s", "me-gateway")
-    $reportedVersions = @($null, $null)
-    $expectedVersionOutputs = @($null, $null)
-    $committed = $false
-
     New-Item -ItemType Directory -Path $temporaryDirectory | Out-Null
     try {
-        Write-Host "Downloading $($assets[0]) and $($assets[1])..."
-        for ($index = 0; $index -lt 2; $index++) {
-            Invoke-MeSDownload "$baseUrl/$($assets[$index])" $downloaded[$index]
+        Write-Host "Downloading $asset..."
+        Invoke-MeDownload "$baseUrl/$asset" $package
+        Invoke-MeDownload "$baseUrl/SHA256SUMS" $manifest
+        $expected = Get-MeExpectedChecksum $manifest $asset
+        $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $package).Hash.ToLowerInvariant()
+        if ($actual -cne $expected) {
+            throw "checksum verification failed for $asset"
         }
-        Invoke-MeSDownload "$baseUrl/SHA256SUMS" $manifest
+        Write-Host "Checksum verified."
 
-        for ($index = 0; $index -lt 2; $index++) {
-            $expected = Get-MeSExpectedChecksum $manifest $assets[$index]
-            $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $downloaded[$index]).Hash.ToLowerInvariant()
-            if ($actual -cne $expected) {
-                throw "checksum verification failed for $($assets[$index])"
-            }
-            $outputLines = @(& $downloaded[$index] version)
-            if ($LASTEXITCODE -ne 0) {
-                throw "downloaded $($assets[$index]) cannot run on this system"
-            }
-            $versionOutput = ($outputLines -join "`n").Trim()
-            $escapedName = [Regex]::Escape($programNames[$index])
-            if ($versionOutput -cnotmatch "^$escapedName [0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?$") {
-                throw "downloaded $($assets[$index]) reported an unexpected program identity or version"
-            }
-            $reportedVersions[$index] = $versionOutput.Substring($programNames[$index].Length + 1)
-            $expectedVersionOutputs[$index] = $versionOutput
+        $process = Start-Process -FilePath $package -ArgumentList "/S" -Wait -PassThru
+        if ($process.ExitCode -ne 0) {
+            throw "ME installer exited with code $($process.ExitCode)"
         }
-        if ($reportedVersions[0] -cne $reportedVersions[1]) {
-            throw "downloaded ME programs report different versions"
-        }
-        Write-Host "Checksums verified."
 
-        New-Item -ItemType Directory -Force -Path $installDirectory | Out-Null
-        for ($index = 0; $index -lt 2; $index++) {
-            if (Test-Path -LiteralPath $destinations[$index]) {
-                $target = Get-Item -Force -LiteralPath $destinations[$index]
-                $isReparsePoint = ($target.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0
-                if ($target.PSIsContainer -or $isReparsePoint -or -not (Test-Path -LiteralPath $destinations[$index] -PathType Leaf)) {
-                    throw "install target is not a regular file: $($destinations[$index])"
-                }
-            }
-            Copy-Item -LiteralPath $downloaded[$index] -Destination $staging[$index]
-        }
-        for ($index = 0; $index -lt 2; $index++) {
-            if (Test-Path -LiteralPath $destinations[$index] -PathType Leaf) {
-                Move-Item -Force -LiteralPath $destinations[$index] -Destination $backups[$index]
-                $hadOriginal[$index] = $true
+        $meS = Join-Path $installDirectory "me-s.exe"
+        $gateway = Join-Path $installDirectory "me-gateway.exe"
+        $client = Join-Path $installDirectory "me-client.exe"
+        foreach ($path in @($meS, $gateway, $client)) {
+            if (-not (Test-Path -LiteralPath $path -PathType Leaf)) {
+                throw "ME installer did not create $path"
             }
         }
-        for ($index = 0; $index -lt 2; $index++) {
-            Move-Item -Force -LiteralPath $staging[$index] -Destination $destinations[$index]
-            $installed[$index] = $true
+        $meSOutput = ((& $meS version) -join "`n").Trim()
+        $gatewayOutput = ((& $gateway version) -join "`n").Trim()
+        if ($meSOutput -cnotmatch '^me-s ([0-9]+\.[0-9]+\.[0-9]+(?:[-+][0-9A-Za-z.-]+)?)$') {
+            throw "installed me-s reported an invalid version"
         }
-        for ($index = 0; $index -lt 2; $index++) {
-            $outputLines = @(& $destinations[$index] version)
-            if ($LASTEXITCODE -ne 0) {
-                throw "installed program could not be started: $($destinations[$index])"
-            }
-            $versionOutput = ($outputLines -join "`n").Trim()
-            if ($versionOutput -cne $expectedVersionOutputs[$index]) {
-                throw "installed program reported an unexpected version: $($destinations[$index])"
-            }
-            Write-Host $versionOutput
+        $version = $meSOutput.Substring(5)
+        if ($gatewayOutput -cne "me-gateway $version") {
+            throw "installed ME programs report different versions"
         }
-        $committed = $true
-        foreach ($backup in $backups) {
-            Remove-Item -Force -LiteralPath $backup -ErrorAction SilentlyContinue
-        }
-        Add-MeSToUserPath $installDirectory
-
-        Write-Host "Installed ME to $installDirectory"
-        Write-Host "  me-s: $($destinations[0])"
-        Write-Host "  me-gateway: $($destinations[1])"
-        Write-Host "Open a new terminal if the commands are not immediately available."
-    } catch {
-        $installError = $_.Exception.Message
-        if (-not $committed) {
-            $rollbackErrors = @()
-            for ($index = 1; $index -ge 0; $index--) {
-                try {
-                    if ($installed[$index] -and (Test-Path -LiteralPath $destinations[$index])) {
-                        Remove-Item -Force -LiteralPath $destinations[$index]
-                    }
-                    if ($hadOriginal[$index] -and (Test-Path -LiteralPath $backups[$index])) {
-                        Move-Item -Force -LiteralPath $backups[$index] -Destination $destinations[$index]
-                    }
-                } catch {
-                    $rollbackErrors += $_.Exception.Message
-                }
-            }
-            if ($rollbackErrors.Count -gt 0) {
-                throw "$installError; rollback also failed: $($rollbackErrors -join '; ')"
-            }
-        }
-        throw $installError
+        Write-Host $meSOutput
+        Write-Host $gatewayOutput
+        Write-Host "Installed ME Client: $client"
+        Write-Host "Open a new terminal if me-s or me-gateway is not immediately available."
     } finally {
-        foreach ($path in $staging) {
-            Remove-Item -Force -LiteralPath $path -ErrorAction SilentlyContinue
-        }
         if (Test-Path -LiteralPath $temporaryDirectory) {
             Remove-Item -Recurse -Force -LiteralPath $temporaryDirectory
         }
@@ -255,5 +117,5 @@ function Install-MeS {
 }
 
 if ($env:ME_INSTALL_NO_MAIN -ne "1") {
-    Install-MeS
+    Install-MeProduct
 }
