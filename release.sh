@@ -37,7 +37,10 @@ cleanup_build_cache() {
     docker buildx prune --all --max-used-space "$BUILD_CACHE_MAX_SIZE" --force
     if command -v colima >/dev/null 2>&1 && [[ "$(docker context show)" == colima ]]; then
         echo "reclaiming unused Colima disk blocks"
-        colima ssh -- sudo fstrim -v /var/lib/docker
+        (
+            cd /
+            colima ssh -- sudo fstrim -v /var/lib/docker
+        )
     fi
 }
 

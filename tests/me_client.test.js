@@ -324,6 +324,7 @@ describe("ME Client native adapter", () => {
     expect(release).toContain("gh release create");
     expect(release).toContain("BUILD_CACHE_MAX_SIZE=10gb");
     expect(release).toContain('docker buildx prune --all --max-used-space "$BUILD_CACHE_MAX_SIZE" --force');
+    expect(release).toContain("            cd /");
     expect(release).toContain("colima ssh -- sudo fstrim -v /var/lib/docker");
     expect(release.lastIndexOf("\ncleanup_build_cache\n")).toBeGreaterThan(release.indexOf("REMOTE_TAG_COMMIT="));
     expect(release).not.toMatch(/gh (?:workflow|run)|GitHub Actions|release\.yml/);

@@ -49,6 +49,7 @@ grep -F 'makensis' "$WINDOWS_BUILDER" >/dev/null
 grep -F 'gh release create' "$RELEASE" >/dev/null
 grep -F 'BUILD_CACHE_MAX_SIZE=10gb' "$RELEASE" >/dev/null
 grep -F 'docker buildx prune --all --max-used-space "$BUILD_CACHE_MAX_SIZE" --force' "$RELEASE" >/dev/null
+grep -F '            cd /' "$RELEASE" >/dev/null
 grep -F 'colima ssh -- sudo fstrim -v /var/lib/docker' "$RELEASE" >/dev/null
 if grep -E 'gh (workflow|run)|GitHub Actions|release\.yml' "$RELEASE" "$LINUX_CONTAINER" "$VERIFIER" >/dev/null; then
     printf 'local release sources still depend on GitHub Actions\n' >&2
