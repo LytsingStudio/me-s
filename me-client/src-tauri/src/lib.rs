@@ -1,7 +1,7 @@
 mod cache;
 mod gateway;
 
-use std::{env, io, path::PathBuf};
+use std::{collections::BTreeMap, env, io, path::PathBuf};
 
 use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest};
 use gateway::{DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport};
@@ -9,6 +9,7 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
+const DEVICE_PREFERENCE_KEYS: [&str; 3] = ["me-theme", "me-color-mode", "me-send-shortcut"];
 
 struct AppState {
     cache: CacheDatabase,
@@ -16,8 +17,10 @@ struct AppState {
 }
 
 #[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ClientBootstrap {
     endpoint: Option<String>,
+    device_preferences: BTreeMap<String, String>,
 }
 
 #[derive(Serialize)]
@@ -25,10 +28,46 @@ struct ConfiguredTarget {
     endpoint: String,
 }
 
+fn valid_device_preference(key: &str, value: &str) -> bool {
+    match key {
+        "me-theme" => matches!(
+            value,
+            "violet"
+                | "graphite"
+                | "ocean"
+                | "forest"
+                | "sand"
+                | "aurora"
+                | "sakura"
+                | "neon"
+                | "obsidian"
+        ),
+        "me-color-mode" => matches!(value, "light" | "dark"),
+        "me-send-shortcut" => matches!(value, "enter" | "modified-enter"),
+        _ => false,
+    }
+}
+
+fn load_device_preferences(cache: &CacheDatabase) -> Result<BTreeMap<String, String>, String> {
+    let mut preferences = BTreeMap::new();
+    for key in DEVICE_PREFERENCE_KEYS {
+        if let Some(value) = cache.setting(key)? {
+            if valid_device_preference(key, &value) {
+                preferences.insert(key.to_owned(), value);
+            }
+        }
+    }
+    Ok(preferences)
+}
+
 #[tauri::command]
 async fn client_bootstrap(state: State<'_, AppState>) -> Result<ClientBootstrap, String> {
+    let endpoint = state.gateway.endpoint().await;
+    let cache = state.cache.clone();
+    let device_preferences = run_blocking(move || load_device_preferences(&cache)).await?;
     Ok(ClientBootstrap {
-        endpoint: state.gateway.endpoint().await,
+        endpoint,
+        device_preferences,
     })
 }
 
@@ -42,6 +81,19 @@ async fn configure_target(
     let stored_endpoint = endpoint.clone();
     run_blocking(move || cache.set_setting(ENDPOINT_SETTING, &stored_endpoint)).await?;
     Ok(ConfiguredTarget { endpoint })
+}
+
+#[tauri::command]
+async fn set_device_preference(
+    key: String,
+    value: String,
+    state: State<'_, AppState>,
+) -> Result<(), String> {
+    if !valid_device_preference(&key, &value) {
+        return Err("设备偏好无效".into());
+    }
+    let cache = state.cache.clone();
+    run_blocking(move || cache.set_setting(&key, &value)).await
 }
 
 #[tauri::command]
@@ -147,6 +199,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             client_bootstrap,
             configure_target,
+            set_device_preference,
             gateway_request,
             cache_load_metadata,
             cache_load_chunk,
@@ -157,4 +210,31 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running ME Client");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::valid_device_preference;
+
+    #[test]
+    fn device_preferences_accept_only_the_fixed_global_ui_values() {
+        for theme in [
+            "violet", "graphite", "ocean", "forest", "sand", "aurora", "sakura", "neon", "obsidian",
+        ] {
+            assert!(valid_device_preference("me-theme", theme));
+        }
+        assert!(valid_device_preference("me-color-mode", "light"));
+        assert!(valid_device_preference("me-color-mode", "dark"));
+        assert!(valid_device_preference("me-send-shortcut", "enter"));
+        assert!(valid_device_preference(
+            "me-send-shortcut",
+            "modified-enter"
+        ));
+        assert!(!valid_device_preference("me-theme", "unknown"));
+        assert!(!valid_device_preference(
+            "gateway.endpoint",
+            "https://example.com"
+        ));
+        assert!(!valid_device_preference("me-send-shortcut", "unknown"));
+    }
 }

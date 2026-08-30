@@ -25,6 +25,7 @@ function portScopedCookieName(prefix, locationValue = document.location) {
 }
 const BROWSER_PORT = browserPort();
 const SEND_SHORTCUT_COOKIE = portScopedCookieName("me_send_shortcut");
+const SEND_SHORTCUT_PREFERENCE = "me-send-shortcut";
 const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
 const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";
@@ -34,6 +35,7 @@ const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
 
 const frontendRuntime = globalThis.MeFrontendRuntime;
 if (!frontendRuntime) throw new Error("ME frontend runtime is unavailable");
+const devicePreferences = frontendRuntime.devicePreferences || null;
 const runtimeCapabilities = Object.freeze({
   multipleWorkspaces: false, gatewaySettings: false, targetConfiguration: false,
   nativeDownload: false, pageTitle: "ME", brandTitle: "ME", cacheStorageLabel: "当前浏览器",
@@ -106,7 +108,7 @@ const state = {
   runningToolNodes: [],
   lastInputAt: Number.NEGATIVE_INFINITY,
   composing: false,
-  sendShortcut: readSendShortcutCookie(typeof document.cookie === "string" ? document.cookie : ""),
+  sendShortcut: readSendShortcutPreference(),
   userMenu: null,
   agentMenu: null,
   modal: null,
@@ -377,9 +379,40 @@ function readSendShortcutCookie(cookieHeader) {
   return SEND_SHORTCUT_MODIFIED_ENTER;
 }
 
+function readSendShortcutPreference() {
+  if (devicePreferences) {
+    try { return normalizeSendShortcut(devicePreferences.getItem(SEND_SHORTCUT_PREFERENCE)); }
+    catch (_) { return SEND_SHORTCUT_MODIFIED_ENTER; }
+  }
+  return readSendShortcutCookie(typeof document.cookie === "string" ? document.cookie : "");
+}
+
+function persistDevicePreference(key, value) {
+  if (!devicePreferences) return false;
+  try {
+    const result = devicePreferences.setItem(key, value);
+    result?.catch?.((error) => console.warn("Unable to persist device preference", error));
+  } catch (error) {
+    console.warn("Unable to persist device preference", error);
+  }
+  return true;
+}
+
+function restoreRuntimeDevicePreferences() {
+  if (!devicePreferences) return;
+  state.sendShortcut = readSendShortcutPreference();
+  const activeTheme = globalThis.MeTheme.apply(
+    globalThis,
+    globalThis.MeTheme.readStored(globalThis),
+  );
+  globalThis.MeTheme.syncControls(elements.themeCycle, elements.themeMode, activeTheme);
+}
+
 function setSendShortcut(value) {
   state.sendShortcut = normalizeSendShortcut(value);
-  document.cookie = `${SEND_SHORTCUT_COOKIE}=${encodeURIComponent(state.sendShortcut)}; Max-Age=31536000; Path=/; SameSite=Lax`;
+  if (!persistDevicePreference(SEND_SHORTCUT_PREFERENCE, state.sendShortcut)) {
+    document.cookie = `${SEND_SHORTCUT_COOKIE}=${encodeURIComponent(state.sendShortcut)}; Max-Age=31536000; Path=/; SameSite=Lax`;
+  }
   renderComposer();
   elements.input.focus();
 }
@@ -1224,6 +1257,7 @@ function showApplication() {
 async function initializeAuthentication() {
   try {
     const bootstrap = await frontendRuntime.initialize();
+    restoreRuntimeDevicePreferences();
     if (runtimeCapabilities.targetConfiguration) {
       state.authRequired = true;
       if (elements.loginEndpoint) elements.loginEndpoint.value = bootstrap.endpoint || "";

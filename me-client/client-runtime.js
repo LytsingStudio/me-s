@@ -9,6 +9,38 @@
   let endpoint = "";
   let activeEdbCache = null;
 
+  const DEVICE_PREFERENCE_KEYS = new Set(["me-theme", "me-color-mode", "me-send-shortcut"]);
+  const devicePreferenceValues = new Map();
+  let devicePreferencesReady = false;
+  let devicePreferenceWrites = Promise.resolve();
+
+  function loadDevicePreferences(values) {
+    devicePreferenceValues.clear();
+    for (const [key, value] of Object.entries(values || {})) {
+      if (DEVICE_PREFERENCE_KEYS.has(key) && typeof value === "string") {
+        devicePreferenceValues.set(key, value);
+      }
+    }
+    devicePreferencesReady = true;
+  }
+
+  const devicePreferences = Object.freeze({
+    getItem(key) {
+      return devicePreferenceValues.get(String(key || "")) ?? null;
+    },
+    setItem(key, value) {
+      const normalizedKey = String(key || "");
+      if (!DEVICE_PREFERENCE_KEYS.has(normalizedKey)) return Promise.resolve();
+      const normalizedValue = String(value ?? "");
+      devicePreferenceValues.set(normalizedKey, normalizedValue);
+      if (!devicePreferencesReady) return Promise.resolve();
+      devicePreferenceWrites = devicePreferenceWrites
+        .then(() => invoke("set_device_preference", { key: normalizedKey, value: normalizedValue }))
+        .catch((error) => console.warn("Unable to persist native device preference", error));
+      return devicePreferenceWrites;
+    },
+  });
+
   function bytesToBase64(bytes) {
     let binary = "";
     const chunkSize = 0x8000;
@@ -227,9 +259,11 @@
       newSessionLabel: "新建聊天",
     }),
     get endpoint() { return endpoint; },
+    devicePreferences,
     async initialize() {
       document.documentElement.classList.add("me-client");
       const bootstrap = await invoke("client_bootstrap");
+      loadDevicePreferences(bootstrap.devicePreferences);
       endpoint = String(bootstrap.endpoint || "");
       return { endpoint };
     },

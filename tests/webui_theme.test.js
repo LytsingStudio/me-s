@@ -102,6 +102,29 @@ describe("shared WebUI themes", () => {
     expect(page.values.get(theme.STORAGE_MODE)).toBe("light");
   });
 
+  test("prefers an adapted device store over WebView localStorage", () => {
+    const page = fakeRuntime({
+      stored: { [theme.STORAGE_THEME]: "violet", [theme.STORAGE_MODE]: "dark" },
+    });
+    const adapted = new Map([
+      [theme.STORAGE_THEME, "ocean"],
+      [theme.STORAGE_MODE, "light"],
+    ]);
+    page.runtime.MeFrontendRuntime = {
+      devicePreferences: {
+        getItem(key) { return adapted.get(key) ?? null; },
+        setItem(key, value) { adapted.set(key, String(value)); },
+      },
+    };
+    expect(theme.initialize(page.runtime)).toMatchObject({ theme: { id: "ocean" }, mode: "light" });
+    expect(theme.cycle(page.runtime)).toMatchObject({ theme: { id: "forest" }, mode: "light" });
+    expect(adapted.get(theme.STORAGE_THEME)).toBe("forest");
+    expect(adapted.get(theme.STORAGE_MODE)).toBe("light");
+    expect(page.values.get(theme.STORAGE_THEME)).toBe("violet");
+    expect(page.values.get(theme.STORAGE_MODE)).toBe("dark");
+  });
+
+
   test("toggles only the color mode and exposes target-oriented accessible labels", () => {
     const page = fakeRuntime({ stored: { [theme.STORAGE_THEME]: "violet", [theme.STORAGE_MODE]: "dark" } });
     theme.initialize(page.runtime);
@@ -133,6 +156,7 @@ describe("shared WebUI themes", () => {
     const gatewayServer = readFileSync(join(import.meta.dir, "../src/gateway_webui.rs"), "utf8");
 
     expect(index.indexOf('<script src="/theme.js"></script>')).toBeLessThan(index.indexOf('href="/style.css"'));
+    expect(index.indexOf('<script src="/runtime.js"></script>')).toBeLessThan(index.indexOf('<script src="/theme.js"></script>'));
     expect(index.indexOf('href="/style.css"')).toBeLessThan(index.indexOf('href="/theme.css"'));
     expect(index).not.toContain('<header class="brand">');
     expect(index).not.toContain('id="connection-label"');

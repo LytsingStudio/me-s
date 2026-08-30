@@ -42,6 +42,10 @@
 
   function storage(runtime) {
     try {
+      const adapted = runtime?.MeFrontendRuntime?.devicePreferences;
+      if (typeof adapted?.getItem === "function" && typeof adapted?.setItem === "function") {
+        return adapted;
+      }
       return runtime?.localStorage || null;
     } catch (_) {
       return null;

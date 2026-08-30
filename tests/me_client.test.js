@@ -28,7 +28,14 @@ function loadClientRuntime() {
       core: {
         async invoke(command, payload) {
           calls.push({ command, payload });
-          if (command === "client_bootstrap") return { endpoint: "http://127.0.0.1:38201" };
+          if (command === "client_bootstrap") return {
+            endpoint: "http://127.0.0.1:38201",
+            devicePreferences: {
+              "me-theme": "ocean",
+              "me-color-mode": "light",
+              "me-send-shortcut": "enter",
+            },
+          };
           if (command === "configure_target") return { endpoint: "https://gateway.example" };
           if (command === "gateway_request") return {
             status: 200,
@@ -55,7 +62,8 @@ function loadClientRuntime() {
             };
           }
           if (command === "cache_list") return [{ ...metadata }];
-          if (command === "cache_save_batch" || command === "cache_remove") return null;
+          if (command === "cache_save_batch" || command === "cache_remove"
+              || command === "set_device_preference") return null;
           if (command === "download_file") return { path: "/Downloads/archive.zip", bytes: 12 };
           throw new Error(`unexpected command ${command}`);
         },
@@ -100,6 +108,38 @@ describe("ME Client native adapter", () => {
     expect(request.bodyBase64).toBeUndefined();
     expect(await (await sandbox.fetch("/theme.js")).text()).toBe("browser");
   });
+
+  test("persists target-independent UI preferences through the native settings adapter", async () => {
+    const { runtime, calls } = loadClientRuntime();
+    expect(runtime.devicePreferences.getItem("me-theme")).toBeNull();
+    await runtime.initialize();
+    expect(runtime.devicePreferences.getItem("me-theme")).toBe("ocean");
+    expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("light");
+    expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("enter");
+
+    await runtime.devicePreferences.setItem("me-theme", "obsidian");
+    await runtime.devicePreferences.setItem("me-color-mode", "dark");
+    await runtime.devicePreferences.setItem("me-send-shortcut", "modified-enter");
+    await runtime.devicePreferences.setItem("gateway.endpoint", "must-not-persist");
+    await runtime.configureTarget("https://other-gateway.example");
+    expect(runtime.devicePreferences.getItem("me-theme")).toBe("obsidian");
+    expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("dark");
+    expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("modified-enter");
+    expect(calls.filter((call) => call.command === "set_device_preference").map((call) => call.payload))
+      .toEqual([
+        { key: "me-theme", value: "obsidian" },
+        { key: "me-color-mode", value: "dark" },
+        { key: "me-send-shortcut", value: "modified-enter" },
+      ]);
+
+    const clientRuntime = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
+    const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
+    expect(clientRuntime).not.toMatch(/document\.cookie|localStorage|globalThis\.indexedDB/);
+    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 3]');
+    expect(nativeRuntime).toContain('run_blocking(move || cache.set_setting(&key, &value)).await');
+    expect(nativeRuntime).toContain('device_preferences: BTreeMap<String, String>');
+  });
+
 
   test("routes page-close JSON beacons as text through the native transport", async () => {
     const { sandbox, calls, browserBeacons } = loadClientRuntime();
