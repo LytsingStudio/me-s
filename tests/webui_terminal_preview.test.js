@@ -13,7 +13,7 @@ function loadTerminalScrollHelpers() {
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI terminal preview runtime");
   const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
-    return { terminalIsNearBottom, captureTerminalScroll, restoreTerminalScroll };`);
+    return { terminalIsNearBottom, captureTerminalScroll, restoreTerminalScroll, terminalWindowRange };`);
   return factory(
     { querySelector: () => null, documentElement: { classList: { toggle() {} } } },
     { now: () => 0 },
@@ -33,7 +33,7 @@ function viewport(scrollHeight, clientHeight, scrollTop) {
   };
 }
 
-describe("WebUI Terminal full-buffer preview", () => {
+describe("WebUI Terminal windowed full-buffer preview", () => {
   const helpers = loadTerminalScrollHelpers();
 
   test("continues following appended output while already at the bottom", () => {
@@ -62,6 +62,20 @@ describe("WebUI Terminal full-buffer preview", () => {
     expect(view.scrollTop).toBe(1_700);
   });
 
+  test("keeps a bounded DOM window across very large Terminal histories", () => {
+    expect(helpers.terminalWindowRange(100_000, 0, 700, 17.5, true))
+      .toEqual({ start: 99_760, end: 100_000 });
+    const middle = helpers.terminalWindowRange(100_000, 17_500, 700, 17.5, false);
+    expect(middle).toEqual({ start: 880, end: 1_120 });
+    expect(middle.end - middle.start).toBe(240);
+  });
+
+  test("does not immediately resync a Terminal already known to be unavailable", () => {
+    const script = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    expect(script).toContain("if (!unavailable) requestHttpSyncNow();");
+    expect(script).toContain('(frame.rows || []).slice(range.start, range.end)');
+  });
+
   test("removes viewport-size rejection and clips horizontal overflow", () => {
     const script = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const css = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
@@ -69,5 +83,6 @@ describe("WebUI Terminal full-buffer preview", () => {
     expect(script).not.toContain("terminalCapacity");
     expect(css).toContain("overflow-x: hidden");
     expect(css).toContain("overflow-y: auto");
+    expect(css).toContain(".terminal-spacer { width: 1px;");
   });
 });

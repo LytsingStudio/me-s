@@ -67,7 +67,7 @@ function frameResponse(sequence, screenWidth = 400, screenHeight = 200, frameWid
   });
 }
 
-function fixture(request) {
+function fixture(request, { autoLoadImages = true } = {}) {
   const elements = {
     start: new FakeElement(),
     stop: new FakeElement(),
@@ -103,10 +103,12 @@ function fixture(request) {
   const documentListeners = new Map();
   let intervalId = 0;
   const intervals = new Map();
+  const imageLoaders = [];
   class FakeImage {
+    constructor() { imageLoaders.push(this); }
     set src(value) {
       this.value = value;
-      queueMicrotask(() => this.onload?.());
+      if (autoLoadImages) queueMicrotask(() => this.onload?.());
     }
   }
   const runtime = {
@@ -129,7 +131,7 @@ function fixture(request) {
     clearTimeout,
   };
   const controller = RemoteControl.create({ runtime, container, request });
-  return { controller, elements, container, runtime, intervals };
+  return { controller, elements, container, runtime, intervals, imageLoaders };
 }
 
 function requestLog(frameSequences = []) {
@@ -282,6 +284,31 @@ describe("RemoteControl shared WebUI controller", () => {
     expect(maximumInFlight).toBe(1);
     expect(controller.snapshot().frameCount).toBe(1);
     expect(controller.snapshot().lastSequence).toBe(11);
+    controller.dispose();
+  });
+
+  test("keeps one JPEG decode in flight and drops superseded pending frames", async () => {
+    const log = requestLog([1, 2, 3]);
+    const { controller, elements, intervals, imageLoaders } = fixture(log.request, { autoLoadImages: false });
+    controller.activate();
+    await settle();
+    elements.start.dispatch("click");
+    await settle(40);
+    expect(imageLoaders.length).toBe(1);
+
+    for (const callback of intervals.values()) callback();
+    await settle(40);
+    for (const callback of intervals.values()) callback();
+    await settle(40);
+    expect(imageLoaders.length).toBe(1);
+
+    imageLoaders[0].onload();
+    await settle();
+    expect(imageLoaders.length).toBe(2);
+    imageLoaders[1].onload();
+    await settle();
+    expect(controller.snapshot().frameCount).toBe(2);
+    expect(controller.snapshot().lastSequence).toBe(3);
     controller.dispose();
   });
 

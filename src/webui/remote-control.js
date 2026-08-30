@@ -133,6 +133,8 @@
     let keepaliveTimer = null;
     let statusRefreshTimer = null;
     let imageUrl = null;
+    let frameDecodeInFlight = false;
+    let pendingFrame = null;
     let pendingInput = [];
     let inputTimer = null;
     let inputInFlight = null;
@@ -201,6 +203,7 @@
     function resetDisplayedRound() {
       frameCount = 0;
       lastSequence = 0;
+      pendingFrame = null;
       frameElement.textContent = "frame: 0";
     }
 
@@ -209,31 +212,44 @@
       try { runtime.URL?.revokeObjectURL?.(url); } catch (_) {}
     }
 
-    function displayFrame(blob, metadata, generation, requireControl) {
-      if (metadata.sequence <= lastSequence) return;
+    function decodePendingFrame() {
+      if (frameDecodeInFlight || !pendingFrame) return;
+      const candidate = pendingFrame;
+      pendingFrame = null;
+      if (candidate.metadata.sequence <= lastSequence) return;
+      frameDecodeInFlight = true;
+      const { blob, metadata, generation, requireControl } = candidate;
       const url = runtime.URL.createObjectURL(blob);
       const Loader = runtime.Image;
+      const finish = () => {
+        frameDecodeInFlight = false;
+        decodePendingFrame();
+      };
       const commit = () => {
-        if (disposed || generation !== displayGeneration
-          || (requireControl && (!owned || !viewActive))) {
-          revokeImageUrl(url);
-          return;
+        try {
+          if (disposed || generation !== displayGeneration
+            || (requireControl && (!owned || !viewActive))) {
+            revokeImageUrl(url);
+            return;
+          }
+          if (metadata.sequence <= lastSequence) {
+            revokeImageUrl(url);
+            return;
+          }
+          const previousUrl = imageUrl;
+          imageUrl = url;
+          image.src = url;
+          image.hidden = false;
+          emptyState.hidden = true;
+          lastSequence = metadata.sequence;
+          screenWidth = metadata.screenWidth;
+          screenHeight = metadata.screenHeight;
+          frameCount += 1;
+          frameElement.textContent = `frame: ${frameCount}`;
+          revokeImageUrl(previousUrl);
+        } finally {
+          finish();
         }
-        if (metadata.sequence <= lastSequence) {
-          revokeImageUrl(url);
-          return;
-        }
-        const previousUrl = imageUrl;
-        imageUrl = url;
-        image.src = url;
-        image.hidden = false;
-        emptyState.hidden = true;
-        lastSequence = metadata.sequence;
-        screenWidth = metadata.screenWidth;
-        screenHeight = metadata.screenHeight;
-        frameCount += 1;
-        frameElement.textContent = `frame: ${frameCount}`;
-        revokeImageUrl(previousUrl);
       };
       if (typeof Loader !== "function") {
         commit();
@@ -244,8 +260,17 @@
       loader.onerror = () => {
         revokeImageUrl(url);
         showError(new Error("远控帧无法显示"));
+        finish();
       };
       loader.src = url;
+    }
+
+    function displayFrame(blob, metadata, generation, requireControl) {
+      if (metadata.sequence <= lastSequence) return;
+      if (!pendingFrame || metadata.sequence > pendingFrame.metadata.sequence) {
+        pendingFrame = { blob, metadata, generation, requireControl };
+      }
+      decodePendingFrame();
     }
 
     async function acceptFrameResponse(response, requestId, generation, requireControl) {
@@ -276,6 +301,7 @@
     function stopFrameTicker() {
       if (frameTicker != null) runtime.clearInterval(frameTicker);
       frameTicker = null;
+      pendingFrame = null;
       abortFrameRequest();
     }
 

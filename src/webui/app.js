@@ -15,6 +15,8 @@ const INPUT_ANIMATION_QUIET_MS = 250;
 const UI_ANIMATION_INTERVAL_MS = 100;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
 const SYSTEM_STATIC_PROMPT_MAX_BYTES = 32 * 1024;
+const TERMINAL_RENDER_OVERSCAN_ROWS = 80;
+const TERMINAL_RENDER_MIN_ROWS = 240;
 function browserPort(locationValue = document.location) {
   const explicitPort = String(locationValue?.port || "");
   const protocol = String(locationValue?.protocol || "").toLowerCase();
@@ -148,6 +150,7 @@ const state = {
   pageClosing: false,
 };
 let transcriptVirtualizer = null;
+let terminalWindowRenderFrame = null;
 
 
 let workspacePanelSequence = 0;
@@ -4474,47 +4477,105 @@ function confirmContextClear() {
   openConfirm("清空上下文？", "当前会话将从空白上下文继续，已有消息记录不会被删除。", "清空上下文", () => sendCommand({ command: "clear_context", agent_id: agentId }), true);
 }
 
+function terminalRowHeight() {
+  const computed = globalThis.getComputedStyle?.(elements.terminalScreen);
+  const lineHeight = Number.parseFloat(computed?.lineHeight);
+  if (Number.isFinite(lineHeight) && lineHeight > 0) return lineHeight;
+  const fontSize = Number.parseFloat(computed?.fontSize);
+  return Number.isFinite(fontSize) && fontSize > 0 ? fontSize * 1.25 : 17.5;
+}
+
+function terminalWindowRange(rowCount, scrollTop, clientHeight, rowHeight, followBottom) {
+  const total = Math.max(0, Math.floor(Number(rowCount) || 0));
+  const height = Number.isFinite(rowHeight) && rowHeight > 0 ? rowHeight : 17.5;
+  const visibleRows = Math.max(1, Math.ceil(Math.max(0, Number(clientHeight) || 0) / height));
+  const windowRows = Math.min(total, Math.max(
+    TERMINAL_RENDER_MIN_ROWS,
+    visibleRows + TERMINAL_RENDER_OVERSCAN_ROWS * 2,
+  ));
+  if (total <= windowRows) return { start: 0, end: total };
+  if (followBottom) return { start: total - windowRows, end: total };
+  const firstVisible = Math.max(0, Math.floor(Math.max(0, Number(scrollTop) || 0) / height));
+  const desiredStart = Math.max(0, firstVisible - TERMINAL_RENDER_OVERSCAN_ROWS);
+  const start = Math.min(
+    total - windowRows,
+    Math.floor(desiredStart / TERMINAL_RENDER_OVERSCAN_ROWS) * TERMINAL_RENDER_OVERSCAN_ROWS,
+  );
+  return { start, end: Math.min(total, start + windowRows) };
+}
+
+function terminalRowHtml(frame, row, styles) {
+  const runs = (row.runs || []).map((run) => `<span style="left:${run.col}ch;${terminalStyle(styles.get(run.style))}">${escapeHtml(run.text)}</span>`).join("");
+  const cursor = frame.cursor.visible && frame.cursor.row === row.row
+    ? `<span class="terminal-cursor" style="left:${frame.cursor.col}ch;width:${frame.cursor.wide ? 2 : 1}ch"></span>` : "";
+  return `<div class="terminal-row" style="width:${frame.width}ch;position:relative"><span style="position:absolute">${" ".repeat(frame.width)}</span>${runs}${cursor}</div>`;
+}
+
+function scheduleTerminalWindowRender() {
+  if (terminalWindowRenderFrame != null) return;
+  terminalWindowRenderFrame = requestAnimationFrame(() => {
+    terminalWindowRenderFrame = null;
+    if (state.view.kind === "terminal") renderTerminal();
+  });
+}
+
 function renderTerminal() {
   const sessionId = state.view.sessionId;
   if (!sessionId || !state.selectedAgent) return;
   const revisionKey = `${state.selectedAgent}:${sessionId}`;
   const frame = state.terminalFrames.get(revisionKey);
   if (!frame) {
-    showTerminalMessage(state.terminalFramesUnavailable.has(revisionKey)
+    const unavailable = state.terminalFramesUnavailable.has(revisionKey);
+    showTerminalMessage(unavailable
       ? `Terminal ${sessionId} 已不可用`
       : `正在同步 Terminal ${sessionId}…`);
-    requestHttpSyncNow();
+    if (!unavailable) requestHttpSyncNow();
     return;
   }
   if (state.view.kind !== "terminal" || state.view.sessionId !== sessionId) return;
-    const previousRevision = state.terminalRevisions.get(revisionKey) || 0;
-    if (frame.revision < previousRevision) return;
-    const sameRenderedFrame = elements.terminalScreen.dataset.terminalKey === revisionKey
-      && Number(elements.terminalScreen.dataset.revision) === frame.revision;
-    if (sameRenderedFrame) {
-      if (state.terminalFollowBottom) scrollTerminalToBottom();
-      return;
-    }
-    const switchingTerminal = elements.terminalScreen.dataset.terminalKey !== revisionKey;
-    const scroll = captureTerminalScroll(
-      elements.terminalView,
-      state.terminalFollowBottom || switchingTerminal,
-    );
-    state.terminalRevisions.set(revisionKey, frame.revision);
-    elements.terminalMessage.classList.add("hidden");
-    elements.terminalScreen.classList.remove("hidden");
-    elements.terminalScreen.style.width = `${frame.width}ch`;
-    const styles = new Map((frame.style_defs || []).map((definition) => [definition.id, definition.style]));
-    elements.terminalScreen.innerHTML = (frame.rows || []).map((row) => {
-      const runs = (row.runs || []).map((run) => `<span style="left:${run.col}ch;${terminalStyle(styles.get(run.style))}">${escapeHtml(run.text)}</span>`).join("");
-      const cursor = frame.cursor.visible && frame.cursor.row === row.row
-        ? `<span class="terminal-cursor" style="left:${frame.cursor.col}ch;width:${frame.cursor.wide ? 2 : 1}ch"></span>` : "";
-      return `<div class="terminal-row" style="width:${frame.width}ch;position:relative"><span style="position:absolute">${" ".repeat(frame.width)}</span>${runs}${cursor}</div>`;
-    }).join("");
-    elements.terminalScreen.dataset.terminalKey = revisionKey;
-    elements.terminalScreen.dataset.revision = String(frame.revision);
-    restoreTerminalScroll(elements.terminalView, scroll);
-    state.terminalFollowBottom = scroll.followBottom;
+  const previousRevision = state.terminalRevisions.get(revisionKey) || 0;
+  if (frame.revision < previousRevision) return;
+  const switchingTerminal = elements.terminalScreen.dataset.terminalKey !== revisionKey;
+  const rowHeight = terminalRowHeight();
+  const range = terminalWindowRange(
+    frame.rows?.length || 0,
+    elements.terminalView.scrollTop,
+    elements.terminalView.clientHeight,
+    rowHeight,
+    state.terminalFollowBottom || switchingTerminal,
+  );
+  const sameRenderedFrame = !switchingTerminal
+    && Number(elements.terminalScreen.dataset.revision) === frame.revision;
+  const sameRenderedWindow = Number(elements.terminalScreen.dataset.windowStart) === range.start
+    && Number(elements.terminalScreen.dataset.windowEnd) === range.end
+    && Number(elements.terminalScreen.dataset.rowHeight) === rowHeight;
+  if (sameRenderedFrame && sameRenderedWindow) {
+    if (state.terminalFollowBottom) scrollTerminalToBottom();
+    return;
+  }
+  const scroll = captureTerminalScroll(
+    elements.terminalView,
+    state.terminalFollowBottom || switchingTerminal,
+  );
+  state.terminalRevisions.set(revisionKey, frame.revision);
+  elements.terminalMessage.classList.add("hidden");
+  elements.terminalScreen.classList.remove("hidden");
+  elements.terminalScreen.style.width = `${frame.width}ch`;
+  const styles = new Map((frame.style_defs || []).map((definition) => [definition.id, definition.style]));
+  const topHeight = range.start * rowHeight;
+  const bottomHeight = Math.max(0, ((frame.rows?.length || 0) - range.end) * rowHeight);
+  const topSpacer = topHeight > 0 ? `<div class="terminal-spacer" style="height:${topHeight}px"></div>` : "";
+  const bottomSpacer = bottomHeight > 0 ? `<div class="terminal-spacer" style="height:${bottomHeight}px"></div>` : "";
+  const rows = (frame.rows || []).slice(range.start, range.end)
+    .map((row) => terminalRowHtml(frame, row, styles)).join("");
+  elements.terminalScreen.innerHTML = `${topSpacer}${rows}${bottomSpacer}`;
+  elements.terminalScreen.dataset.terminalKey = revisionKey;
+  elements.terminalScreen.dataset.revision = String(frame.revision);
+  elements.terminalScreen.dataset.windowStart = String(range.start);
+  elements.terminalScreen.dataset.windowEnd = String(range.end);
+  elements.terminalScreen.dataset.rowHeight = String(rowHeight);
+  restoreTerminalScroll(elements.terminalView, scroll);
+  state.terminalFollowBottom = scroll.followBottom;
 }
 
 function showTerminalMessage(message) {
@@ -4523,6 +4584,9 @@ function showTerminalMessage(message) {
   elements.terminalScreen.classList.add("hidden");
   delete elements.terminalScreen.dataset.terminalKey;
   delete elements.terminalScreen.dataset.revision;
+  delete elements.terminalScreen.dataset.windowStart;
+  delete elements.terminalScreen.dataset.windowEnd;
+  delete elements.terminalScreen.dataset.rowHeight;
 }
 
 function terminalIsNearBottom(view) {
@@ -5047,7 +5111,7 @@ function modelSettingsHtml(model, index) {
   return `<details class="settings-model" data-settings-model="${index}">
     <summary>
       <span class="settings-model-title">
-        <span class="settings-model-icon-wrap"><svg class="settings-model-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg></span>
+        <svg class="settings-model-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg>
         <span class="settings-model-heading"><strong>${escapeHtml(model.name || "新模型")}</strong><small>${escapeHtml(identity)}</small></span>
       </span>
       <span class="settings-model-summary-meta">
@@ -5056,29 +5120,25 @@ function modelSettingsHtml(model, index) {
       </span>
     </summary>
     <div class="settings-model-body">
-      <section class="settings-model-group">
-        <h4>基本与连接</h4>
-        <div class="settings-grid">
-          <label>显示名称<input data-setting="name" value="${value("name")}"></label>
-          <label>Provider<select data-setting="provider"><option value="openai-compatible" ${model.provider === "openai-compatible" ? "selected" : ""}>OpenAI Compatible</option><option value="anthropic" ${model.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="codex-oauth" ${model.provider === "codex-oauth" ? "selected" : ""}>Codex OAuth</option></select></label>
-          <label>Base URL<input data-setting="base_url" value="${value("base_url")}"></label>
-          <label>Endpoint<input data-setting="endpoint" value="${value("endpoint")}"></label>
-          <label>模型标识<input data-setting="model" value="${value("model")}"></label>
-          <label>请求超时（秒）<input data-setting="timeout_seconds" type="number" min="1" value="${Number(model.timeout_seconds) || 120}"></label>
-          <label>API Key 环境变量<input data-setting="api_key_env" value="${value("api_key_env")}"></label>
-          <label>凭据文件<input data-setting="credential_file" value="${value("credential_file")}"></label>
-          <label>来源地址<input data-setting="source_url" value="${value("source_url")}"></label>
-          <label>API Key<input data-setting="api_key" type="text" autocomplete="off" value="${value("api_key")}" placeholder="留空表示不设置"></label>
-          <label class="settings-check"><input data-setting="reserve_output_context" type="checkbox" ${model.reserve_output_context ? "checked" : ""}>为输出预留上下文</label>
-          <label class="settings-check"><input data-setting="clear_inline_api_key" type="checkbox" ${model.clear_inline_api_key ? "checked" : ""}>清除已保存的 API Key</label>
-        </div>
-      </section>
-      <section class="settings-model-group settings-model-advanced">
-        <h4>高级配置</h4>
+      <div class="settings-grid">
+        <label>显示名称<input data-setting="name" value="${value("name")}"></label>
+        <label>Provider<select data-setting="provider"><option value="openai-compatible" ${model.provider === "openai-compatible" ? "selected" : ""}>OpenAI Compatible</option><option value="anthropic" ${model.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="codex-oauth" ${model.provider === "codex-oauth" ? "selected" : ""}>Codex OAuth</option></select></label>
+        <label>Base URL<input data-setting="base_url" value="${value("base_url")}"></label>
+        <label>Endpoint<input data-setting="endpoint" value="${value("endpoint")}"></label>
+        <label>模型标识<input data-setting="model" value="${value("model")}"></label>
+        <label>请求超时（秒）<input data-setting="timeout_seconds" type="number" min="1" value="${Number(model.timeout_seconds) || 120}"></label>
+        <label>API Key 环境变量<input data-setting="api_key_env" value="${value("api_key_env")}"></label>
+        <label>凭据文件<input data-setting="credential_file" value="${value("credential_file")}"></label>
+        <label>来源地址<input data-setting="source_url" value="${value("source_url")}"></label>
+        <label>API Key<input data-setting="api_key" type="text" autocomplete="off" value="${value("api_key")}" placeholder="留空表示不设置"></label>
+        <label class="settings-check"><input data-setting="reserve_output_context" type="checkbox" ${model.reserve_output_context ? "checked" : ""}>为输出预留上下文</label>
+        <label class="settings-check"><input data-setting="clear_inline_api_key" type="checkbox" ${model.clear_inline_api_key ? "checked" : ""}>清除已保存的 API Key</label>
+      </div>
+      <div class="settings-model-advanced">
         <label>能力配置（JSON）<textarea data-setting="capabilities" rows="7">${escapeHtml(JSON.stringify(model.capabilities, null, 2))}</textarea></label>
         <label>请求参数（JSON）<textarea data-setting="parameters" rows="5">${escapeHtml(JSON.stringify(model.parameters || {}, null, 2))}</textarea></label>
         <label>推理强度参数（JSON）<textarea data-setting="effort_parameters" rows="5">${escapeHtml(JSON.stringify(model.effort_parameters || {}, null, 2))}</textarea></label>
-      </section>
+      </div>
       <div class="settings-model-danger"><button type="button" class="ghost-button danger settings-remove-model" data-remove-model="${index}">移除模型</button></div>
     </div>
   </details>`;
@@ -5136,17 +5196,17 @@ function renderSettingsModal() {
   elements.modalContent.innerHTML = `<div class="settings-editor">
     <section class="settings-section settings-model-section">
       <header class="settings-section-header">
-        <div class="settings-section-heading">
-          <span class="settings-section-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg></span>
-          <div><h3>模型</h3><p>管理可用模型并选择默认模型。</p></div>
-        </div>
-        <button id="settings-add-model" type="button" class="ghost-button settings-section-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增模型</span></button>
+        <div class="settings-section-heading"><h3>模型</h3><p>管理默认模型与模型预设。</p></div>
       </header>
       <div class="settings-section-content">
         <label class="settings-default-model">
-          <span class="settings-default-copy"><strong>默认模型</strong><small>选择全局默认使用的模型。</small></span>
+          <span class="settings-default-copy"><strong>默认模型</strong></span>
           <select id="settings-default-model">${settings.models.map((model) => `<option value="${escapeAttr(model.name)}" ${model.name === settings.default_model ? "selected" : ""}>${escapeHtml(model.name || "未命名模型")}</option>`).join("")}</select>
         </label>
+        <div class="settings-subsection-header">
+          <div><h4>模型预设</h4><p>选择预设以查看或修改配置。</p></div>
+          <button id="settings-add-model" type="button" class="ghost-button settings-section-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增模型</span></button>
+        </div>
         <div class="settings-models">${settings.models.map(modelSettingsHtml).join("")}</div>
         <p class="settings-help">保存后不会更改正在运行的工作区。请重启 ME Gateway 以使用新设置。</p>
       </div>
@@ -5996,6 +6056,7 @@ if ("onscrollend" in elements.transcript) {
 elements.terminalView.addEventListener("scroll", () => {
   if (state.view.kind === "terminal") {
     state.terminalFollowBottom = terminalIsNearBottom(elements.terminalView);
+    if (!state.terminalFollowBottom) scheduleTerminalWindowRender();
   }
 }, { passive: true });
 function apiSpinnerIsActive() {

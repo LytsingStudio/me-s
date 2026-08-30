@@ -843,17 +843,18 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(transcriptContent.innerHTML).not.toContain("/chat");
   });
 
-  test("renders app-like settings sections and collapsed model cards with visible API Keys", () => {
+  test("renders a flat classic settings page with collapsed model presets and visible API Keys", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     const model = {
       ...gateway.blankGatewayModel(), name: "model-a", provider: "openai-compatible", api_key: "visible-key",
     };
     const html = gateway.modelSettingsHtml(model, 0);
     expect(html.startsWith('<details class="settings-model" data-settings-model="0">')).toBe(true);
-    expect(html).toContain('class="settings-model-icon-wrap"');
+    expect(html).toContain('class="settings-model-icon"');
     expect(html).toContain('class="settings-model-body"');
-    expect(html).toContain("<h4>基本与连接</h4>");
-    expect(html).toContain("<h4>高级配置</h4>");
+    expect(html).toContain('class="settings-model-advanced"');
+    expect(html).not.toContain("<h4>基本与连接</h4>");
+    expect(html).not.toContain("<h4>高级配置</h4>");
     expect(html).toContain('data-setting="api_key" type="text"');
     expect(html).toContain('value="visible-key"');
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
@@ -861,9 +862,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     expect(source).toContain('class="settings-section settings-model-section"');
     expect(source).toContain('class="settings-default-model"');
+    expect(source).toContain('class="settings-subsection-header"');
+    expect(source).not.toContain('class="settings-section-icon"');
     expect(source).toContain('kind: "settings"');
     expect(styles).toContain(".settings-modal-backdrop .modal { width: min(820px, calc(100vw - 40px));");
-    expect(styles).toContain(".settings-section { overflow: hidden;");
+    expect(styles).toContain(".settings-section { overflow: visible;");
+    expect(styles).not.toContain(".settings-section-icon");
     expect(index).toContain('id="open-settings" class="sidebar-settings" type="button" title="设置" aria-label="设置"><svg');
     expect(index).not.toContain('id="environment-footer"');
   });
