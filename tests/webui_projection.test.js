@@ -129,6 +129,23 @@ describe("WebUI incremental event projections", () => {
     expect(separated).not.toContain("follows-tool");
   });
 
+  test("preserves entered user whitespace without adding template spacing and aligns notices", () => {
+    const runtime = loadProjectionRuntime();
+    const plain = runtime.renderMessageHtml({ kind: "user", content: "plain\nsecond" }, false);
+    expect(plain).toContain('<div class="user-message-content">plain\nsecond</div>');
+    expect(plain).not.toContain('class="user-message-content"> plain');
+
+    const indented = runtime.renderMessageHtml({ kind: "user", content: "  indented\n\tcontinued" }, false);
+    expect(indented).toContain('<div class="user-message-content">  indented\n\tcontinued</div>');
+    expect(runtime.renderMessageHtml({ kind: "notice", content: "first\nsecond" }, false))
+      .toContain('<div class="notice-content">first\nsecond</div>');
+
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    expect(styles).toContain(".user-message-content { min-width: 0; line-height: 1.55;");
+    expect(styles).toContain(".message-block.notice, .message-block.session { align-items: baseline; }");
+    expect(styles).toContain(".notice-content, .session-content { color: var(--muted); line-height: 1.55;");
+  });
+
   test("uses the persisted normalized context categories", () => {
     const runtime = loadProjectionRuntime();
     const usage = { input_tokens: 9_000, output_tokens: 1_000, total_tokens: 10_000 };

@@ -160,9 +160,11 @@ describe("shared WebUI themes", () => {
     expect(index.indexOf('href="/style.css"')).toBeLessThan(index.indexOf('href="/theme.css"'));
     expect(index).not.toContain('<header class="brand">');
     expect(index).not.toContain('id="connection-label"');
+    expect(index).not.toContain('id="environment-footer"');
     const sidebarFooterStart = index.indexOf('<footer class="sidebar-footer">');
     const sidebarFooter = index.slice(sidebarFooterStart, index.indexOf("</footer>", sidebarFooterStart));
     expect(sidebarFooter).toContain('class="sidebar-appearance" role="group" aria-label="外观设置"');
+    expect(sidebarFooter).toContain('id="open-settings" class="sidebar-settings"');
     expect(sidebarFooter).toContain('id="theme-cycle" class="theme-control theme-cycle"');
     expect(sidebarFooter).toContain('class="theme-icon theme-icon-shirt"');
     expect(sidebarFooter).toContain('id="theme-mode" class="theme-control theme-mode"');
@@ -209,7 +211,7 @@ describe("shared WebUI themes", () => {
     expect(styles).toContain("background: var(--modal-backdrop-bg);");
     expect(styles).toContain("background: linear-gradient(135deg, var(--brand-start), var(--brand-mid), var(--brand-end));");
     expect(styles).toContain(".sidebar-footer { display: flex; width: 100%; min-width: 0; max-width: 100%;");
-    expect(styles).toContain(".sidebar-footer > #environment-footer { min-width: 0; flex: 1 1 0;");
+    expect(styles).not.toContain("#environment-footer");
     expect(styles).toContain(".sidebar-appearance { display: flex;");
     expect(styles).toContain(".theme-control { display: grid;");
     expect(styles).toContain(".status-model-selector { display: inline-flex; min-width: 0; max-width: 100%;");

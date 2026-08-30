@@ -328,20 +328,23 @@
       section.className = "edb-cache-settings";
       const heading = documentValue.createElement("div");
       heading.className = "edb-cache-heading";
+      const icon = documentValue.createElement("span");
+      icon.className = "settings-section-icon edb-cache-icon";
+      icon.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><ellipse cx="12" cy="6" rx="7.5" ry="3"/><path d="M4.5 6v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3V6M4.5 12v6c0 1.7 3.4 3 7.5 3s7.5-1.3 7.5-3v-6"/></svg>';
       const copy = documentValue.createElement("div");
       const title = documentValue.createElement("h3");
       title.textContent = "会话缓存";
       const description = documentValue.createElement("p");
-      description.textContent = "仅缓存原始 EDB 事件；消息、工具和界面状态每次都会重新生成。";
+      description.textContent = "管理此设备保存的会话数据，以便更快恢复历史内容。";
       copy.append(title, description);
-      heading.appendChild(copy);
+      heading.append(icon, copy);
       section.appendChild(heading);
       container.appendChild(section);
 
       if (!this.available) {
         const unavailable = documentValue.createElement("div");
         unavailable.className = "edb-cache-empty";
-        unavailable.textContent = this.disabledReason || `${options.storageLabel || "当前浏览器"}不支持本地 EDB 缓存。`;
+        unavailable.textContent = this.disabledReason || `${options.storageLabel || "当前浏览器"}不支持本地会话缓存。`;
         section.appendChild(unavailable);
         return;
       }

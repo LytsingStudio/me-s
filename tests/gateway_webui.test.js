@@ -843,18 +843,29 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(transcriptContent.innerHTML).not.toContain("/chat");
   });
 
-  test("renders icon settings and collapsed model cards with visible API Keys", () => {
+  test("renders app-like settings sections and collapsed model cards with visible API Keys", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     const model = {
       ...gateway.blankGatewayModel(), name: "model-a", provider: "openai-compatible", api_key: "visible-key",
     };
     const html = gateway.modelSettingsHtml(model, 0);
     expect(html.startsWith('<details class="settings-model" data-settings-model="0">')).toBe(true);
-    expect(html).toContain('class="settings-model-icon"');
+    expect(html).toContain('class="settings-model-icon-wrap"');
+    expect(html).toContain('class="settings-model-body"');
+    expect(html).toContain("<h4>基本与连接</h4>");
+    expect(html).toContain("<h4>高级配置</h4>");
     expect(html).toContain('data-setting="api_key" type="text"');
     expect(html).toContain('value="visible-key"');
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    expect(source).toContain('class="settings-section settings-model-section"');
+    expect(source).toContain('class="settings-default-model"');
+    expect(source).toContain('kind: "settings"');
+    expect(styles).toContain(".settings-modal-backdrop .modal { width: min(820px, calc(100vw - 40px));");
+    expect(styles).toContain(".settings-section { overflow: hidden;");
     expect(index).toContain('id="open-settings" class="sidebar-settings" type="button" title="设置" aria-label="设置"><svg');
+    expect(index).not.toContain('id="environment-footer"');
   });
 
   test("keeps runtime-specific login branding free of marketing taglines", () => {
@@ -951,7 +962,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain(".message-modal-backdrop .modal > footer { min-height: 72px;");
     expect(styles).toContain(".message-modal-backdrop .modal { width: 100%; min-height: min(280px, calc(86dvh - env(safe-area-inset-top))); }");
     expect(source).toContain("const messageOnly = modal.html == null && !choices.length;");
-    expect(source).toContain('classList.remove("directory-modal-backdrop", "message-modal-backdrop")');
+    expect(source).toContain('classList.remove("directory-modal-backdrop", "message-modal-backdrop", "settings-modal-backdrop")');
     expect(source).toContain('html: `<div class="directory-browser"></div>`');
     expect(source).toContain('html: `<div class="settings-editor"></div>`');
   });

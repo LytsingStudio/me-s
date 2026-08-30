@@ -179,7 +179,6 @@ const elements = {
   connectionRetry: $("#connection-retry"),
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
-  environment: $("#environment-footer"),
   sidebarScroll: $(".sidebar-scroll"),
   workspaceList: $("#workspace-list"),
   createWorkspace: $("#create-workspace"),
@@ -1511,7 +1510,6 @@ function setConnectionPhase(phase) {
   state.connectionPhase = phase;
   state.connected = phase === "connected" || phase === "degraded";
   state.connecting = ["initial", "degraded", "reconnecting", "stabilizing"].includes(phase);
-  if (changed) renderConnection();
   return changed;
 }
 
@@ -2949,7 +2947,6 @@ function renderAll() {
   const changes = advanceCurrentProjection();
   const promptConfirmed = beginConfirmedPromptRender(changes);
   applyCompactApiActivity(currentProjection(), state.apiActivity);
-  renderConnection();
   renderAgents();
   renderTabs();
   renderAgentControls();
@@ -2978,7 +2975,6 @@ function renderIncremental(request) {
   }
   const promptConfirmed = beginConfirmedPromptRender(changes);
   let transcriptChanged = false;
-  if (request.connection) renderConnection();
   if (request.agents) renderAgents();
   if (request.tabs) renderTabs();
   if (request.tabs || request.currentEvents) renderSystemPromptEditor();
@@ -3075,13 +3071,6 @@ function finishTranscriptScrolling() {
   transcriptBottomFollower.noteScrollEnd();
 }
 
-function renderConnection() {
-  const environment = state.snapshot.environment;
-  elements.environment.textContent = environment
-    ? `${environment.system} · ${window.location.host}`
-    : window.location.host;
-  elements.environment.title = environment?.workspace || "";
-}
 
 function workspaceUiState(workspaceId) {
   return workspaceId === state.workspaceId ? state : gatewayWorkspaceState(workspaceId);
@@ -3686,7 +3675,7 @@ function messageDomKey(message, index) {
 
 function renderMessageHtml(message, afterTool, followsTool = false) {
   if (!messageIsVisible(message)) return `<div class="message-block projection-hidden hidden" aria-hidden="true"></div>`;
-  if (message.kind === "user") return `<div class="message-block user"><div class="user-message-content"> ${escapeHtml(message.content)}</div><button class="user-message-actions" type="button" aria-label="消息操作" aria-haspopup="menu" aria-expanded="false">···</button></div>`;
+  if (message.kind === "user") return `<div class="message-block user"><div class="user-message-content">${escapeHtml(message.content)}</div><button class="user-message-actions" type="button" aria-label="消息操作" aria-haspopup="menu" aria-expanded="false">···</button></div>`;
   if (message.kind === "assistant") return `<div class="message-block assistant ${afterTool ? "after-tool" : ""}"><span class="block-marker">●</span><div class="markdown">${renderMarkdown(message.content.trim())}</div></div>`;
   if (message.kind === "turn-toolbar") return `<div class="message-block turn-toolbar" aria-label="本轮用时"><span>▶ 用时 ${formatTurnElapsed(message.durationMs)} · ${formatTurnTokens(message.tokenCount)} · ${formatTurnCompletedAt(message.timestamp)}</span><div class="turn-actions"><button class="clone-turn" type="button">克隆</button><button class="regenerate-turn" type="button">重新生成</button></div></div>`;
   if (message.kind === "tool") return renderToolCard(message.tool, followsTool);
@@ -5054,32 +5043,44 @@ function blankGatewayModel() {
 
 function modelSettingsHtml(model, index) {
   const value = (name) => escapeAttr(model[name] ?? "");
+  const identity = model.model || "尚未填写模型标识";
   return `<details class="settings-model" data-settings-model="${index}">
     <summary>
       <span class="settings-model-title">
-        <svg class="settings-model-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg>
-        <strong>${escapeHtml(model.name || "新模型")}</strong>
+        <span class="settings-model-icon-wrap"><svg class="settings-model-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg></span>
+        <span class="settings-model-heading"><strong>${escapeHtml(model.name || "新模型")}</strong><small>${escapeHtml(identity)}</small></span>
       </span>
-      <span class="settings-model-provider">${escapeHtml(model.provider)}</span>
+      <span class="settings-model-summary-meta">
+        <span class="settings-model-provider">${escapeHtml(model.provider)}</span>
+        <svg class="settings-model-chevron" viewBox="0 0 24 24" aria-hidden="true"><path d="m9 7 5 5-5 5"/></svg>
+      </span>
     </summary>
-    <div class="settings-grid">
-      <label>显示名称<input data-setting="name" value="${value("name")}"></label>
-      <label>Provider<select data-setting="provider"><option value="openai-compatible" ${model.provider === "openai-compatible" ? "selected" : ""}>OpenAI Compatible</option><option value="anthropic" ${model.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="codex-oauth" ${model.provider === "codex-oauth" ? "selected" : ""}>Codex OAuth</option></select></label>
-      <label>Base URL<input data-setting="base_url" value="${value("base_url")}"></label>
-      <label>Endpoint<input data-setting="endpoint" value="${value("endpoint")}"></label>
-      <label>模型标识<input data-setting="model" value="${value("model")}"></label>
-      <label>请求超时（秒）<input data-setting="timeout_seconds" type="number" min="1" value="${Number(model.timeout_seconds) || 120}"></label>
-      <label>API Key 环境变量<input data-setting="api_key_env" value="${value("api_key_env")}"></label>
-      <label>凭据文件<input data-setting="credential_file" value="${value("credential_file")}"></label>
-      <label>来源地址<input data-setting="source_url" value="${value("source_url")}"></label>
-      <label>API Key<input data-setting="api_key" type="text" autocomplete="off" value="${value("api_key")}" placeholder="留空表示不设置"></label>
-      <label class="settings-check"><input data-setting="reserve_output_context" type="checkbox" ${model.reserve_output_context ? "checked" : ""}>为输出预留上下文</label>
-      <label class="settings-check"><input data-setting="clear_inline_api_key" type="checkbox" ${model.clear_inline_api_key ? "checked" : ""}>清除已保存的 API Key</label>
+    <div class="settings-model-body">
+      <section class="settings-model-group">
+        <h4>基本与连接</h4>
+        <div class="settings-grid">
+          <label>显示名称<input data-setting="name" value="${value("name")}"></label>
+          <label>Provider<select data-setting="provider"><option value="openai-compatible" ${model.provider === "openai-compatible" ? "selected" : ""}>OpenAI Compatible</option><option value="anthropic" ${model.provider === "anthropic" ? "selected" : ""}>Anthropic</option><option value="codex-oauth" ${model.provider === "codex-oauth" ? "selected" : ""}>Codex OAuth</option></select></label>
+          <label>Base URL<input data-setting="base_url" value="${value("base_url")}"></label>
+          <label>Endpoint<input data-setting="endpoint" value="${value("endpoint")}"></label>
+          <label>模型标识<input data-setting="model" value="${value("model")}"></label>
+          <label>请求超时（秒）<input data-setting="timeout_seconds" type="number" min="1" value="${Number(model.timeout_seconds) || 120}"></label>
+          <label>API Key 环境变量<input data-setting="api_key_env" value="${value("api_key_env")}"></label>
+          <label>凭据文件<input data-setting="credential_file" value="${value("credential_file")}"></label>
+          <label>来源地址<input data-setting="source_url" value="${value("source_url")}"></label>
+          <label>API Key<input data-setting="api_key" type="text" autocomplete="off" value="${value("api_key")}" placeholder="留空表示不设置"></label>
+          <label class="settings-check"><input data-setting="reserve_output_context" type="checkbox" ${model.reserve_output_context ? "checked" : ""}>为输出预留上下文</label>
+          <label class="settings-check"><input data-setting="clear_inline_api_key" type="checkbox" ${model.clear_inline_api_key ? "checked" : ""}>清除已保存的 API Key</label>
+        </div>
+      </section>
+      <section class="settings-model-group settings-model-advanced">
+        <h4>高级配置</h4>
+        <label>能力配置（JSON）<textarea data-setting="capabilities" rows="7">${escapeHtml(JSON.stringify(model.capabilities, null, 2))}</textarea></label>
+        <label>请求参数（JSON）<textarea data-setting="parameters" rows="5">${escapeHtml(JSON.stringify(model.parameters || {}, null, 2))}</textarea></label>
+        <label>推理强度参数（JSON）<textarea data-setting="effort_parameters" rows="5">${escapeHtml(JSON.stringify(model.effort_parameters || {}, null, 2))}</textarea></label>
+      </section>
+      <div class="settings-model-danger"><button type="button" class="ghost-button danger settings-remove-model" data-remove-model="${index}">移除模型</button></div>
     </div>
-    <label>能力配置（JSON）<textarea data-setting="capabilities" rows="7">${escapeHtml(JSON.stringify(model.capabilities, null, 2))}</textarea></label>
-    <label>请求参数（JSON）<textarea data-setting="parameters" rows="5">${escapeHtml(JSON.stringify(model.parameters || {}, null, 2))}</textarea></label>
-    <label>推理强度参数（JSON）<textarea data-setting="effort_parameters" rows="5">${escapeHtml(JSON.stringify(model.effort_parameters || {}, null, 2))}</textarea></label>
-    <button type="button" class="ghost-button danger settings-remove-model" data-remove-model="${index}">移除模型</button>
   </details>`;
 }
 
@@ -5118,12 +5119,13 @@ function renderGatewayEdbCacheSettings() {
 
 function openEdbCacheSettings() {
   openModal({
+    kind: "settings",
     title: "设置",
     description: "管理此设备保存的会话缓存。",
     choices: [],
     selected: null,
     confirmLabel: null,
-    html: "<div id=\"settings-edb-cache-manager\" class=\"edb-cache-manager\"></div>",
+    html: "<div id=\"settings-edb-cache-manager\" class=\"edb-cache-manager settings-cache-manager\"></div>",
     onOpen: renderGatewayEdbCacheSettings,
   });
 }
@@ -5132,11 +5134,24 @@ function renderSettingsModal() {
   const settings = state.modal?.settings;
   if (!settings) return;
   elements.modalContent.innerHTML = `<div class="settings-editor">
-    <label>默认模型<select id="settings-default-model">${settings.models.map((model) => `<option value="${escapeAttr(model.name)}" ${model.name === settings.default_model ? "selected" : ""}>${escapeHtml(model.name || "未命名模型")}</option>`).join("")}</select></label>
-    <div class="settings-models">${settings.models.map(modelSettingsHtml).join("")}</div>
-    <button id="settings-add-model" type="button" class="ghost-button">新增模型</button>
-    <p class="settings-help">保存后不会更改正在运行的工作区。请重启 ME Gateway 以使用新设置。</p>
-    <div id="settings-edb-cache-manager" class="edb-cache-manager"></div>
+    <section class="settings-section settings-model-section">
+      <header class="settings-section-header">
+        <div class="settings-section-heading">
+          <span class="settings-section-icon"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 4.5 7.2v9.6L12 21l7.5-4.2V7.2L12 3Z"/><path d="m4.8 7.4 7.2 4 7.2-4M12 11.4V21"/></svg></span>
+          <div><h3>模型</h3><p>管理可用模型并选择默认模型。</p></div>
+        </div>
+        <button id="settings-add-model" type="button" class="ghost-button settings-section-action"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg><span>新增模型</span></button>
+      </header>
+      <div class="settings-section-content">
+        <label class="settings-default-model">
+          <span class="settings-default-copy"><strong>默认模型</strong><small>选择全局默认使用的模型。</small></span>
+          <select id="settings-default-model">${settings.models.map((model) => `<option value="${escapeAttr(model.name)}" ${model.name === settings.default_model ? "selected" : ""}>${escapeHtml(model.name || "未命名模型")}</option>`).join("")}</select>
+        </label>
+        <div class="settings-models">${settings.models.map(modelSettingsHtml).join("")}</div>
+        <p class="settings-help">保存后不会更改正在运行的工作区。请重启 ME Gateway 以使用新设置。</p>
+      </div>
+    </section>
+    <div id="settings-edb-cache-manager" class="edb-cache-manager settings-cache-manager"></div>
   </div>`;
   elements.modalContent.querySelector("#settings-add-model")?.addEventListener("click", () => {
     if (!captureSettingsEditor()) return;
@@ -5204,7 +5219,8 @@ async function openGatewaySettings() {
   try {
     const settings = await api("/api/gateway/settings");
     openModal({
-      title: "设置", description: "编辑 ME 的全局模型设置。",
+      kind: "settings",
+      title: "设置", description: "管理模型配置与此设备保存的会话缓存。",
       choices: [], selected: null, confirmLabel: "保存设置", html: `<div class="settings-editor"></div>`,
       settings, onOpen: renderSettingsModal,
       onConfirm: async () => {
@@ -5257,6 +5273,7 @@ function openModal(modal) {
   }));
   elements.modalBackdrop.classList.toggle("message-modal-backdrop", messageOnly);
   elements.modalBackdrop.classList.toggle("directory-modal-backdrop", modal.kind === "directory");
+  elements.modalBackdrop.classList.toggle("settings-modal-backdrop", modal.kind === "settings");
   elements.modalBackdrop.classList.remove("hidden");
   state.modal.onOpen?.(elements.modalContent);
 }
@@ -5264,7 +5281,7 @@ function openModal(modal) {
 function closeModal() {
   state.modal = null;
   elements.modalBackdrop.classList.add("hidden");
-  elements.modalBackdrop.classList.remove("directory-modal-backdrop", "message-modal-backdrop");
+  elements.modalBackdrop.classList.remove("directory-modal-backdrop", "message-modal-backdrop", "settings-modal-backdrop");
 }
 
 function cancelModal() {

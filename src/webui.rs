@@ -3204,11 +3204,12 @@ mod tests {
     }
 
     #[test]
-    fn default_webui_port_and_dynamic_page_address_are_consistent() {
+    fn default_webui_port_has_no_hard_coded_page_address_or_environment_summary() {
         assert_eq!(DEFAULT_PORT, 38199);
         assert!(!INDEX_HTML.contains("0.0.0.0:38199"));
         assert!(!APP_JS.contains("0.0.0.0:38199"));
-        assert!(APP_JS.contains("window.location.host"));
+        assert!(!INDEX_HTML.contains("environment-footer"));
+        assert!(!APP_JS.contains("environment-footer"));
         assert!(!INDEX_HTML.contains("0.0.0.0:8189"));
         assert!(!APP_JS.contains("0.0.0.0:8189"));
     }
