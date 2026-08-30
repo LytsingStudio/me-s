@@ -1048,7 +1048,7 @@ button { color: inherit; }
 .remote-control-toolbar label { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 6px; color: var(--muted); font-size: 12px; white-space: nowrap; }
 .remote-control-toolbar select { min-width: 84px; padding: 5px 28px 5px 9px; cursor: pointer; }
 .remote-control-stage { position: relative; display: flex; min-width: 0; min-height: 0; flex: 1 1 auto; align-items: center; justify-content: center; margin: 14px; overflow: hidden; border: 1px solid var(--border-bright); border-radius: 12px; background: var(--terminal-bg); box-shadow: inset 0 0 0 1px rgb(255 255 255 / .02); touch-action: none; user-select: none; -webkit-user-select: none; }
-.remote-control-stage img { display: block; width: auto; height: auto; max-width: 100%; max-height: 100%; object-fit: contain; cursor: crosshair; touch-action: none; -webkit-user-drag: none; }
+.remote-control-stage img { display: block; width: 100%; height: 100%; object-fit: contain; cursor: crosshair; touch-action: none; -webkit-user-drag: none; }
 .remote-control-stage img[hidden] { display: none; }
 .remote-control-empty { max-width: 420px; padding: 24px; color: var(--muted); text-align: center; line-height: 1.55; }
 .remote-control-keyboard { position: absolute; z-index: 2; left: 50%; bottom: 0; width: 2px; height: 2px; padding: 0; transform: translateX(-50%); border: 0; opacity: .01; background: transparent; color: transparent; caret-color: transparent; font-size: 16px; resize: none; }

@@ -164,6 +164,12 @@ describe("RemoteControl shared WebUI controller", () => {
       .toEqual({ x: 200, y: 100 });
     expect(RemoteControl.mapPointerToScreen(100, 50, { left: 0, top: 0, width: 100, height: 50 }, 400, 200))
       .toEqual({ x: 399, y: 199 });
+    expect(RemoteControl.mapPointerToScreen(200, 50, { left: 0, top: 0, width: 400, height: 400 }, 400, 200, 200, 100))
+      .toBeNull();
+    expect(RemoteControl.mapPointerToScreen(200, 200, { left: 0, top: 0, width: 400, height: 400 }, 400, 200, 200, 100))
+      .toEqual({ x: 200, y: 100 });
+    expect(RemoteControl.mapPointerToScreen(400, 300, { left: 0, top: 0, width: 400, height: 400 }, 400, 200, 200, 100))
+      .toEqual({ x: 399, y: 199 });
     expect(RemoteControl.normalizeWheelDelta(80, 0)).toBe(-1);
     expect(RemoteControl.normalizeWheelDelta(-2, 1)).toBe(2);
     expect(RemoteControl.isExitShortcut({ ctrlKey: true, shiftKey: true, code: "KeyE" })).toBe(true);
@@ -221,6 +227,22 @@ describe("RemoteControl shared WebUI controller", () => {
     expect(controller.snapshot().owned).toBe(false);
     expect(controller.snapshot().frameCount).toBe(countBeforeStop);
     expect(elements.image.hidden).toBe(false);
+    controller.dispose();
+  });
+
+  test("stops an owned remote-control session when its view is deactivated", async () => {
+    const log = requestLog([7]);
+    const { controller, elements } = fixture(log.request);
+    controller.activate();
+    await settle();
+    elements.start.dispatch("click");
+    await settle(50);
+    expect(controller.snapshot().owned).toBe(true);
+
+    controller.deactivate();
+    await settle(50);
+    expect(log.requests.some((entry) => entry.action === "stop")).toBe(true);
+    expect(controller.snapshot().owned).toBe(false);
     controller.dispose();
   });
 
@@ -326,6 +348,9 @@ describe("RemoteControl shared WebUI controller", () => {
     expect(html).toContain('<option value="50" selected>50%</option>');
     expect(html).toContain("frame: 0");
     expect(html).toContain('<script src="/remote-control.js"></script>');
+
+    const style = read("src/webui/style.css");
+    expect(style).toContain(".remote-control-stage img { display: block; width: 100%; height: 100%; object-fit: contain;");
 
     const sharedApp = read("src/webui/app.js");
     const directRuntime = read("src/webui/runtime.js");

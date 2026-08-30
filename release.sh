@@ -20,6 +20,7 @@ DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/.build/release"
 CACHE_DIR="${ME_RELEASE_CACHE_DIR:-$ROOT_DIR/.build/release-cache}"
 WINDOWS_TARGET=x86_64-pc-windows-msvc
+BUILD_CACHE_MAX_SIZE=10gb
 PACKAGE_ASSETS=(
     ME-macos-universal.pkg
     ME-windows-x86_64-setup.exe
@@ -29,6 +30,15 @@ PACKAGE_ASSETS=(
 
 require_command() {
     command -v "$1" >/dev/null 2>&1 || { echo "error: missing release dependency: $1" >&2; exit 1; }
+}
+
+cleanup_build_cache() {
+    echo "limiting Docker BuildKit cache to $BUILD_CACHE_MAX_SIZE"
+    docker buildx prune --all --max-used-space "$BUILD_CACHE_MAX_SIZE" --force
+    if command -v colima >/dev/null 2>&1 && [[ "$(docker context show)" == colima ]]; then
+        echo "reclaiming unused Colima disk blocks"
+        colima ssh -- sudo fstrim -v /var/lib/docker
+    fi
 }
 
 for command in bun cargo docker file git lipo makensis node pkgbuild pkgutil rustup shasum xcrun; do
@@ -164,6 +174,7 @@ scripts/verify-release-artifacts.sh "$DIST_DIR"
 
 echo "all release assets were built and statically verified in $DIST_DIR"
 if $BUILD_ONLY; then
+    cleanup_build_cache
     exit 0
 fi
 
@@ -194,5 +205,8 @@ if [[ "$REMOTE_TAG_COMMIT" != "$HEAD_COMMIT" ]]; then
     exit 1
 fi
 
+RELEASE_URL="$(gh release view "$TAG" --repo "$REPOSITORY" --json url --jq .url)"
+cleanup_build_cache
+
 echo "published release:"
-gh release view "$TAG" --repo "$REPOSITORY" --json url --jq .url
+printf '%s\n' "$RELEASE_URL"

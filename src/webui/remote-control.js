@@ -52,10 +52,31 @@
     return { sequence, screenWidth, screenHeight, frameWidth, frameHeight };
   }
 
-  function mapPointerToScreen(clientX, clientY, rect, screenWidth, screenHeight) {
-    if (!rect || rect.width <= 0 || rect.height <= 0 || screenWidth <= 0 || screenHeight <= 0) return null;
-    const xRatio = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
-    const yRatio = Math.max(0, Math.min(1, (clientY - rect.top) / rect.height));
+  function containedFrameRect(rect, frameWidth, frameHeight) {
+    if (!rect || !Number.isFinite(rect.left) || !Number.isFinite(rect.top)
+      || rect.width <= 0 || rect.height <= 0 || frameWidth <= 0 || frameHeight <= 0) return null;
+    const scale = Math.min(rect.width / frameWidth, rect.height / frameHeight);
+    const width = frameWidth * scale;
+    const height = frameHeight * scale;
+    return {
+      left: rect.left + ((rect.width - width) / 2),
+      top: rect.top + ((rect.height - height) / 2),
+      width,
+      height,
+    };
+  }
+
+  function mapPointerToScreen(clientX, clientY, rect, screenWidth, screenHeight,
+    frameWidth = screenWidth, frameHeight = screenHeight) {
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)
+      || screenWidth <= 0 || screenHeight <= 0) return null;
+    const frameRect = containedFrameRect(rect, frameWidth, frameHeight);
+    if (!frameRect) return null;
+    const right = frameRect.left + frameRect.width;
+    const bottom = frameRect.top + frameRect.height;
+    if (clientX < frameRect.left || clientX > right || clientY < frameRect.top || clientY > bottom) return null;
+    const xRatio = (clientX - frameRect.left) / frameRect.width;
+    const yRatio = (clientY - frameRect.top) / frameRect.height;
     return {
       x: Math.min(screenWidth - 1, Math.max(0, Math.floor(xRatio * screenWidth))),
       y: Math.min(screenHeight - 1, Math.max(0, Math.floor(yRatio * screenHeight))),
@@ -125,6 +146,8 @@
     let lastSequence = 0;
     let screenWidth = 0;
     let screenHeight = 0;
+    let frameWidth = 0;
+    let frameHeight = 0;
     let frameTicker = null;
     let frameAbort = null;
     let frameRequestStartedAt = 0;
@@ -244,6 +267,8 @@
           lastSequence = metadata.sequence;
           screenWidth = metadata.screenWidth;
           screenHeight = metadata.screenHeight;
+          frameWidth = metadata.frameWidth;
+          frameHeight = metadata.frameHeight;
           frameCount += 1;
           frameElement.textContent = `frame: ${frameCount}`;
           revokeImageUrl(previousUrl);
@@ -472,7 +497,7 @@
       updateUi();
     }
 
-    async function stopControl() {
+    async function stopControl(abandonOnFailure = false) {
       if (!owned || !controllerToken || disposed || stopInFlight) return;
       const token = controllerToken;
       stopInFlight = true;
@@ -492,7 +517,9 @@
       } catch (error) {
         stopInFlight = false;
         if (error?.code === "remote_control_not_owned") loseOwnership();
-        else {
+        else if (abandonOnFailure) {
+          loseOwnership();
+        } else {
           releasePending = true;
           if (!inputInFlight) void flushRelease();
           showError(error, true);
@@ -659,7 +686,8 @@
     }
 
     function pointerPosition(event) {
-      return mapPointerToScreen(event.clientX, event.clientY, image.getBoundingClientRect(), screenWidth, screenHeight);
+      return mapPointerToScreen(event.clientX, event.clientY, image.getBoundingClientRect(),
+        screenWidth, screenHeight, frameWidth, frameHeight);
     }
 
     function onPointerMove(event) {
@@ -671,9 +699,9 @@
     function onPointerDown(event) {
       if (!owned || image.hidden) return;
       event.preventDefault();
-      if (!enterCapture()) return;
       const position = pointerPosition(event);
-      if (position) queueInput({ kind: "mouse_move", ...position });
+      if (!position || !enterCapture()) return;
+      queueInput({ kind: "mouse_move", ...position });
       const button = mouseButtonName(event.button);
       if (!button) return;
       pressedButtons.add(button);
@@ -770,7 +798,8 @@
       viewActive = false;
       clearStatusRefresh();
       stopFrameTicker();
-      void exitCapture();
+      if (owned) void stopControl(true);
+      else void exitCapture();
     }
 
     function authenticationLost() {
@@ -790,7 +819,7 @@
       revokeImageUrl(imageUrl);
       imageUrl = null;
       startButton.removeEventListener("click", startControl);
-      stopButton.removeEventListener("click", stopControl);
+      stopButton.removeEventListener("click", onStopClick);
       screenshotButton.removeEventListener("click", screenshot);
       fpsSelect.removeEventListener("change", updateSettings);
       scaleSelect.removeEventListener("change", updateSettings);
@@ -811,6 +840,10 @@
       updateUi();
     }
 
+    function onStopClick() {
+      void stopControl();
+    }
+
     function preventContextMenu(event) {
       if (owned) event.preventDefault();
     }
@@ -824,7 +857,7 @@
     }
 
     startButton.addEventListener("click", startControl);
-    stopButton.addEventListener("click", stopControl);
+    stopButton.addEventListener("click", onStopClick);
     screenshotButton.addEventListener("click", screenshot);
     fpsSelect.addEventListener("change", updateSettings);
     scaleSelect.addEventListener("change", updateSettings);
