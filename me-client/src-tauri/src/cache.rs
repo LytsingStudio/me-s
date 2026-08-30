@@ -73,6 +73,14 @@ pub struct CacheChunk {
     pub done: bool,
 }
 
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RememberedDevice {
+    pub endpoint: String,
+    pub password: String,
+    pub updated_at: u64,
+}
+
 #[derive(Debug)]
 struct ExistingState {
     mutation_revision: u64,
@@ -109,6 +117,11 @@ impl CacheDatabase {
                 "CREATE TABLE IF NOT EXISTS client_settings (
                     key TEXT PRIMARY KEY,
                     value TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS remembered_devices (
+                    endpoint TEXT PRIMARY KEY,
+                    password TEXT NOT NULL,
+                    updated_at INTEGER NOT NULL
                 );
                 CREATE TABLE IF NOT EXISTS edb_sessions (
                     edb_id TEXT PRIMARY KEY,
@@ -155,6 +168,58 @@ impl CacheDatabase {
             )
             .map(|_| ())
             .map_err(|error| format!("无法保存客户端设置：{error}"))
+    }
+
+    pub fn remembered_devices(&self) -> Result<Vec<RememberedDevice>, String> {
+        let connection = self.connect()?;
+        let mut statement = connection
+            .prepare(
+                "SELECT endpoint, password, updated_at
+                 FROM remembered_devices ORDER BY updated_at DESC, endpoint ASC",
+            )
+            .map_err(|error| format!("无法读取已记住的设备：{error}"))?;
+        statement
+            .query_map([], |row| {
+                Ok(RememberedDevice {
+                    endpoint: row.get(0)?,
+                    password: row.get(1)?,
+                    updated_at: from_sql_u64(row.get::<_, i64>(2)?)?,
+                })
+            })
+            .map_err(|error| format!("无法读取已记住的设备：{error}"))?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| format!("无法读取已记住的设备：{error}"))
+    }
+
+    pub fn remember_device(
+        &self,
+        endpoint: &str,
+        password: &str,
+    ) -> Result<RememberedDevice, String> {
+        let updated_at = now_ms();
+        self.connect()?
+            .execute(
+                "INSERT INTO remembered_devices(endpoint, password, updated_at) VALUES(?1, ?2, ?3)
+                 ON CONFLICT(endpoint) DO UPDATE SET
+                    password = excluded.password, updated_at = excluded.updated_at",
+                params![endpoint, password, to_i64(updated_at, "timestamp")?],
+            )
+            .map_err(|error| format!("无法记住设备：{error}"))?;
+        Ok(RememberedDevice {
+            endpoint: endpoint.to_owned(),
+            password: password.to_owned(),
+            updated_at,
+        })
+    }
+
+    pub fn forget_device(&self, endpoint: &str) -> Result<(), String> {
+        self.connect()?
+            .execute(
+                "DELETE FROM remembered_devices WHERE endpoint = ?1",
+                params![endpoint],
+            )
+            .map(|_| ())
+            .map_err(|error| format!("无法忘记设备：{error}"))
     }
 
     pub fn load_metadata(&self, edb_ids: &[String]) -> Result<Vec<CacheMetadata>, String> {
@@ -634,6 +699,39 @@ mod tests {
         let _ = fs::remove_file(&path);
         let _ = fs::remove_file(path.with_extension("sqlite3-wal"));
         let _ = fs::remove_file(path.with_extension("sqlite3-shm"));
+    }
+
+    #[test]
+    fn remembered_devices_update_order_and_forget_without_touching_edb_cache() {
+        let database = test_database("remembered-devices");
+        database
+            .remember_device("https://first.example", "first password")
+            .unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        database
+            .remember_device("https://second.example", "second password")
+            .unwrap();
+        let devices = database.remembered_devices().unwrap();
+        assert_eq!(
+            devices
+                .iter()
+                .map(|device| device.endpoint.as_str())
+                .collect::<Vec<_>>(),
+            ["https://second.example", "https://first.example"]
+        );
+        assert_eq!(devices[0].password, "second password");
+
+        std::thread::sleep(std::time::Duration::from_millis(2));
+        database
+            .remember_device("https://first.example", "updated password")
+            .unwrap();
+        let devices = database.remembered_devices().unwrap();
+        assert_eq!(devices[0].endpoint, "https://first.example");
+        assert_eq!(devices[0].password, "updated password");
+        database.forget_device("https://second.example").unwrap();
+        assert_eq!(database.remembered_devices().unwrap().len(), 1);
+        assert!(database.list().unwrap().is_empty());
+        cleanup(database);
     }
 
     #[test]

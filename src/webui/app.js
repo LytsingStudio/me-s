@@ -36,6 +36,7 @@ const PORTRAIT_LAYOUT = matchMedia("(orientation: portrait)");
 const frontendRuntime = globalThis.MeFrontendRuntime;
 if (!frontendRuntime) throw new Error("ME frontend runtime is unavailable");
 const devicePreferences = frontendRuntime.devicePreferences || null;
+const rememberedDevices = frontendRuntime.rememberedDevices || null;
 const runtimeCapabilities = Object.freeze({
   multipleWorkspaces: false, gatewaySettings: false, targetConfiguration: false,
   nativeDownload: false, pageTitle: "ME", brandTitle: "ME", cacheStorageLabel: "当前浏览器",
@@ -45,6 +46,7 @@ const runtimeCapabilities = Object.freeze({
 const edbCache = frontendRuntime.createEdbCache();
 document.documentElement.classList.toggle("single-workspace", !runtimeCapabilities.multipleWorkspaces);
 document.documentElement.classList.toggle("target-configuration", runtimeCapabilities.targetConfiguration);
+document.documentElement.classList.toggle("remembered-device-logins", Boolean(rememberedDevices));
 document.title = runtimeCapabilities.pageTitle;
 const loginBrandTitle = document.querySelector(".login-brand strong");
 if (loginBrandTitle) loginBrandTitle.textContent = runtimeCapabilities.brandTitle;
@@ -118,6 +120,9 @@ const state = {
   contextCompactContent: null,
   contextCompactAnalysis: null,
   contextMemoryContent: null,
+  loginView: rememberedDevices ? "devices" : "form",
+  loginBusy: false,
+  localDevice: { endpoint: "http://127.0.0.1:38200", online: false, requiresPassword: false },
   authRequired: false,
   authenticated: false,
   connected: false,
@@ -156,6 +161,18 @@ const elements = {
   loginEndpoint: $("#login-endpoint"),
   loginError: $("#login-error"),
   loginSubmit: $("#login-submit"),
+  loginTitle: $("#login-title"),
+  loginDescription: $("#login-description"),
+  loginRemember: $("#login-remember"),
+  loginFormBack: $("#login-form-back"),
+  loginDevicePicker: $("#login-device-picker"),
+  loginLocalRow: $("#login-local-row"),
+  loginLocalForget: $("#login-local-forget"),
+  loginLocalDevice: $("#login-local-device"),
+  loginLocalDetail: $("#login-local-detail"),
+  loginLocalStatus: $("#login-local-status"),
+  loginRememberedList: $("#login-remembered-list"),
+  loginRemoteDevice: $("#login-remote-device"),
   connectionOverlay: $("#connection-overlay"),
   connectionOverlayTitle: $("#connection-overlay-title"),
   connectionOverlayMessage: $("#connection-overlay-message"),
@@ -1226,10 +1243,113 @@ async function initializeGateway() {
   void loadGatewayStartupMetadata(workspaceId);
 }
 
+function setLoginView(view) {
+  const next = rememberedDevices && view === "devices" ? "devices" : "form";
+  state.loginView = next;
+  elements.loginScreen.dataset.loginView = next;
+  if (next === "devices") {
+    elements.loginTitle.textContent = "选择设备";
+    elements.loginDescription.textContent = "连接本机或已记住的设备。";
+  } else if (rememberedDevices) {
+    elements.loginTitle.textContent = "连接远程设备";
+    elements.loginDescription.textContent = "输入服务地址和访问密码。";
+  } else {
+    elements.loginTitle.textContent = "登录";
+    elements.loginDescription.textContent = "请输入访问密码。";
+  }
+}
+
+function rememberedDeviceLabel(endpoint) {
+  try {
+    const url = new URL(endpoint);
+    return url.host || endpoint;
+  } catch (_) {
+    return endpoint;
+  }
+}
+
+function rememberedDeviceForEndpoint(endpoint) {
+  return rememberedDevices?.list().find((device) => device.endpoint === endpoint) || null;
+}
+
+function loginDeviceIcon() {
+  const icon = document.createElement("span");
+  icon.className = "login-device-icon";
+  icon.setAttribute("aria-hidden", "true");
+  icon.innerHTML = '<svg viewBox="0 0 24 24"><rect x="5" y="4" width="14" height="6" rx="2"></rect><rect x="5" y="14" width="14" height="6" rx="2"></rect><path d="M9 7h.01M9 17h.01M13 7h3M13 17h3"></path></svg>';
+  return icon;
+}
+
+function loginDeviceStatus(online) {
+  const status = document.createElement("span");
+  status.className = `login-device-status ${online ? "online" : "offline"}`;
+  status.textContent = online ? "在线" : "离线";
+  return status;
+}
+
+function renderLoginDevices() {
+  if (!rememberedDevices) return;
+  const local = state.localDevice;
+  const localRemembered = rememberedDeviceForEndpoint(local.endpoint);
+  elements.loginLocalRow.classList.toggle("has-remembered-password", Boolean(localRemembered));
+  elements.loginLocalForget.classList.toggle("hidden", !localRemembered);
+  elements.loginLocalForget.disabled = state.loginBusy;
+  elements.loginLocalDevice.disabled = state.loginBusy || !local.online;
+  elements.loginLocalDetail.textContent = local.online
+    ? local.endpoint : "未发现正在运行的 ME Gateway";
+  elements.loginLocalStatus.className = `login-device-status ${local.online ? "online" : "offline"}`;
+  elements.loginLocalStatus.textContent = local.online ? "在线" : "离线";
+  elements.loginRemoteDevice.disabled = state.loginBusy;
+  elements.loginRememberedList.textContent = "";
+  for (const device of rememberedDevices.list()) {
+    if (device.endpoint === local.endpoint) continue;
+    const row = document.createElement("div");
+    row.className = "login-remembered-row";
+    const connect = document.createElement("button");
+    connect.type = "button";
+    connect.className = "login-device-row";
+    connect.dataset.loginEndpoint = device.endpoint;
+    connect.disabled = state.loginBusy || !device.online;
+    connect.append(loginDeviceIcon());
+    const copy = document.createElement("span");
+    copy.className = "login-device-copy";
+    const title = document.createElement("strong");
+    title.textContent = rememberedDeviceLabel(device.endpoint);
+    const detail = document.createElement("span");
+    detail.textContent = device.endpoint;
+    copy.append(title, detail);
+    connect.append(copy, loginDeviceStatus(device.online));
+    const forget = document.createElement("button");
+    forget.type = "button";
+    forget.className = "login-device-forget";
+    forget.dataset.forgetEndpoint = device.endpoint;
+    forget.disabled = state.loginBusy;
+    forget.title = `忘记 ${title.textContent}`;
+    forget.setAttribute("aria-label", forget.title);
+    forget.innerHTML = '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path></svg>';
+    row.append(connect, forget);
+    elements.loginRememberedList.append(row);
+  }
+}
+
+function setLoginBusy(busy) {
+  state.loginBusy = Boolean(busy);
+  elements.loginSubmit.disabled = state.loginBusy;
+  elements.loginSubmit.textContent = state.loginBusy ? "正在连接…" : "登录";
+  elements.loginEndpoint.disabled = state.loginBusy;
+  elements.loginPassword.disabled = state.loginBusy;
+  elements.loginRemember.disabled = state.loginBusy;
+  elements.loginFormBack.disabled = state.loginBusy;
+  renderLoginDevices();
+}
+
 function showLogin(message = "") {
   const alreadyVisible = !state.authenticated
     && !elements.loginScreen.classList.contains("hidden");
+  if (rememberedDevices) setLoginView("devices");
+  else setLoginView("form");
   elements.loginError.textContent = message;
+  renderLoginDevices();
   if (alreadyVisible) return;
 
   deactivateSessionTerminalView();
@@ -1242,9 +1362,18 @@ function showLogin(message = "") {
   hideConnectionOverlay();
   elements.app.classList.add("hidden");
   elements.loginScreen.classList.remove("hidden");
-  const target = runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint
-    ? elements.loginEndpoint : elements.loginPassword;
+  const target = state.loginView === "devices"
+    ? (elements.loginLocalDevice.disabled ? elements.loginRemoteDevice : elements.loginLocalDevice)
+    : (runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint
+      ? elements.loginEndpoint : elements.loginPassword);
   target?.focus();
+}
+
+function showLoginPreservingView(message) {
+  const view = state.loginView;
+  showLogin(message);
+  if (rememberedDevices) setLoginView(view);
+  elements.loginError.textContent = message;
 }
 
 function showApplication() {
@@ -1260,7 +1389,17 @@ async function initializeAuthentication() {
     restoreRuntimeDevicePreferences();
     if (runtimeCapabilities.targetConfiguration) {
       state.authRequired = true;
+      state.localDevice = {
+        endpoint: String(bootstrap.localDevice?.endpoint || "http://127.0.0.1:38200"),
+        online: Boolean(bootstrap.localDevice?.online),
+        requiresPassword: Boolean(bootstrap.localDevice?.requiresPassword),
+      };
       if (elements.loginEndpoint) elements.loginEndpoint.value = bootstrap.endpoint || "";
+      renderLoginDevices();
+      if (rememberedDevices) {
+        showLogin();
+        return;
+      }
       if (!bootstrap.endpoint) {
         showLogin();
         return;
@@ -1283,14 +1422,15 @@ async function initializeAuthentication() {
   }
 }
 
-async function submitLogin(event) {
-  event.preventDefault();
-  elements.loginSubmit.disabled = true;
+async function performLogin({ endpoint, password, remember }) {
+  setLoginBusy(true);
   elements.loginError.textContent = "";
   try {
+    let configuredEndpoint = "";
     if (runtimeCapabilities.targetConfiguration) {
-      const configured = await frontendRuntime.configureTarget(elements.loginEndpoint?.value);
-      if (elements.loginEndpoint) elements.loginEndpoint.value = configured.endpoint;
+      const configured = await frontendRuntime.configureTarget(endpoint);
+      configuredEndpoint = configured.endpoint;
+      elements.loginEndpoint.value = configuredEndpoint;
       const status = await api("/api/auth/status");
       state.authRequired = Boolean(status.required);
       state.authenticated = Boolean(status.authenticated);
@@ -1299,25 +1439,70 @@ async function submitLogin(event) {
       await api("/api/auth/login", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          password: elements.loginPassword.value,
-          browser_port: BROWSER_PORT,
-        }),
+        body: JSON.stringify({ password, browser_port: BROWSER_PORT }),
       });
-      elements.loginPassword.value = "";
       state.authenticated = true;
     }
+    if (rememberedDevices && remember && configuredEndpoint) {
+      await rememberedDevices.remember(configuredEndpoint, password);
+    }
     elements.loginPassword.value = "";
+    renderLoginDevices();
     showApplication();
     await initializeGateway();
     restoreDraft();
     startHttpPolling();
   } catch (error) {
-    showLogin(error.message);
-    if (runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint) elements.loginEndpoint?.select();
-    else elements.loginPassword.select();
+    showLoginPreservingView(error.message);
+    if (state.loginView === "form") {
+      if (runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint) elements.loginEndpoint?.select();
+      else elements.loginPassword.select();
+    }
   } finally {
-    elements.loginSubmit.disabled = false;
+    setLoginBusy(false);
+  }
+}
+
+async function submitLogin(event) {
+  event.preventDefault();
+  await performLogin({
+    endpoint: elements.loginEndpoint?.value || "",
+    password: elements.loginPassword.value,
+    remember: Boolean(elements.loginRemember?.checked),
+  });
+}
+
+async function loginRememberedDevice(endpoint) {
+  const device = rememberedDeviceForEndpoint(endpoint);
+  if (!device?.online) return;
+  await performLogin({ endpoint: device.endpoint, password: device.password, remember: true });
+}
+
+async function loginLocalDevice() {
+  const local = state.localDevice;
+  if (!local.online) return;
+  const remembered = rememberedDeviceForEndpoint(local.endpoint);
+  await performLogin({
+    endpoint: local.endpoint,
+    password: remembered?.password || "",
+    remember: Boolean(remembered),
+  });
+}
+
+async function forgetRememberedDevice(endpoint) {
+  if (!rememberedDevices) return;
+  setLoginBusy(true);
+  elements.loginError.textContent = "";
+  try {
+    await rememberedDevices.forget(endpoint);
+    if (elements.loginEndpoint.value === endpoint) {
+      elements.loginPassword.value = "";
+      elements.loginRemember.checked = false;
+    }
+  } catch (error) {
+    elements.loginError.textContent = error.message;
+  } finally {
+    setLoginBusy(false);
   }
 }
 
@@ -5581,6 +5766,31 @@ elements.objective.addEventListener("click", toggleObjectiveDisclosure);
 elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);
 globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode, (message) => toast(message));
 elements.loginForm.addEventListener("submit", submitLogin);
+elements.loginRemoteDevice?.addEventListener("click", () => {
+  elements.loginError.textContent = "";
+  setLoginView("form");
+  elements.loginEndpoint?.focus({ preventScroll: true });
+  elements.loginScreen.scrollTop = 0;
+});
+elements.loginFormBack?.addEventListener("click", () => {
+  elements.loginError.textContent = "";
+  setLoginView("devices");
+  renderLoginDevices();
+  (elements.loginLocalDevice.disabled ? elements.loginRemoteDevice : elements.loginLocalDevice)?.focus();
+});
+elements.loginLocalDevice?.addEventListener("click", () => { void loginLocalDevice(); });
+elements.loginLocalForget?.addEventListener("click", () => {
+  void forgetRememberedDevice(state.localDevice.endpoint);
+});
+elements.loginRememberedList?.addEventListener("click", (event) => {
+  const forget = event.target.closest("button[data-forget-endpoint]");
+  if (forget) {
+    void forgetRememberedDevice(forget.dataset.forgetEndpoint);
+    return;
+  }
+  const connect = event.target.closest("button[data-login-endpoint]");
+  if (connect) void loginRememberedDevice(connect.dataset.loginEndpoint);
+});
 elements.connectionRetry.addEventListener("click", retryConnectionNow);
 elements.addAgent.addEventListener("click", () => { if (workspaceMetadataReady("chat")) { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); } });
 if (runtimeCapabilities.multipleWorkspaces) {

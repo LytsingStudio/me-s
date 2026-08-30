@@ -1032,8 +1032,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
     expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
     expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
-    expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 34px;");
-    expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 34px;");
+    expect(styles).toContain(".agent-row { display: grid; min-width: 0; min-height: 32px;");
+    expect(styles).toContain(".agent-item { display: flex; min-width: 0; width: 100%; min-height: 32px;");
     expect(styles).toContain(".agent-row.active { background: var(--agent-selected-bg); }");
     expect(styles).not.toContain(".agent-row.active { background: var(--agent-selected-bg); box-shadow:");
     expect(styles).toContain("animation: agent-dot-breathe 3s ease-in-out infinite;");
@@ -1062,8 +1062,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).not.toContain("if (state.workspaceId !== workspace.id) activateWorkspace(workspace.id);");
     expect(source).not.toContain('group.classList.toggle("active", active);');
     expect(styles).not.toContain(".workspace-group.active > .workspace-row");
-    expect(styles).toContain(".workspace-select { display: grid; min-width: 0; min-height: 34px;");
-    expect(styles).toContain(".workspace-agent-list .agent-row { min-height: 34px; }");
+    expect(styles).toContain(".workspace-select { display: grid; min-width: 0; min-height: 32px;");
+    expect(styles).toContain(".workspace-agent-list .agent-row { min-height: 32px; }");
     expect(source).not.toContain("select.title = workspace.path");
     expect(styles).toContain(".workspace-name { display: block; min-width: 0; overflow: hidden; font-size: 13px; font-weight: 750;");
     expect(styles).toContain(".sidebar-settings { display: grid; width: 32px; min-width: 32px; height: 32px; flex: 0 0 32px;");

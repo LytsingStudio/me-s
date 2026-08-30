@@ -35,8 +35,17 @@ function loadClientRuntime() {
               "me-color-mode": "light",
               "me-send-shortcut": "enter",
             },
+            rememberedDevices: [
+              { endpoint: "http://127.0.0.1:38200", password: "local secret", updatedAt: 2, online: true },
+              { endpoint: "https://offline.example", password: "old secret", updatedAt: 1, online: false },
+            ],
+            localDevice: { endpoint: "http://127.0.0.1:38200", online: true, requiresPassword: true },
           };
           if (command === "configure_target") return { endpoint: "https://gateway.example" };
+          if (command === "remember_device") return {
+            endpoint: payload.endpoint, password: payload.password, updatedAt: 3, online: true,
+          };
+          if (command === "forget_device") return null;
           if (command === "gateway_request") return {
             status: 200,
             headers: { "content-type": "application/json" },
@@ -99,7 +108,10 @@ function loadClientRuntime() {
 describe("ME Client native adapter", () => {
   test("uses native UTF-8 JSON responses while leaving frontend assets local", async () => {
     const { runtime, sandbox, calls } = loadClientRuntime();
-    expect(await runtime.initialize()).toEqual({ endpoint: "http://127.0.0.1:38201" });
+    expect(await runtime.initialize()).toEqual({
+      endpoint: "http://127.0.0.1:38201",
+      localDevice: { endpoint: "http://127.0.0.1:38200", online: true, requiresPassword: true },
+    });
     expect(await runtime.configureTarget("https://gateway.example")).toEqual({ endpoint: "https://gateway.example" });
     const response = await sandbox.fetch("/api/auth/status", { cache: "no-store" });
     expect(await response.json()).toEqual({ required: true, authenticated: false });
@@ -139,6 +151,41 @@ describe("ME Client native adapter", () => {
     expect(nativeRuntime).toContain('run_blocking(move || cache.set_setting(&key, &value)).await');
     expect(nativeRuntime).toContain('device_preferences: BTreeMap<String, String>');
   });
+
+  test("restores, updates, and forgets native remembered devices with online state", async () => {
+    const { runtime, calls } = loadClientRuntime();
+    expect(runtime.rememberedDevices.list()).toEqual([]);
+    await runtime.initialize();
+    expect(runtime.rememberedDevices.list()).toEqual([
+      { endpoint: "http://127.0.0.1:38200", password: "local secret", updatedAt: 2, online: true },
+      { endpoint: "https://offline.example", password: "old secret", updatedAt: 1, online: false },
+    ]);
+
+    await runtime.rememberedDevices.remember("https://new.example", "new secret");
+    expect(runtime.rememberedDevices.list()[0]).toEqual({
+      endpoint: "https://new.example", password: "new secret", updatedAt: 3, online: true,
+    });
+    await runtime.rememberedDevices.forget("https://offline.example");
+    expect(runtime.rememberedDevices.list().map((device) => device.endpoint)).toEqual([
+      "https://new.example", "http://127.0.0.1:38200",
+    ]);
+    expect(calls.find((call) => call.command === "remember_device").payload).toEqual({
+      endpoint: "https://new.example", password: "new secret",
+    });
+    expect(calls.find((call) => call.command === "forget_device").payload).toEqual({
+      endpoint: "https://offline.example",
+    });
+
+    const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
+    const nativeCache = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/cache.rs"), "utf8");
+    const nativeGateway = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/gateway.rs"), "utf8");
+    expect(nativeRuntime).toContain("remembered_devices: Vec<RememberedDeviceStatus>");
+    expect(nativeCache).toContain("CREATE TABLE IF NOT EXISTS remembered_devices");
+    expect(nativeGateway).toContain("const LOCAL_GATEWAY_FIRST_PORT: u16 = 38200");
+    expect(nativeGateway).toContain("const LOCAL_GATEWAY_LAST_PORT: u16 = 38231");
+    expect(nativeGateway).toContain("pub async fn online_remembered_devices");
+  });
+
 
 
   test("routes page-close JSON beacons as text through the native transport", async () => {

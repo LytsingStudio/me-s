@@ -37,7 +37,8 @@ function loadShowLogin(relative) {
   const factory = new Function(
     "state", "elements", "deactivateSessionTerminalView", "stopHttpPolling",
     "cancelBackgroundWorkspaceSync", "setConnectionPhase", "hideConnectionOverlay",
-    "runtimeCapabilities", "frontendRuntime",
+    "runtimeCapabilities", "frontendRuntime", "rememberedDevices", "setLoginView",
+    "renderLoginDevices",
     `${source.slice(start, end)}\nreturn showLogin;`,
   );
   const showLogin = factory(
@@ -50,40 +51,65 @@ function loadShowLogin(relative) {
     () => { counters.overlay += 1; },
     { targetConfiguration: false },
     { endpoint: "" },
+    null,
+    () => {},
+    () => {},
   );
   return { showLogin, state, elements, counters };
 }
 
-function loadSubmitLogin(relative, browserPort = 45182) {
+function loadSubmitLogin(relative, browserPort = 45182, client = false) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
-  const start = source.indexOf("async function submitLogin(event)");
-  const end = source.indexOf("\nfunction setConnectionPhase", start);
-  if (start < 0 || end < 0) throw new Error(`could not isolate submitLogin from ${relative}`);
+  const start = source.indexOf("async function performLogin");
+  const end = source.indexOf("\nasync function loginRememberedDevice", start);
+  if (start < 0 || end < 0) throw new Error(`could not isolate login submission from ${relative}`);
 
   const calls = [];
+  const remembered = [];
   const elements = {
-    loginSubmit: { disabled: false },
+    loginSubmit: { disabled: false, textContent: "登录" },
     loginError: { textContent: "" },
-    loginPassword: { value: "correct horse", select() {} },
+    loginPassword: { value: "correct horse", disabled: false, select() {} },
+    loginEndpoint: { value: "https://gateway.example", disabled: false, select() {} },
+    loginRemember: { checked: client, disabled: false },
+    loginFormBack: { disabled: false },
   };
+  const state = { authRequired: false, authenticated: false, loginView: "form" };
+  const runtimeCapabilities = { targetConfiguration: client };
+  const frontendRuntime = {
+    endpoint: "",
+    async configureTarget(value) { this.endpoint = value; return { endpoint: value }; },
+  };
+  const rememberedDevices = client ? {
+    async remember(endpoint, password) { remembered.push({ endpoint, password }); },
+  } : null;
   const factory = new Function(
     "BROWSER_PORT", "elements", "api", "showApplication", "restoreDraft",
-    "startHttpPolling", "initializeGateway", "showLogin", "runtimeCapabilities", "frontendRuntime",
+    "startHttpPolling", "initializeGateway", "showLoginPreservingView", "runtimeCapabilities",
+    "frontendRuntime", "rememberedDevices", "renderLoginDevices", "setLoginBusy", "state",
     `${source.slice(start, end)}\nreturn submitLogin;`,
   );
   const submitLogin = factory(
     browserPort,
     elements,
-    async (path, options) => { calls.push({ path, options }); return {}; },
+    async (path, options) => {
+      calls.push({ path, options });
+      if (path === "/api/auth/status") return { required: true, authenticated: false };
+      return {};
+    },
     () => {},
     () => {},
     () => {},
     async () => {},
     () => {},
-    { targetConfiguration: false },
-    { endpoint: "" },
+    runtimeCapabilities,
+    frontendRuntime,
+    rememberedDevices,
+    () => {},
+    (busy) => { elements.loginSubmit.disabled = Boolean(busy); },
+    state,
   );
-  return { submitLogin, elements, calls };
+  return { submitLogin, elements, calls, remembered };
 }
 
 describe("WebUI login transition", () => {
@@ -124,5 +150,32 @@ describe("WebUI login transition", () => {
     });
     expect(runtime.elements.loginPassword.value).toBe("");
     expect(runtime.elements.loginSubmit.disabled).toBe(false);
+  });
+
+  test("the shared client login remembers a remote device only after successful authentication", async () => {
+    const runtime = loadSubmitLogin("../src/webui/app.js", 45182, true);
+    await runtime.submitLogin({ preventDefault() {} });
+    expect(runtime.calls.map((call) => call.path)).toEqual([
+      "/api/auth/status", "/api/auth/login",
+    ]);
+    expect(runtime.remembered).toEqual([
+      { endpoint: "https://gateway.example", password: "correct horse" },
+    ]);
+    expect(runtime.elements.loginPassword.value).toBe("");
+    expect(runtime.elements.loginSubmit.disabled).toBe(false);
+  });
+
+  test("the shared login assets provide device selection and reduced-motion flow styling", () => {
+    const html = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
+    const css = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    const app = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    expect(html).toContain('id="login-local-device"');
+    expect(html).toContain('id="login-remembered-list"');
+    expect(html).toContain('id="login-remote-device"');
+    expect(html).toContain('id="login-remember"');
+    expect(css).toContain("@keyframes login-flow-primary");
+    expect(css).toContain("@media (prefers-reduced-motion: reduce)");
+    expect(app).toContain('classList.toggle("remembered-device-logins", Boolean(rememberedDevices))');
+    expect(app).toContain('device.endpoint === local.endpoint');
   });
 });

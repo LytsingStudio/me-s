@@ -13,20 +13,51 @@
   <link rel="stylesheet" href="/theme.css">
 </head>
 <body>
-  <main id="login-screen" class="login-screen hidden">
-    <form id="login-form" class="login-card">
-      <div class="login-brand"><div class="brand-mark">ME</div><div><strong>ME</strong></div></div>
-      <h1>登录</h1>
-      <p>请输入访问密码。</p>
-      <div class="client-endpoint-field" data-target-configuration>
-        <label for="login-endpoint">服务地址</label>
-        <input id="login-endpoint" type="url" inputmode="url" autocomplete="url" placeholder="http://192.168.1.10:38200">
-      </div>
-      <label for="login-password">密码</label>
-      <input id="login-password" type="password" autocomplete="current-password" autofocus>
-      <div id="login-error" class="login-error" aria-live="polite"></div>
-      <button id="login-submit" class="primary-button" type="submit">登录</button>
-    </form>
+  <main id="login-screen" class="login-screen hidden" data-login-view="form">
+    <article class="login-card">
+      <header class="login-header">
+        <div class="login-brand"><div class="brand-mark">ME</div><div><strong>ME</strong></div></div>
+        <h1 id="login-title">登录</h1>
+        <p id="login-description">请输入访问密码。</p>
+      </header>
+      <section id="login-device-picker" class="login-device-picker" aria-label="设备列表">
+        <div class="login-device-list">
+          <div id="login-local-row" class="login-local-row">
+            <button id="login-local-device" class="login-device-row login-local-device" type="button" disabled>
+              <span class="login-device-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="11" rx="2"></rect><path d="M9 20h6M12 16v4"></path></svg></span>
+              <span class="login-device-copy"><strong>本机</strong><span id="login-local-detail">正在查找 ME Gateway</span></span>
+              <span id="login-local-status" class="login-device-status offline">离线</span>
+            </button>
+            <button id="login-local-forget" class="login-device-forget hidden" type="button" title="忘记本机密码" aria-label="忘记本机密码">
+              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"></path></svg>
+            </button>
+          </div>
+          <div id="login-remembered-list" class="login-remembered-list"></div>
+          <button id="login-remote-device" class="login-device-row login-remote-device" type="button">
+            <span class="login-device-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"></circle><path d="M4 12h16M12 4a13 13 0 0 1 0 16M12 4a13 13 0 0 0 0 16"></path></svg></span>
+            <span class="login-device-copy"><strong>远程设备</strong><span>输入服务地址和访问密码</span></span>
+            <span class="login-device-arrow" aria-hidden="true">→</span>
+          </button>
+        </div>
+      </section>
+      <form id="login-form" class="login-form">
+        <button id="login-form-back" class="login-form-back" type="button"><span aria-hidden="true">←</span> 返回设备</button>
+        <div class="login-field client-endpoint-field" data-target-configuration>
+          <label for="login-endpoint">服务地址</label>
+          <input id="login-endpoint" type="url" inputmode="url" autocomplete="url" placeholder="http://192.168.1.10:38200">
+        </div>
+        <div class="login-field">
+          <label for="login-password">密码</label>
+          <input id="login-password" type="password" autocomplete="current-password" autofocus>
+        </div>
+        <label class="login-remember" for="login-remember">
+          <input id="login-remember" type="checkbox">
+          <span>记住密码</span>
+        </label>
+        <div id="login-error" class="login-error" aria-live="polite"></div>
+        <button id="login-submit" class="primary-button" type="submit">登录</button>
+      </form>
+    </article>
   </main>
 
   <div id="app" class="app-shell hidden">

@@ -3,13 +3,18 @@ mod gateway;
 
 use std::{collections::BTreeMap, env, io, path::PathBuf};
 
-use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest};
-use gateway::{DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport};
+use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest, RememberedDevice};
+use gateway::{
+    DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport, LocalDevice,
+    discover_local_device, normalize_endpoint, online_remembered_devices,
+};
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
 const DEVICE_PREFERENCE_KEYS: [&str; 3] = ["me-theme", "me-color-mode", "me-send-shortcut"];
+
+const MAX_REMEMBERED_PASSWORD_BYTES: usize = 4096;
 
 struct AppState {
     cache: CacheDatabase,
@@ -21,6 +26,28 @@ struct AppState {
 struct ClientBootstrap {
     endpoint: Option<String>,
     device_preferences: BTreeMap<String, String>,
+    remembered_devices: Vec<RememberedDeviceStatus>,
+    local_device: LocalDevice,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RememberedDeviceStatus {
+    endpoint: String,
+    password: String,
+    updated_at: u64,
+    online: bool,
+}
+
+impl RememberedDeviceStatus {
+    fn from_device(device: RememberedDevice, online: bool) -> Self {
+        Self {
+            endpoint: device.endpoint,
+            password: device.password,
+            updated_at: device.updated_at,
+            online,
+        }
+    }
 }
 
 #[derive(Serialize)]
@@ -64,10 +91,33 @@ fn load_device_preferences(cache: &CacheDatabase) -> Result<BTreeMap<String, Str
 async fn client_bootstrap(state: State<'_, AppState>) -> Result<ClientBootstrap, String> {
     let endpoint = state.gateway.endpoint().await;
     let cache = state.cache.clone();
-    let device_preferences = run_blocking(move || load_device_preferences(&cache)).await?;
+    let (device_preferences, remembered_devices) = run_blocking(move || {
+        Ok((
+            load_device_preferences(&cache)?,
+            cache.remembered_devices()?,
+        ))
+    })
+    .await?;
+    let online_devices = online_remembered_devices(
+        remembered_devices
+            .iter()
+            .map(|device| device.endpoint.clone())
+            .collect(),
+    )
+    .await;
+    let remembered_devices = remembered_devices
+        .into_iter()
+        .map(|device| {
+            let online = online_devices.contains(&device.endpoint);
+            RememberedDeviceStatus::from_device(device, online)
+        })
+        .collect();
+    let local_device = discover_local_device().await;
     Ok(ClientBootstrap {
         endpoint,
         device_preferences,
+        remembered_devices,
+        local_device,
     })
 }
 
@@ -94,6 +144,28 @@ async fn set_device_preference(
     }
     let cache = state.cache.clone();
     run_blocking(move || cache.set_setting(&key, &value)).await
+}
+
+#[tauri::command]
+async fn remember_device(
+    endpoint: String,
+    password: String,
+    state: State<'_, AppState>,
+) -> Result<RememberedDeviceStatus, String> {
+    let endpoint = normalize_endpoint(&endpoint)?;
+    if password.len() > MAX_REMEMBERED_PASSWORD_BYTES {
+        return Err("密码过长".into());
+    }
+    let cache = state.cache.clone();
+    let device = run_blocking(move || cache.remember_device(&endpoint, &password)).await?;
+    Ok(RememberedDeviceStatus::from_device(device, true))
+}
+
+#[tauri::command]
+async fn forget_device(endpoint: String, state: State<'_, AppState>) -> Result<(), String> {
+    let endpoint = normalize_endpoint(&endpoint)?;
+    let cache = state.cache.clone();
+    run_blocking(move || cache.forget_device(&endpoint)).await
 }
 
 #[tauri::command]
@@ -200,6 +272,8 @@ pub fn run() {
             client_bootstrap,
             configure_target,
             set_device_preference,
+            remember_device,
+            forget_device,
             gateway_request,
             cache_load_metadata,
             cache_load_chunk,

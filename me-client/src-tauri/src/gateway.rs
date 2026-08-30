@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
@@ -9,6 +9,11 @@ use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use reqwest::{Client, Method, Url, redirect::Policy};
 use serde::{Deserialize, Serialize};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::RwLock};
+
+const LOCAL_GATEWAY_FIRST_PORT: u16 = 38200;
+const LOCAL_GATEWAY_LAST_PORT: u16 = 38231;
+const LOCAL_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(350);
+const REMEMBERED_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
 
 #[derive(Clone)]
 pub struct GatewayTransport {
@@ -46,6 +51,22 @@ pub struct GatewayResponse {
 pub struct DownloadResult {
     pub path: String,
     pub bytes: u64,
+}
+
+#[derive(Clone, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LocalDevice {
+    pub endpoint: String,
+    pub online: bool,
+    pub requires_password: bool,
+}
+
+#[derive(Deserialize)]
+struct LocalAuthStatus {
+    ok: bool,
+    required: bool,
+    #[serde(rename = "authenticated")]
+    _authenticated: bool,
 }
 
 impl GatewayTransport {
@@ -188,6 +209,99 @@ impl GatewayTransport {
     }
 }
 
+pub async fn discover_local_device() -> LocalDevice {
+    discover_local_device_from_ports(LOCAL_GATEWAY_FIRST_PORT..=LOCAL_GATEWAY_LAST_PORT).await
+}
+
+async fn discover_local_device_from_ports(ports: impl IntoIterator<Item = u16>) -> LocalDevice {
+    let offline = LocalDevice {
+        endpoint: format!("http://127.0.0.1:{LOCAL_GATEWAY_FIRST_PORT}"),
+        online: false,
+        requires_password: false,
+    };
+    let Ok(client) = Client::builder()
+        .no_proxy()
+        .connect_timeout(LOCAL_GATEWAY_PROBE_TIMEOUT)
+        .timeout(LOCAL_GATEWAY_PROBE_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+    else {
+        return offline;
+    };
+    let tasks = ports
+        .into_iter()
+        .map(|port| {
+            let client = client.clone();
+            tokio::spawn(async move { probe_local_gateway_port(&client, port).await })
+        })
+        .collect::<Vec<_>>();
+    let mut discovered: Option<LocalDevice> = None;
+    for task in tasks {
+        let Ok(Some(candidate)) = task.await else {
+            continue;
+        };
+        if discovered
+            .as_ref()
+            .is_none_or(|current| candidate.endpoint < current.endpoint)
+        {
+            discovered = Some(candidate);
+        }
+    }
+    discovered.unwrap_or(offline)
+}
+
+async fn probe_local_gateway_port(client: &Client, port: u16) -> Option<LocalDevice> {
+    let endpoint = format!("http://127.0.0.1:{port}");
+    let status = probe_gateway_status(client, &endpoint).await?;
+    Some(LocalDevice {
+        endpoint,
+        online: true,
+        requires_password: status.required,
+    })
+}
+
+pub async fn online_remembered_devices(endpoints: Vec<String>) -> BTreeSet<String> {
+    let Ok(client) = Client::builder()
+        .connect_timeout(REMEMBERED_GATEWAY_PROBE_TIMEOUT)
+        .timeout(REMEMBERED_GATEWAY_PROBE_TIMEOUT)
+        .redirect(Policy::none())
+        .build()
+    else {
+        return BTreeSet::new();
+    };
+    let tasks = endpoints
+        .into_iter()
+        .map(|endpoint| {
+            let client = client.clone();
+            tokio::spawn(async move {
+                probe_gateway_status(&client, &endpoint)
+                    .await
+                    .map(|_| endpoint)
+            })
+        })
+        .collect::<Vec<_>>();
+    let mut online = BTreeSet::new();
+    for task in tasks {
+        if let Ok(Some(endpoint)) = task.await {
+            online.insert(endpoint);
+        }
+    }
+    online
+}
+
+async fn probe_gateway_status(client: &Client, endpoint: &str) -> Option<LocalAuthStatus> {
+    let response = client
+        .get(format!("{endpoint}/api/auth/status"))
+        .send()
+        .await
+        .ok()?;
+    if !response.status().is_success() {
+        return None;
+    }
+    let status = response.json::<LocalAuthStatus>().await.ok()?;
+    status.ok.then_some(status)
+}
+
 pub fn normalize_endpoint(value: &str) -> Result<String, String> {
     let value = value.trim();
     if value.is_empty() {
@@ -319,6 +433,44 @@ mod tests {
         );
         assert!(normalize_endpoint("ftp://example.com").is_err());
         assert!(normalize_endpoint("http://user:pass@example.com").is_err());
+    }
+
+    #[test]
+    fn local_gateway_discovery_accepts_gateway_auth_status_on_an_isolated_port() {
+        use std::{
+            io::{Read, Write},
+            net::TcpListener,
+            thread,
+        };
+
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0_u8; 2048];
+            let read = stream.read(&mut request).unwrap();
+            let request = String::from_utf8_lossy(&request[..read]);
+            assert!(request.starts_with("GET /api/auth/status HTTP/1.1"));
+            let body = r#"{"ok":true,"required":true,"authenticated":false}"#;
+            write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                body.len(),
+                body
+            )
+            .unwrap();
+        });
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let discovered = runtime.block_on(discover_local_device_from_ports([port]));
+        server.join().unwrap();
+        assert_eq!(
+            discovered,
+            LocalDevice {
+                endpoint: format!("http://127.0.0.1:{port}"),
+                online: true,
+                requires_password: true,
+            }
+        );
     }
 
     #[test]

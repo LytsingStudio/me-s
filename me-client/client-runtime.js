@@ -41,6 +41,60 @@
     },
   });
 
+  let rememberedDeviceValues = [];
+
+  function rememberedDevice(value) {
+    const endpointValue = String(value?.endpoint || "");
+    if (!endpointValue || typeof value?.password !== "string") return null;
+    return {
+      endpoint: endpointValue,
+      password: value.password,
+      updatedAt: Number(value.updatedAt || 0),
+      online: Boolean(value.online),
+    };
+  }
+
+  function loadRememberedDevices(values) {
+    const seen = new Set();
+    rememberedDeviceValues = [];
+    for (const value of Array.isArray(values) ? values : []) {
+      const device = rememberedDevice(value);
+      if (!device || seen.has(device.endpoint)) continue;
+      seen.add(device.endpoint);
+      rememberedDeviceValues.push(device);
+    }
+  }
+
+  function storeRememberedDevice(value) {
+    const device = rememberedDevice(value);
+    if (!device) return null;
+    rememberedDeviceValues = [
+      device,
+      ...rememberedDeviceValues.filter((candidate) => candidate.endpoint !== device.endpoint),
+    ];
+    return { ...device };
+  }
+
+  const rememberedDevices = Object.freeze({
+    list() {
+      return rememberedDeviceValues.map((device) => ({ ...device }));
+    },
+    async remember(endpointValue, password) {
+      const saved = await invoke("remember_device", {
+        endpoint: String(endpointValue || ""),
+        password: String(password ?? ""),
+      });
+      return storeRememberedDevice(saved);
+    },
+    async forget(endpointValue) {
+      const normalized = String(endpointValue || "");
+      await invoke("forget_device", { endpoint: normalized });
+      rememberedDeviceValues = rememberedDeviceValues
+        .filter((device) => device.endpoint !== normalized);
+    },
+  });
+
+
   function bytesToBase64(bytes) {
     let binary = "";
     const chunkSize = 0x8000;
@@ -260,12 +314,19 @@
     }),
     get endpoint() { return endpoint; },
     devicePreferences,
+    rememberedDevices,
     async initialize() {
       document.documentElement.classList.add("me-client");
       const bootstrap = await invoke("client_bootstrap");
       loadDevicePreferences(bootstrap.devicePreferences);
+      loadRememberedDevices(bootstrap.rememberedDevices);
       endpoint = String(bootstrap.endpoint || "");
-      return { endpoint };
+      return {
+        endpoint,
+        localDevice: bootstrap.localDevice || {
+          endpoint: "http://127.0.0.1:38200", online: false, requiresPassword: false,
+        },
+      };
     },
     async configureTarget(value) {
       const configured = await invoke("configure_target", { endpoint: String(value || "") });
