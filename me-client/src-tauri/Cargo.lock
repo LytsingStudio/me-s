@@ -1965,6 +1965,9 @@ version = "0.1.70"
 dependencies = [
  "base64 0.22.1",
  "log",
+ "objc2",
+ "objc2-app-kit",
+ "objc2-foundation",
  "reqwest",
  "rusqlite",
  "serde",

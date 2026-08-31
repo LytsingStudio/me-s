@@ -228,13 +228,30 @@ describe("ME Client native adapter", () => {
     expect(nativeGateway).toContain("pub async fn online_remembered_devices");
   });
 
-  test("opens independent macOS processes and waits for shared SQLite writers", () => {
+  test("restores the existing macOS window unless New Window is explicitly selected", () => {
     const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
     const nativeCache = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/cache.rs"), "utf8");
-    expect(nativeRuntime).toContain("tauri::RunEvent::Reopen");
-    expect(nativeRuntime).toContain("env::current_exe()");
+    const reopenStart = nativeRuntime.indexOf("if let tauri::RunEvent::Reopen");
+    const reopenHandler = nativeRuntime.slice(reopenStart, nativeRuntime.indexOf("\n    });", reopenStart));
+    const newWindowStart = nativeRuntime.indexOf("extern \"C-unwind\" fn new_me_client_window");
+    const newWindowEnd = nativeRuntime.indexOf("fn install_macos_dock_menu", newWindowStart);
+    const newWindowAction = nativeRuntime.slice(newWindowStart, newWindowEnd);
+    expect(reopenStart).toBeGreaterThan(-1);
+    expect(newWindowStart).toBeGreaterThan(-1);
+    expect(newWindowEnd).toBeGreaterThan(newWindowStart);
+    expect(reopenHandler).toContain("restore_client_window(app_handle)");
+    expect(reopenHandler).not.toContain("spawn_client_instance()");
+    expect(nativeRuntime).toContain("const NEW_CLIENT_WINDOW_LABEL: &str = \"新建窗口\"");
+    expect(nativeRuntime).toContain("item.setAction(Some(sel!(newMeClientWindow:)))");
+    expect(nativeRuntime).toContain("sel!(applicationDockMenu:)");
+    expect(nativeRuntime).toContain("install_macos_dock_menu()?");
+    expect(newWindowAction).toContain("spawn_client_instance()");
+    expect(nativeRuntime).toContain("app.show()?");
+    expect(nativeRuntime).toContain("window.unminimize()?");
+    expect(nativeRuntime).toContain("window.show()?");
+    expect(nativeRuntime).toContain("window.set_focus()?");
+    expect(nativeRuntime).toContain("env::current_exe()?");
     expect(nativeRuntime).toContain("Command::new(executable)");
-    expect(nativeRuntime).toContain(".build(tauri::generate_context!())");
     expect(nativeCache).toContain("const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);");
     expect(nativeCache).toContain(".busy_timeout(DATABASE_BUSY_TIMEOUT)");
   });

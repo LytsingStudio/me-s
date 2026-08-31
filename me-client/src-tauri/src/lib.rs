@@ -6,6 +6,18 @@ use std::{collections::BTreeMap, env, io, path::PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "macos")]
+use objc2::{
+    MainThreadMarker, ffi,
+    rc::Retained,
+    runtime::{AnyClass, AnyObject, Imp, Sel},
+    sel,
+};
+#[cfg(target_os = "macos")]
+use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
+#[cfg(target_os = "macos")]
+use objc2_foundation::NSString;
+
 use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest, RememberedDevice};
 use gateway::{
     DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport, LocalDevice,
@@ -258,6 +270,105 @@ fn database_path(data_directory: PathBuf) -> PathBuf {
 }
 
 #[cfg(target_os = "macos")]
+const NEW_CLIENT_WINDOW_LABEL: &str = "新建窗口";
+
+#[cfg(target_os = "macos")]
+extern "C-unwind" fn application_dock_menu(
+    delegate: &AnyObject,
+    _selector: Sel,
+    application: &NSApplication,
+) -> *mut NSMenu {
+    let marker = MainThreadMarker::from(application);
+    let menu = NSMenu::new(marker);
+    let item = NSMenuItem::new(marker);
+    item.setTitle(&NSString::from_str(NEW_CLIENT_WINDOW_LABEL));
+    unsafe {
+        item.setAction(Some(sel!(newMeClientWindow:)));
+        item.setTarget(Some(delegate));
+    }
+    menu.addItem(&item);
+    Retained::autorelease_return(menu)
+}
+
+#[cfg(target_os = "macos")]
+extern "C-unwind" fn new_me_client_window(
+    _delegate: &AnyObject,
+    _selector: Sel,
+    _sender: &AnyObject,
+) {
+    if let Err(error) = spawn_client_instance() {
+        log::error!("failed to open another ME Client instance: {error}");
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn install_macos_dock_menu() -> Result<(), io::Error> {
+    let marker = MainThreadMarker::new()
+        .ok_or_else(|| io::Error::other("macOS Dock menu must be installed on the main thread"))?;
+    let application = NSApplication::sharedApplication(marker);
+    let delegate = application
+        .delegate()
+        .ok_or_else(|| io::Error::other("macOS application delegate is unavailable"))?;
+
+    // Tauri owns the application delegate, so extend its class instead of replacing it.
+    let delegate_pointer = Retained::as_ptr(&delegate).cast::<AnyObject>();
+    let delegate_class = unsafe { ffi::object_getClass(delegate_pointer) as *mut AnyClass };
+    if delegate_class.is_null() {
+        return Err(io::Error::other(
+            "macOS application delegate class is unavailable",
+        ));
+    }
+
+    let new_window_implementation: Imp = unsafe {
+        std::mem::transmute::<extern "C-unwind" fn(&AnyObject, Sel, &AnyObject), Imp>(
+            new_me_client_window,
+        )
+    };
+    let dock_menu_implementation: Imp = unsafe {
+        std::mem::transmute::<
+            extern "C-unwind" fn(&AnyObject, Sel, &NSApplication) -> *mut NSMenu,
+            Imp,
+        >(application_dock_menu)
+    };
+    unsafe {
+        if !ffi::class_addMethod(
+            delegate_class,
+            sel!(newMeClientWindow:),
+            new_window_implementation,
+            c"v@:@".as_ptr(),
+        )
+        .as_bool()
+        {
+            return Err(io::Error::other(
+                "failed to install the macOS New Window action",
+            ));
+        }
+        if !ffi::class_addMethod(
+            delegate_class,
+            sel!(applicationDockMenu:),
+            dock_menu_implementation,
+            c"@@:@".as_ptr(),
+        )
+        .as_bool()
+        {
+            return Err(io::Error::other("failed to install the macOS Dock menu"));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn restore_client_window(app: &AppHandle) -> tauri::Result<()> {
+    app.show()?;
+    if let Some(window) = app.get_webview_window("main") {
+        window.unminimize()?;
+        window.show()?;
+        window.set_focus()?;
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
 fn spawn_client_instance() -> Result<(), io::Error> {
     let executable = env::current_exe()?;
     let mut child = Command::new(executable)
@@ -276,6 +387,8 @@ pub fn run() {
     let app = tauri::Builder::default()
         .setup(|app| {
             app.manage(app_state(app)?);
+            #[cfg(target_os = "macos")]
+            install_macos_dock_menu()?;
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -301,11 +414,11 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building ME Client");
-    app.run(|_app_handle, _event| {
+    app.run(|app_handle, event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Reopen { .. } = _event {
-            if let Err(error) = spawn_client_instance() {
-                log::error!("failed to open another ME Client instance: {error}");
+        if let tauri::RunEvent::Reopen { .. } = event {
+            if let Err(error) = restore_client_window(app_handle) {
+                log::error!("failed to restore the ME Client window: {error}");
             }
         }
     });
