@@ -19,11 +19,13 @@ esac
 case "$ARCH" in
     x86_64)
         PLATFORM=linux/amd64
+        TARGETARCH=amd64
         RUST_TARGET=x86_64-unknown-linux-gnu
         ASSET_NAME=ME-linux-x86_64.run
         ;;
     arm64)
         PLATFORM=linux/arm64
+        TARGETARCH=arm64
         RUST_TARGET=aarch64-unknown-linux-gnu
         ASSET_NAME=ME-linux-arm64.run
         ;;
@@ -34,28 +36,47 @@ case "$ARCH" in
 esac
 
 command -v docker >/dev/null 2>&1 || { echo "error: Docker is required" >&2; exit 1; }
-docker buildx version >/dev/null 2>&1 || { echo "error: Docker Buildx is required" >&2; exit 1; }
+command -v tar >/dev/null 2>&1 || { echo "error: tar is required" >&2; exit 1; }
 
-BUILDER_ARGS=()
-if [[ -n ${ME_RELEASE_BUILDER:-} ]]; then
-    BUILDER_ARGS=(--builder "$ME_RELEASE_BUILDER")
+BASE_IMAGE=ubuntu:22.04
+CONTAINER_NAME="me-s-linux-build-${ARCH//_/-}-$$"
+BUILD_LABEL=studio.lytsing.me-s.release=linux-build
+BASE_IMAGE_WAS_PRESENT=false
+if docker image inspect "$BASE_IMAGE" >/dev/null 2>&1; then
+    BASE_IMAGE_WAS_PRESENT=true
 fi
 
-WORK=$(mktemp -d "${TMPDIR:-/tmp}/me-linux-container.XXXXXX")
-cleanup() { rm -rf "$WORK"; }
+mkdir -p "$ROOT_DIR/.build"
+WORK=$(mktemp -d "$ROOT_DIR/.build/linux-container.XXXXXX")
+cleanup() {
+    docker rm --force "$CONTAINER_NAME" >/dev/null 2>&1 || true
+    if ! $BASE_IMAGE_WAS_PRESENT; then
+        docker image rm "$BASE_IMAGE" >/dev/null 2>&1 || true
+    fi
+    rm -rf "$WORK"
+}
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$WORK/output" "$(dirname "$OUTPUT")"
+COPYFILE_DISABLE=1 tar -cf "$WORK/source.tar" \
+    --no-xattrs \
+    --exclude-from="$ROOT_DIR/.dockerignore" \
+    -C "$ROOT_DIR" \
+    .
 
-docker buildx build "${BUILDER_ARGS[@]}" \
+docker run --rm \
+    --name "$CONTAINER_NAME" \
+    --label "$BUILD_LABEL" \
     --platform "$PLATFORM" \
-    --build-arg "ME_VERSION=$VERSION" \
-    --build-arg "RUST_TARGET=$RUST_TARGET" \
-    --build-arg "PACKAGE_ARCH=$ARCH" \
-    --build-arg "ASSET_NAME=$ASSET_NAME" \
-    --output "type=local,dest=$WORK/output" \
-    --progress plain \
-    --file "$ROOT_DIR/packaging/linux/Dockerfile" \
-    "$ROOT_DIR"
+    --env "ME_VERSION=$VERSION" \
+    --env "RUST_TARGET=$RUST_TARGET" \
+    --env "PACKAGE_ARCH=$ARCH" \
+    --env "ASSET_NAME=$ASSET_NAME" \
+    --env "TARGETARCH=$TARGETARCH" \
+    --volume "$WORK/source.tar:/input/source.tar:ro" \
+    --volume "$WORK/output:/artifact" \
+    --volume "$ROOT_DIR/packaging/linux/build-in-container.sh:/usr/local/bin/me-linux-build:ro" \
+    "$BASE_IMAGE" \
+    bash /usr/local/bin/me-linux-build
 
 PACKAGE="$WORK/output/$ASSET_NAME"
 [[ -s "$PACKAGE" ]] || { echo "error: Linux container build did not create $ASSET_NAME" >&2; exit 1; }

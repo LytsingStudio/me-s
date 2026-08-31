@@ -7,13 +7,14 @@ UPDATER=$ROOT_DIR/src/updater.rs
 LINUX_BUILDER=$ROOT_DIR/packaging/linux/build-run.sh
 LINUX_CONTAINER=$ROOT_DIR/packaging/linux/build-container.sh
 WINDOWS_BUILDER=$ROOT_DIR/packaging/windows/build-installer.sh
+LINUX_IN_CONTAINER=$ROOT_DIR/packaging/linux/build-in-container.sh
 VERIFIER=$ROOT_DIR/scripts/verify-release-artifacts.sh
 
 sh -n "$ROOT_DIR/install.sh"
 sh -n "$ROOT_DIR/packaging/linux/installer.sh"
 sh -n "$LINUX_BUILDER"
 sh -n "$ROOT_DIR/packaging/macos/build-pkg.sh"
-bash -n "$RELEASE" "$LINUX_CONTAINER" "$WINDOWS_BUILDER" "$VERIFIER"
+bash -n "$RELEASE" "$LINUX_CONTAINER" "$LINUX_IN_CONTAINER" "$WINDOWS_BUILDER" "$VERIFIER"
 node "$ROOT_DIR/scripts/product-version.cjs" --print >/dev/null
 
 grep -F 'LytsingStudio/me-s' "$ROOT_DIR/install.sh" >/dev/null
@@ -43,19 +44,22 @@ grep -F 'ME-windows-x86_64-setup.exe' "$ROOT_DIR/install.ps1" >/dev/null
 grep -F 'cargo xwin build' "$RELEASE" >/dev/null
 grep -F 'packaging/linux/build-container.sh' "$RELEASE" >/dev/null
 grep -F 'scripts/verify-release-artifacts.sh' "$RELEASE" >/dev/null
-grep -F 'docker buildx build' "$LINUX_CONTAINER" >/dev/null
-grep -F 'cargo zigbuild' "$ROOT_DIR/packaging/linux/Dockerfile" >/dev/null
+grep -F 'docker run --rm \' "$LINUX_CONTAINER" >/dev/null
+grep -F 'tar -cf "$WORK/source.tar" \' "$LINUX_CONTAINER" >/dev/null
+grep -F -- '--platform "$PLATFORM" \' "$LINUX_CONTAINER" >/dev/null
+grep -F -- '--volume "$WORK/source.tar:/input/source.tar:ro" \' "$LINUX_CONTAINER" >/dev/null
+grep -F 'cargo zigbuild' "$LINUX_IN_CONTAINER" >/dev/null
 grep -F 'makensis' "$WINDOWS_BUILDER" >/dev/null
 grep -F 'gh release create' "$RELEASE" >/dev/null
-grep -F 'RELEASE_BUILDER_NAME=me-s-release' "$RELEASE" >/dev/null
-grep -F '        --driver docker-container \' "$RELEASE" >/dev/null
-grep -F 'docker buildx rm --force "$RELEASE_BUILDER_NAME"' "$RELEASE" >/dev/null
-grep -F 'trap cleanup_release_builder_on_exit EXIT' "$RELEASE" >/dev/null
-grep -F 'export ME_RELEASE_BUILDER="$RELEASE_BUILDER_NAME"' "$RELEASE" >/dev/null
-grep -F 'BUILDER_ARGS=(--builder "$ME_RELEASE_BUILDER")' "$LINUX_CONTAINER" >/dev/null
-grep -F 'docker buildx build "${BUILDER_ARGS[@]}" \' "$LINUX_CONTAINER" >/dev/null
+grep -F 'LINUX_BUILD_LABEL=studio.lytsing.me-s.release=linux-build' "$RELEASE" >/dev/null
+grep -F 'docker ps --all --quiet --filter "label=$LINUX_BUILD_LABEL"' "$RELEASE" >/dev/null
+grep -F 'trap cleanup_release_linux_on_exit EXIT' "$RELEASE" >/dev/null
 grep -F '            cd /' "$RELEASE" >/dev/null
 grep -F 'colima ssh -- sudo fstrim -v /var/lib/docker' "$RELEASE" >/dev/null
+if grep -F 'docker buildx build' "$RELEASE" "$LINUX_CONTAINER" >/dev/null; then
+    printf 'Linux release must not use BuildKit emulation or retain build cache\n' >&2
+    exit 1
+fi
 if grep -F 'buildx prune' "$RELEASE" >/dev/null; then
     printf 'release must not rely on shared BuildKit cache pruning\n' >&2
     exit 1

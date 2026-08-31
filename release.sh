@@ -20,8 +20,8 @@ DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/.build/release"
 CACHE_DIR="${ME_RELEASE_CACHE_DIR:-$ROOT_DIR/.build/release-cache}"
 WINDOWS_TARGET=x86_64-pc-windows-msvc
-RELEASE_BUILDER_NAME=me-s-release
-RELEASE_BUILDER_ACTIVE=false
+LINUX_BUILD_LABEL=studio.lytsing.me-s.release=linux-build
+LINUX_RELEASE_ACTIVE=false
 PACKAGE_ASSETS=(
     ME-macos-universal.pkg
     ME-windows-x86_64-setup.exe
@@ -43,39 +43,20 @@ trim_colima_disk() {
     fi
 }
 
-remove_release_builder() {
-    if docker buildx inspect "$RELEASE_BUILDER_NAME" >/dev/null 2>&1; then
-        echo "removing disposable Linux release builder $RELEASE_BUILDER_NAME"
-        if ! docker buildx rm --force "$RELEASE_BUILDER_NAME"; then
-            echo "error: unable to remove Linux release builder $RELEASE_BUILDER_NAME" >&2
-            return 1
-        fi
+remove_release_linux_containers() {
+    local containers
+    containers="$(docker ps --all --quiet --filter "label=$LINUX_BUILD_LABEL")"
+    if [[ -n "$containers" ]]; then
+        echo "removing interrupted Linux release containers"
+        docker rm --force $containers >/dev/null
     fi
-    RELEASE_BUILDER_ACTIVE=false
 }
 
-create_release_builder() {
-    if docker buildx inspect "$RELEASE_BUILDER_NAME" >/dev/null 2>&1; then
-        echo "removing stale Linux release builder $RELEASE_BUILDER_NAME"
-        remove_release_builder
-        trim_colima_disk
-    fi
-
-    echo "creating disposable Linux release builder $RELEASE_BUILDER_NAME"
-    RELEASE_BUILDER_ACTIVE=true
-    docker buildx create \
-        --name "$RELEASE_BUILDER_NAME" \
-        --driver docker-container \
-        --bootstrap \
-        "$(docker context show)"
-    export ME_RELEASE_BUILDER="$RELEASE_BUILDER_NAME"
-}
-
-cleanup_release_builder_on_exit() {
+cleanup_release_linux_on_exit() {
     local status=$?
     trap - EXIT HUP INT TERM
-    if $RELEASE_BUILDER_ACTIVE; then
-        if ! remove_release_builder; then
+    if $LINUX_RELEASE_ACTIVE; then
+        if ! remove_release_linux_containers; then
             status=1
         fi
         if ! trim_colima_disk; then
@@ -85,16 +66,15 @@ cleanup_release_builder_on_exit() {
     exit "$status"
 }
 
-trap cleanup_release_builder_on_exit EXIT
+trap cleanup_release_linux_on_exit EXIT
 trap 'exit 129' HUP
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-for command in bun cargo docker file git lipo makensis node pkgbuild pkgutil rustup shasum xcrun; do
+for command in bun cargo docker file git lipo makensis node pkgbuild pkgutil rustup shasum tar xcrun; do
     require_command "$command"
 done
 cargo xwin --version >/dev/null 2>&1 || { echo "error: cargo-xwin is required" >&2; exit 1; }
-docker buildx version >/dev/null 2>&1 || { echo "error: Docker Buildx is required" >&2; exit 1; }
 for command in clang-cl llvm-ar llvm-lib llvm-rc; do
     require_command "$command"
 done
@@ -211,12 +191,13 @@ packaging/windows/build-installer.sh \
     "me-client/src-tauri/target/$WINDOWS_TARGET/release/me-client.exe" \
     "$DIST_DIR/ME-windows-x86_64-setup.exe"
 
-create_release_builder
-echo "building Linux product packages in local containers"
+echo "building Linux product packages in short-lived local containers"
+remove_release_linux_containers
+LINUX_RELEASE_ACTIVE=true
 packaging/linux/build-container.sh "$VERSION" x86_64 "$DIST_DIR/ME-linux-x86_64.run"
 packaging/linux/build-container.sh "$VERSION" arm64 "$DIST_DIR/ME-linux-arm64.run"
-
-remove_release_builder
+remove_release_linux_containers
+LINUX_RELEASE_ACTIVE=false
 trim_colima_disk
 
 (
