@@ -38,7 +38,7 @@ const LOCAL_TOOLS: [&str; 10] = [
 
 const TOOLBOX_BRIEF: &str = r#"WorkMap is this Agent's private, persistent map for substantial work. It has three views:
 
-- Memory: only globally applicable Facts and explicit Agreements expected to remain valid and useful after the current Objective ends and across future Objectives.
+- Memory: the maintained current state of active, globally applicable Facts and explicit Agreements expected to remain useful after the current Objective ends and across future Objectives.
 - Current: at most one active Objective containing an ordered Plan list and every durable Note attached to those Plans.
 - History: closed Objectives, each retaining its complete Plans and Notes.
 
@@ -47,6 +47,35 @@ WorkMap is mandatory for substantial work: external tools, research, file change
 If another system section defines this Agent as a dedicated Worker, apply all WorkMap rules only to the concrete operational request received from the Manager. Do not adopt the user's broader objective or independently create business, design, implementation, review-judgment, or acceptance-judgment plans. The WorkMap may organize mechanical execution, explicitly specified review or acceptance procedures, and evidence transmission inside the request, but it cannot expand or reinterpret that request. This may include collecting image evidence while leaving its content uninspected for the Manager. A completed Worker Plan means only that its specified operation ran and its evidence was returned; it never means the underlying deliverable was reviewed, correct, accepted, or ready.
 
 For a dedicated Worker, later references in this toolbox to the user's request or input mean the Manager's concrete request or input, and `final answer` means the Worker's report to the Manager. They never grant access to, or ownership of, the actual user's broader objective.
+
+### Memory: active global state
+
+Memory is not an indefinitely growing history. Active Memory is the authoritative current global state presented by WorkMap.Read. Retraction and replacement records may preserve earlier forms internally, but inactive entries are not current context and must not be treated as authoritative.
+
+Admission rules:
+
+1. Add only concise information that is globally applicable and expected to remain valid and useful after the current Objective ends and across future Objectives. Relevance across multiple Plans within the current Objective is insufficient.
+2. Never store objective-specific requests or constraints, single-turn discussion, execution plans, progress, temporary decisions, local trade-offs, evidence, validation results, or completed-task status in Memory; keep them in Current's Objective, Plans, Notes, or the conversation.
+3. Facts require a basis: user_stated, observed, verified, or inferred. Agreements qualify only when the user explicitly establishes a requirement, preference, or mutually established decision as globally applicable beyond the current Objective; never label an Agent assumption as an Agreement.
+4. If unsure whether information is global and cross-Objective, do not call AddMemory. Do not duplicate or substantially overlap an existing active entry.
+
+Maintenance rules:
+
+1. Keep an active entry unchanged when it is still accurate, clear, non-duplicated, and globally useful. Age alone is never a reason to remove it.
+2. Use InvalidateMemory without a replacement when an entry is clearly obsolete and will not be used again, was incorrectly classified because it is actually Objective-specific or temporary, is redundant after consolidation, or has lost so much essential context that it is clearly unusable.
+3. Use InvalidateMemory with an atomic replacement when the subject was renamed or the global Fact, requirement, or Agreement changed. A replacement must independently satisfy the same global cross-Objective eligibility rule; never replace old Memory with Objective-specific content.
+4. Consolidate duplicate or substantially overlapping entries so one complete eligible current statement remains active, then retract the redundant entries. Do not add a third summary while leaving the duplicates active.
+5. If an unclear entry may still matter but cannot be interpreted safely, do not guess its meaning, invent a replacement, or silently retract it. Leave it unchanged until the user or reliable evidence resolves the ambiguity; ask for clarification when correct maintenance depends on it.
+6. Inspecting or maintaining Memory does not require a mutation. Do not rewrite accurate entries merely to demonstrate maintenance, normalize style, shorten valid prose, or refresh wording.
+
+Examples:
+
+- If a long-lived subject changes from one name to another, supersede the old entry with the same current rule under the new name; do not keep both names active.
+- If a global default changes from allowing an action to requiring approval, replace the old Fact or Agreement with the new current rule.
+- `Finished the second step of the current migration` is progress for Current, not Memory. If it was added to Memory by mistake, retract it without a replacement.
+- If two active Agreements both say that dates use the same standard, keep one complete statement and retract the redundant one instead of adding another summary.
+- An old Agreement that remains accurate, clear, and globally useful stays unchanged even if it has not been referenced recently.
+- If an entry says `keep the legacy rule for it` and the subject of `it` is unknown but could still matter, do not invent the subject or silently remove the entry; seek clarification when needed.
 
 ### Before substantial work
 
@@ -58,8 +87,6 @@ The mandatory first-message SetTitle call is the only ordering exception to this
 4. Use WorkMap.ReadHistory only when earlier closed work is actually needed. It is not a routine startup or completion call.
 
 Plans are sequential stages of one Objective. Keep their scopes distinct and at comparable granularity. Internal actions, findings, decisions, validation, adjustments, blockers, and continuation points are Notes under the relevant Plan, not extra Plans. The route may be changed explicitly with ChangePlan, AddPlan, or terminal Plan states; never silently discard planned work.
-
-Memory is exclusively for concise, globally applicable information expected to remain valid and useful after the current Objective ends and across future Objectives. Relevance across multiple Plans within the current Objective is insufficient. Never store objective-specific requests or constraints, single-turn discussion, execution plans, progress, temporary decisions, local trade-offs, evidence, validation results, or completed-task status in Memory; keep them in Current's Objective, Plans, Notes, or the conversation. If unsure whether information is global and cross-Objective, do not call AddMemory. Facts require a basis: user_stated, observed, verified, or inferred. Agreements qualify only when the user explicitly establishes a requirement, preference, or mutually established decision as globally applicable beyond the current Objective; never label an Agent assumption as an Agreement. Do not duplicate existing active Memory. When an entry becomes false or an Agreement changes, use InvalidateMemory instead of rewriting history. A replacement must independently satisfy the same global cross-Objective eligibility rule; it atomically supersedes the old entry, while no replacement retracts it.
 
 ### While working
 
@@ -2309,10 +2336,10 @@ fn instructions(tool: &str) -> &'static str {
             "Cancel or supersede Current and atomically close every remaining open Plan."
         }
         "AddMemory" => {
-            "Add one globally applicable Fact or explicit Agreement only when it is expected to remain valid and useful after the current Objective ends and across future Objectives. Current-Objective content is ineligible. Facts require basis; Agreements reject basis."
+            "Add one missing active Memory entry only when it is a globally applicable current Fact or explicit Agreement expected to remain valid and useful after the current Objective ends and across future Objectives. Current-Objective content is ineligible. Facts require basis; Agreements reject basis. Do not duplicate or substantially overlap active Memory; maintain an existing entry with InvalidateMemory instead."
         }
         "InvalidateMemory" => {
-            "Retract active Memory, or atomically supersede it with a replacement that independently satisfies the same global cross-Objective eligibility rule."
+            "Remove an active entry from current Memory, or atomically supersede it with a replacement. Use it for clearly obsolete, renamed, changed, redundant, incorrectly classified, or clearly unusable entries. A replacement is allowed only when it independently satisfies the same global cross-Objective eligibility rule. Do not mutate an accurate entry for age, style, brevity, or demonstration."
         }
         _ => "",
     }
@@ -2337,10 +2364,10 @@ fn route(tool: &str) -> &'static str {
         "AddPlan" => "Use when newly discovered future work belongs to Current's route.",
         "CloseObjective" => "Use only when the entire Objective is abandoned or replaced.",
         "AddMemory" => {
-            "Use only for globally applicable context expected to remain valid and useful after the current Objective ends and across future Objectives; if uncertain, do not use it."
+            "Use only when globally applicable current context is missing and is expected to remain valid and useful after the current Objective ends and across future Objectives; if uncertain, do not use it."
         }
         "InvalidateMemory" => {
-            "Use when active Memory became false or obsolete; a replacement is allowed only for a newer globally applicable fact or agreement, never for objective-specific content."
+            "Use when an active Memory entry genuinely must leave current state or be replaced because its meaning or subject changed; never use it for cosmetic cleanup. A replacement is allowed only for newer eligible global context, never for objective-specific content."
         }
         _ => "",
     }
@@ -2568,6 +2595,68 @@ mod tests {
             invalidate_memory
                 .examples
                 .contains("Across all future Objectives")
+        );
+    }
+
+    #[test]
+    fn catalog_defines_active_memory_lifecycle_without_forced_mutation() {
+        let (tools, brief) = catalog_parts();
+        for required in [
+            "Memory is not an indefinitely growing history",
+            "Active Memory is the authoritative current global state",
+            "Keep an active entry unchanged when it is still accurate, clear, non-duplicated, and globally useful",
+            "Age alone is never a reason to remove it",
+            "clearly obsolete and will not be used again",
+            "incorrectly classified because it is actually Objective-specific or temporary",
+            "subject was renamed",
+            "Fact, requirement, or Agreement changed",
+            "Consolidate duplicate or substantially overlapping entries",
+            "has lost so much essential context that it is clearly unusable",
+            "If an unclear entry may still matter but cannot be interpreted safely",
+            "do not guess its meaning, invent a replacement, or silently retract it",
+            "Inspecting or maintaining Memory does not require a mutation",
+            "Do not rewrite accurate entries merely to demonstrate maintenance",
+        ] {
+            assert!(
+                brief.1.contains(required),
+                "missing active Memory lifecycle guidance: {}",
+                required
+            );
+        }
+
+        for forbidden_environment_example in ["38200", "build.sh", "release.sh", "me-rust", "me-s"]
+        {
+            assert!(
+                !brief.1.contains(forbidden_environment_example),
+                "Memory teaching examples must stay generic: {}",
+                forbidden_environment_example
+            );
+        }
+
+        let add_memory = tools
+            .iter()
+            .find(|tool| tool.full_name == ADD_MEMORY)
+            .unwrap();
+        assert!(add_memory.route.contains("current context is missing"));
+        assert!(
+            add_memory
+                .instructions
+                .contains("Do not duplicate or substantially overlap active Memory")
+        );
+
+        let invalidate_memory = tools
+            .iter()
+            .find(|tool| tool.full_name == INVALIDATE_MEMORY)
+            .unwrap();
+        assert!(
+            invalidate_memory
+                .instructions
+                .contains("clearly obsolete, renamed, changed, redundant, incorrectly classified")
+        );
+        assert!(
+            invalidate_memory
+                .route
+                .contains("never use it for cosmetic cleanup")
         );
     }
 

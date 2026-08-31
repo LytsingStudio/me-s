@@ -1,6 +1,7 @@
 /target
 /dist
 /.build
+/.build-cache
 /.me
 /ccb-ref/
 /experiments/

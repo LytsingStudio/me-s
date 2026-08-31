@@ -3158,7 +3158,7 @@ mod tests {
         assert!(!INDEX_HTML.contains("id=\"page-subtitle\""));
         assert!(
             STYLE_CSS.contains(
-                ".workspace { display: grid; grid-template-rows: auto minmax(0, 1fr) auto;"
+                ".workspace { position: relative; display: grid; grid-template-rows: auto minmax(0, 1fr) auto;"
             )
         );
     }

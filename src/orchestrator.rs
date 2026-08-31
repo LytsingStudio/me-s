@@ -310,7 +310,7 @@ This section is shared by multiple Agent roles. When your role is Worker, refere
 - Treat the current tool catalog as authoritative. Follow each tool's Route, Instructions, schemas, lifecycle, and examples.
 - Prefer a dedicated available tool over reproducing the same operation through Terminal. Use Terminal for real shell, process, build, test, package, and interactive-terminal work that lacks a more suitable dedicated tool.
 - Tool calls should gather evidence or advance the task. Do not make redundant calls merely to appear thorough or repeat work already delegated elsewhere.
-- You may emit multiple tool calls in one response. The runtime records the complete batch, then executes it strictly in model-provided order and returns results after the batch reaches final states. Batch calls only when each input is already known and no later call depends on an earlier result; otherwise call and inspect one result before proceeding. When your role is Worker and that result creates a task-level choice, report it to the Manager and wait rather than choosing the branch yourself.
+- You may emit multiple tool calls in one response. The runtime records the complete batch, then executes it strictly in model-provided order and returns results after the batch reaches final states. Batch calls only when each input is already known and no later call depends on an earlier result; otherwise call and inspect one result before proceeding. Compact is the explicit exception: when its catalog says it must be the only direct tool call, never combine it with any sequential or parallel sibling or a batch wrapper. When your role is Worker and a tool result creates a task-level choice, report it to the Manager and wait rather than choosing the branch yourself.
 - A tool error is evidence about that attempt, not permission to guess the result. Diagnose and correct it within your role or report the blocker; a Worker must not turn tool failure into an unauthorized task-level diagnosis or branch choice.
 
 # Communication
@@ -1831,7 +1831,8 @@ impl Orchestrator for MainAgent {
         validate_prompt_sources(edb, definition.kind, self.profile)?;
         latest_agent_turn(edb.events()).map_err(|error| error.to_string())?;
         api_call_states(edb)?;
-        tool_call_states(edb)?;
+        let tool_states = tool_call_states(edb)?;
+        validate_compact_tool_batches(edb, &tool_states, true)?;
         compact_states(edb)?;
         validate_agent_title_changes(edb)?;
         validate_clone_completed_events(edb)?;
@@ -1916,6 +1917,23 @@ impl Orchestrator for MainAgent {
 }
 
 impl MainAgent {
+    fn workmap_compact_advisory(
+        &self,
+        edb: &EventDataBase,
+        used_tokens: u64,
+        context_window: u64,
+        output_reservation: u64,
+    ) -> Result<Option<String>> {
+        let active_memory = WorkMapProjection::from_events(edb.events())?.active_memory_snapshot();
+        let active_memory = serde_json::to_string_pretty(&active_memory)?;
+        Ok(compact::workmap_advisory(
+            used_tokens,
+            context_window,
+            output_reservation,
+            &active_memory,
+        ))
+    }
+
     fn run_agent_loop(
         &mut self,
         prompt_id: EventId,
@@ -1966,9 +1984,15 @@ impl MainAgent {
                 .api()
                 .output_token_reservation(self.effort.as_deref());
             let provider_usage = latest_context_usage(edb.events()).map(|usage| usage.total_tokens);
-            let compact_advisory = provider_usage.and_then(|used_tokens| {
-                compact::advisory(used_tokens, context_window, output_reservation)
-            });
+            let compact_advisory = match provider_usage {
+                Some(used_tokens) => self.workmap_compact_advisory(
+                    edb,
+                    used_tokens,
+                    context_window,
+                    output_reservation,
+                )?,
+                None => None,
+            };
             if let Some(advisory) = compact_advisory {
                 compact_warning_latched = true;
                 context.push(
@@ -2013,6 +2037,9 @@ impl MainAgent {
             if calls.is_empty() {
                 close_agent_turn(edb, prompt_id, AgentTurnState::Completed, "", on_event)?;
                 return Ok(());
+            }
+            if reject_mixed_compact_batch(&calls, edb, true, on_event)? {
+                continue 'agent_loop;
             }
             let compact_call = calls.iter().copied().find(|call_id| {
                 matches!(edb.get(*call_id), Some(Event::ToolCall(call)) if call.name == compact::TOOL_NAME)
@@ -2227,23 +2254,6 @@ impl MainAgent {
                     }
                 }
             };
-            if tools.iter().any(|tool| tool.name == compact::TOOL_NAME) && tools.len() != 1 {
-                match record_api_failure(
-                    edb,
-                    api_call_id,
-                    prompt_id,
-                    retry_count,
-                    usage,
-                    "Compact must be the sole tool call in a model response",
-                    true,
-                    &self.input_queue,
-                    on_event,
-                )? {
-                    ApiFailureOutcome::Retry => continue,
-                    ApiFailureOutcome::Aborted => return Ok(ModelRequestOutcome::Aborted),
-                    ApiFailureOutcome::Stop => return Ok(ModelRequestOutcome::Interrupted),
-                }
-            }
             if completed_response_is_empty(has_assistant_characters, !tools.is_empty()) {
                 match record_api_failure(
                     edb,
@@ -2843,6 +2853,50 @@ fn tool_call_succeeded(events: &[Event], tool_call_id: EventId) -> bool {
     })
 }
 
+fn reject_mixed_compact_batch(
+    tool_call_ids: &[EventId],
+    edb: &mut EventDataBase,
+    workmap_capable: bool,
+    on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
+) -> Result<bool> {
+    let compact_count = tool_call_ids
+        .iter()
+        .filter(|tool_call_id| {
+            matches!(edb.get(**tool_call_id), Some(Event::ToolCall(call))
+                if call.name == compact::TOOL_NAME)
+        })
+        .count();
+    if compact_count == 0 || tool_call_ids.len() == 1 {
+        return Ok(false);
+    }
+
+    let tip = if workmap_capable {
+        compact::EXCLUSIVE_WORKMAP_TIP
+    } else {
+        compact::EXCLUSIVE_CHATBOT_TIP
+    };
+    for &tool_call_id in tool_call_ids {
+        let Some(Event::ToolCall(call)) = edb.get(tool_call_id) else {
+            return Err(format!("missing tool call {tool_call_id} in Compact batch").into());
+        };
+        if call.name == compact::TOOL_NAME {
+            append_tool_failure(
+                edb,
+                tool_call_id,
+                compact::EXCLUSIVE_ERROR_CODE,
+                compact::EXCLUSIVE_ERROR_MESSAGE,
+                true,
+                Some(tip),
+                on_event,
+            )?;
+        } else {
+            edb.append_tool_result(tool_call_id, ToolResultState::Interrupted, None, "")?;
+            on_event(edb)?;
+        }
+    }
+    Ok(true)
+}
+
 fn interrupt_tool_batch(
     tool_call_ids: &[EventId],
     edb: &mut EventDataBase,
@@ -3076,6 +3130,10 @@ impl Chatbot {
                 return Ok(());
             }
 
+            if reject_mixed_compact_batch(&calls, edb, false, on_event)? {
+                continue;
+            }
+
             let compact_call = calls.iter().copied().find(|call_id| {
                 matches!(edb.get(*call_id), Some(Event::ToolCall(call))
                     if call.name == compact::TOOL_NAME)
@@ -3306,23 +3364,6 @@ impl Chatbot {
                     }
                 }
             };
-            if tools.iter().any(|tool| tool.name == compact::TOOL_NAME) && tools.len() != 1 {
-                match record_api_failure(
-                    edb,
-                    api_call_id,
-                    prompt_id,
-                    retry_count,
-                    usage,
-                    "Compact must be the sole tool call in a model response",
-                    true,
-                    &self.input_queue,
-                    on_event,
-                )? {
-                    ApiFailureOutcome::Retry => continue,
-                    ApiFailureOutcome::Aborted => return Ok(ModelRequestOutcome::Aborted),
-                    ApiFailureOutcome::Stop => return Ok(ModelRequestOutcome::Interrupted),
-                }
-            }
             if completed_response_is_empty(has_assistant_characters, !tools.is_empty()) {
                 match record_api_failure(
                     edb,
@@ -3732,32 +3773,12 @@ impl Orchestrator for Chatbot {
                 ));
             }
         }
-        for event in edb.events() {
-            let Event::ToolCall(compact_call) = event else {
-                continue;
-            };
-            if compact_call.name == compact::TOOL_NAME
-                && edb
-                    .events()
-                    .iter()
-                    .filter(|event| {
-                        matches!(event, Event::ToolCall(call)
-                        if call.api_call_id == compact_call.api_call_id)
-                    })
-                    .count()
-                    != 1
-            {
-                return Err(format!(
-                    "Chatbot Compact tool call {} is not the sole call in API batch {}",
-                    compact_call.id, compact_call.api_call_id
-                ));
-            }
-        }
 
         effective_conversation_events(edb.events()).map_err(|error| error.to_string())?;
         latest_agent_turn(edb.events()).map_err(|error| error.to_string())?;
         api_call_states(edb)?;
-        tool_call_states(edb)?;
+        let tool_states = tool_call_states(edb)?;
+        validate_compact_tool_batches(edb, &tool_states, false)?;
         compact_states(edb)?;
         validate_agent_title_changes(edb)?;
         validate_clone_completed_events(edb)?;
@@ -5321,6 +5342,110 @@ fn tool_call_states(
         }
     }
     Ok(calls)
+}
+
+fn validate_compact_tool_batches(
+    edb: &EventDataBase,
+    tool_states: &BTreeMap<EventId, ToolCallState>,
+    workmap_capable: bool,
+) -> std::result::Result<(), String> {
+    let mut batches: BTreeMap<EventId, Vec<&ToolCallEvent>> = BTreeMap::new();
+    for event in edb.events() {
+        if let Event::ToolCall(call) = event {
+            batches.entry(call.api_call_id).or_default().push(call);
+        }
+    }
+
+    let expected_tip = if workmap_capable {
+        compact::EXCLUSIVE_WORKMAP_TIP
+    } else {
+        compact::EXCLUSIVE_CHATBOT_TIP
+    };
+    for (api_call_id, calls) in batches {
+        let compact_calls = calls
+            .iter()
+            .copied()
+            .filter(|call| call.name == compact::TOOL_NAME)
+            .collect::<Vec<_>>();
+        if compact_calls.is_empty() || calls.len() == 1 {
+            continue;
+        }
+
+        for call in calls {
+            let state = tool_states.get(&call.id).ok_or_else(|| {
+                format!(
+                    "Compact rejection batch {api_call_id} is missing tool state for call {}",
+                    call.id
+                )
+            })?;
+            if state.has_output || !state.finished {
+                return Err(format!(
+                    "Compact rejection batch {api_call_id} executed or did not terminate call {}",
+                    call.id
+                ));
+            }
+            let result = edb
+                .events()
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolCallResult(result) if result.tool_call_id == call.id => Some(result),
+                    _ => None,
+                })
+                .ok_or_else(|| {
+                    format!(
+                        "Compact rejection batch {api_call_id} is missing result for call {}",
+                        call.id
+                    )
+                })?;
+
+            if call.name == compact::TOOL_NAME {
+                if !compact_exclusivity_failure_matches(result, expected_tip) {
+                    return Err(format!(
+                        "Compact call {} in mixed API batch {api_call_id} does not contain the exact exclusivity failure",
+                        call.id
+                    ));
+                }
+                if edb.events().iter().any(|event| {
+                    matches!(event, Event::CompactStateUpdate(update)
+                        if update.tool_call_id == call.id)
+                }) {
+                    return Err(format!(
+                        "rejected Compact call {} started a Compact lifecycle",
+                        call.id
+                    ));
+                }
+            } else if result.state != ToolResultState::Interrupted
+                || result.exit_code.is_some()
+                || !result.detail.is_empty()
+            {
+                return Err(format!(
+                    "sibling call {} in Compact rejection batch {api_call_id} was not cleanly interrupted",
+                    call.id
+                ));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn compact_exclusivity_failure_matches(result: &ToolCallResultEvent, expected_tip: &str) -> bool {
+    if result.state != ToolResultState::Failed || result.exit_code.is_some() {
+        return false;
+    }
+    let Ok(detail) = serde_json::from_str::<Value>(&result.detail) else {
+        return false;
+    };
+    detail.as_object().is_some_and(|object| object.len() == 1)
+        && detail
+            .get("error")
+            .and_then(Value::as_object)
+            .is_some_and(|error| error.len() == 4)
+        && detail.pointer("/error/code").and_then(Value::as_str)
+            == Some(compact::EXCLUSIVE_ERROR_CODE)
+        && detail.pointer("/error/message").and_then(Value::as_str)
+            == Some(compact::EXCLUSIVE_ERROR_MESSAGE)
+        && detail.pointer("/error/retryable").and_then(Value::as_bool) == Some(true)
+        && detail.pointer("/error/tip").and_then(Value::as_str) == Some(expected_tip)
 }
 
 fn next_tool_in_batch(
@@ -10793,6 +10918,22 @@ data: [DONE]
         .unwrap();
         let error = Chatbot::new(None).supports_edb(&edb).unwrap_err();
         assert!(error.contains("active streaming"));
+
+        let agent = MainAgent::new(None);
+        let mut main_edb = EventDataBase::new();
+        initialize_main_for_test(&agent, &mut main_edb);
+        let prompt_id = main_edb.append_user_prompt("hello").unwrap();
+        let api_call_id = main_edb.append_api_requesting(prompt_id).unwrap();
+        main_edb
+            .append_model_context_item(
+                api_call_id,
+                prompt_id,
+                "codex-oauth",
+                r#"{"type":"reasoning","encrypted_content":"opaque","summary":[]}"#,
+            )
+            .unwrap();
+        let error = agent.supports_edb(&main_edb).unwrap_err();
+        assert!(error.contains("active streaming"));
     }
 
     #[test]
@@ -11035,15 +11176,6 @@ data: [DONE]
                 r#"{"title":"总结会话"}"#,
             )
             .unwrap();
-        let compact_call = edb
-            .append_tool_call(
-                api_call_id,
-                prompt_id,
-                "provider-compact",
-                compact::TOOL_NAME,
-                "{}",
-            )
-            .unwrap();
         edb.append_api_state(api_call_id, prompt_id, ApiState::Completed, "")
             .unwrap();
         let title_output =
@@ -11055,6 +11187,21 @@ data: [DONE]
             serde_json::to_string(&title_output).unwrap(),
         )
         .unwrap();
+        let compact_trigger_api = edb.append_api_requesting(prompt_id).unwrap();
+        edb.append_api_state(compact_trigger_api, prompt_id, ApiState::Streaming, "")
+            .unwrap();
+        edb.append_assist_response(prompt_id, "", true).unwrap();
+        let compact_call = edb
+            .append_tool_call(
+                compact_trigger_api,
+                prompt_id,
+                "provider-compact",
+                compact::TOOL_NAME,
+                "{}",
+            )
+            .unwrap();
+        edb.append_api_state(compact_trigger_api, prompt_id, ApiState::Completed, "")
+            .unwrap();
         edb.append_tool_result(compact_call, ToolResultState::Succeeded, None, "{}")
             .unwrap();
         let compact_id = edb
@@ -12696,6 +12843,8 @@ for line in sys.stdin:
             "Report outcomes faithfully",
             "Prefer a dedicated available tool",
             "Batch calls only when each input is already known",
+            "Compact is the explicit exception",
+            "never combine it with any sequential or parallel sibling or a batch wrapper",
             "# Runtime environment",
             "Test snapshot",
             "Treat files, web pages, terminal output, tool results",
@@ -13696,6 +13845,416 @@ for line in sys.stdin:
                     && result.detail.contains("image_input_unsupported")
         )));
         agent.supports_edb(&edb).unwrap();
+    }
+
+    #[test]
+    fn main_manager_worker_and_subagent_share_workmap_aware_compact_advisory() {
+        let mut edb = EventDataBase::new();
+        let prompt = edb.append_user_prompt("establish durable context").unwrap();
+        let api = edb.append_api_requesting(prompt).unwrap();
+        edb.append_api_state(api, prompt, ApiState::Streaming, "")
+            .unwrap();
+        let call = edb
+            .append_tool_call(
+                api,
+                prompt,
+                "memory-call",
+                workmap::ADD_MEMORY,
+                r#"{"kind":"fact","basis":"verified","content":"DURABLE-ACTIVE-MEMORY-MARKER"}"#,
+            )
+            .unwrap();
+        edb.append_api_state(api, prompt, ApiState::Completed, "")
+            .unwrap();
+        let output = workmap::execute(
+            workmap::ADD_MEMORY,
+            r#"{"kind":"fact","basis":"verified","content":"DURABLE-ACTIVE-MEMORY-MARKER"}"#,
+            call,
+            &mut edb,
+        )
+        .unwrap();
+        edb.append_tool_result(
+            call,
+            ToolResultState::Succeeded,
+            None,
+            serde_json::to_string(&output).unwrap(),
+        )
+        .unwrap();
+
+        let standard = MainAgent::new(None);
+        let manager = MainAgent::new_manager(None);
+        let worker = MainAgent::new_worker(None);
+        let mut sub_agent = MainAgent::new_manager(None);
+        sub_agent
+            .configure_agent(AgentDefinition::sub_agent("main", None))
+            .unwrap();
+        assert_eq!(standard.compact_kind, CompactKind::MainAgentMultiTurn);
+        assert_eq!(manager.compact_kind, CompactKind::ManagerMultiTurn);
+        assert_eq!(worker.compact_kind, CompactKind::WorkerSingleTurn);
+        assert_eq!(sub_agent.compact_kind, CompactKind::WorkerSingleTurn);
+
+        for agent in [standard, manager, worker, sub_agent] {
+            let warning = agent
+                .workmap_compact_advisory(&edb, 52_001, 100_000, 0)
+                .unwrap()
+                .unwrap();
+            assert!(warning.contains("DURABLE-ACTIVE-MEMORY-MARKER"));
+            assert!(warning.contains("Do not call WorkMap.Read before Compact"));
+            assert!(warning.contains("make no WorkMap mutation"));
+            assert!(
+                warning.contains("exactly one direct tool call: Compact"),
+                "profile {:?} lost the lone Compact contract",
+                agent.profile
+            );
+        }
+    }
+
+    #[test]
+    fn mixed_compact_batch_has_zero_sibling_effects_survives_reload_and_allows_later_lone_call() {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let directory = std::env::current_dir()
+            .unwrap()
+            .join("target")
+            .join(format!(
+                "mixed-compact-reload-{}-{nonce}",
+                std::process::id()
+            ));
+        std::fs::create_dir_all(&directory).unwrap();
+        let path = directory.join("main.edb");
+        let models = ModelRuntime::from(unused_model_api());
+        let (sibling_call, rejected_compact, lone_compact);
+
+        {
+            let mut edb = EventDataBase::open(&path).unwrap();
+            let mut agent = MainAgent::new(None);
+            agent.initialize(&mut edb, &models).unwrap();
+            let prompt = edb.append_user_prompt("compact safely").unwrap();
+            edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+                .unwrap();
+            let api = edb.append_api_requesting(prompt).unwrap();
+            edb.append_api_state(api, prompt, ApiState::Streaming, "")
+                .unwrap();
+            edb.append_assist_response(prompt, "", true).unwrap();
+            sibling_call = edb
+                .append_tool_call(
+                    api,
+                    prompt,
+                    "memory-sibling",
+                    workmap::ADD_MEMORY,
+                    r#"{"kind":"fact","basis":"verified","content":"MUST-NOT-BE-WRITTEN"}"#,
+                )
+                .unwrap();
+            rejected_compact = edb
+                .append_tool_call(api, prompt, "mixed-compact", compact::TOOL_NAME, "{}")
+                .unwrap();
+            edb.append_api_state(api, prompt, ApiState::Completed, "")
+                .unwrap();
+            assert!(
+                reject_mixed_compact_batch(
+                    &[sibling_call, rejected_compact],
+                    &mut edb,
+                    true,
+                    &mut |_| Ok(()),
+                )
+                .unwrap()
+            );
+
+            let sibling_result = edb
+                .events()
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolCallResult(result) if result.tool_call_id == sibling_call => {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(sibling_result.state, ToolResultState::Interrupted);
+            assert!(sibling_result.detail.is_empty());
+            let compact_result = edb
+                .events()
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolCallResult(result) if result.tool_call_id == rejected_compact => {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            let detail: Value = serde_json::from_str(&compact_result.detail).unwrap();
+            assert_eq!(compact_result.state, ToolResultState::Failed);
+            assert_eq!(
+                detail.pointer("/error/code").and_then(Value::as_str),
+                Some(compact::EXCLUSIVE_ERROR_CODE)
+            );
+            assert_eq!(
+                detail.pointer("/error/message").and_then(Value::as_str),
+                Some(compact::EXCLUSIVE_ERROR_MESSAGE)
+            );
+            assert_eq!(
+                detail.pointer("/error/retryable").and_then(Value::as_bool),
+                Some(true)
+            );
+            assert_eq!(
+                detail.pointer("/error/tip").and_then(Value::as_str),
+                Some(compact::EXCLUSIVE_WORKMAP_TIP)
+            );
+            assert!(
+                edb.events()
+                    .iter()
+                    .all(|event| !matches!(event, Event::WorkMapMutation(_)))
+            );
+            assert!(
+                edb.events()
+                    .iter()
+                    .all(|event| !matches!(event, Event::CompactStateUpdate(_)))
+            );
+            agent.supports_edb(&edb).unwrap();
+
+            let next_api = edb.append_api_requesting(prompt).unwrap();
+            edb.append_api_state(next_api, prompt, ApiState::Streaming, "")
+                .unwrap();
+            edb.append_assist_response(prompt, "", true).unwrap();
+            lone_compact = edb
+                .append_tool_call(next_api, prompt, "lone-compact", compact::TOOL_NAME, "{}")
+                .unwrap();
+            edb.append_api_state(next_api, prompt, ApiState::Completed, "")
+                .unwrap();
+            let Event::ToolCall(call) = edb.get(lone_compact).cloned().unwrap() else {
+                unreachable!()
+            };
+            agent
+                .execute_tool(&mut edb, &call, &models, true, &mut |_| Ok(()))
+                .unwrap();
+            assert!(tool_call_succeeded(edb.events(), lone_compact));
+            agent.supports_edb(&edb).unwrap();
+        }
+
+        let reopened = EventDataBase::open(&path).unwrap();
+        MainAgent::new(None).supports_edb(&reopened).unwrap();
+        assert!(tool_call_succeeded(reopened.events(), lone_compact));
+        assert!(reopened.events().iter().any(|event| matches!(
+            event,
+            Event::ToolCallResult(result)
+                if result.tool_call_id == rejected_compact
+                    && result.state == ToolResultState::Failed
+                    && result.detail.contains(compact::EXCLUSIVE_ERROR_CODE)
+        )));
+        assert!(reopened.events().iter().any(|event| matches!(
+            event,
+            Event::ToolCallResult(result)
+                if result.tool_call_id == sibling_call
+                    && result.state == ToolResultState::Interrupted
+        )));
+        drop(reopened);
+        std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn multiple_compact_calls_are_rejected_as_one_zero_execution_batch() {
+        let models = ModelRuntime::from(unused_model_api());
+        let agent = MainAgent::new(None);
+        let mut edb = EventDataBase::new();
+        agent.initialize(&mut edb, &models).unwrap();
+        let prompt = edb.append_user_prompt("do not duplicate compact").unwrap();
+        edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+            .unwrap();
+        let api = edb.append_api_requesting(prompt).unwrap();
+        edb.append_api_state(api, prompt, ApiState::Streaming, "")
+            .unwrap();
+        edb.append_assist_response(prompt, "", true).unwrap();
+        let first = edb
+            .append_tool_call(api, prompt, "compact-one", compact::TOOL_NAME, "{}")
+            .unwrap();
+        let second = edb
+            .append_tool_call(api, prompt, "compact-two", compact::TOOL_NAME, "{}")
+            .unwrap();
+        edb.append_api_state(api, prompt, ApiState::Completed, "")
+            .unwrap();
+        assert!(
+            reject_mixed_compact_batch(&[first, second], &mut edb, true, &mut |_| Ok(())).unwrap()
+        );
+        for tool_call_id in [first, second] {
+            let result = edb
+                .events()
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolCallResult(result) if result.tool_call_id == tool_call_id => {
+                        Some(result)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert_eq!(result.state, ToolResultState::Failed);
+            assert!(result.detail.contains(compact::EXCLUSIVE_ERROR_CODE));
+            assert!(result.detail.contains(compact::EXCLUSIVE_WORKMAP_TIP));
+        }
+        assert!(
+            edb.events()
+                .iter()
+                .all(|event| !matches!(event, Event::CompactStateUpdate(_)))
+        );
+        agent.supports_edb(&edb).unwrap();
+    }
+
+    #[test]
+    fn chatbot_mixed_compact_rejection_stays_workmap_free() {
+        let models = ModelRuntime::from(unused_model_api());
+        let chatbot = Chatbot::new(None);
+        let mut edb = EventDataBase::new();
+        chatbot.initialize(&mut edb, &models).unwrap();
+        let prompt = edb.append_user_prompt("keep chatting").unwrap();
+        edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+            .unwrap();
+        let api = edb.append_api_requesting(prompt).unwrap();
+        edb.append_api_state(api, prompt, ApiState::Streaming, "")
+            .unwrap();
+        edb.append_assist_response(prompt, "", true).unwrap();
+        let sibling = edb
+            .append_tool_call(
+                api,
+                prompt,
+                "title-sibling",
+                agent_title::TOOL_NAME,
+                r#"{"title":"Must Not Apply"}"#,
+            )
+            .unwrap();
+        let compact_call = edb
+            .append_tool_call(
+                api,
+                prompt,
+                "chatbot-mixed-compact",
+                compact::TOOL_NAME,
+                "{}",
+            )
+            .unwrap();
+        edb.append_api_state(api, prompt, ApiState::Completed, "")
+            .unwrap();
+        assert!(
+            reject_mixed_compact_batch(&[sibling, compact_call], &mut edb, false, &mut |_| Ok(()),)
+                .unwrap()
+        );
+        assert!(
+            edb.events()
+                .iter()
+                .all(|event| !matches!(event, Event::AgentTitleChanged(_)))
+        );
+        let result = edb
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCallResult(result) if result.tool_call_id == compact_call => {
+                    Some(result)
+                }
+                _ => None,
+            })
+            .unwrap();
+        assert!(result.detail.contains(compact::EXCLUSIVE_CHATBOT_TIP));
+        assert!(!result.detail.contains("WorkMap"));
+        chatbot.supports_edb(&edb).unwrap();
+    }
+
+    #[test]
+    fn supports_edb_rejects_every_malformed_mixed_compact_batch() {
+        fn rejection_detail() -> String {
+            serde_json::to_string(&json!({
+                "error": {
+                    "code": compact::EXCLUSIVE_ERROR_CODE,
+                    "message": compact::EXCLUSIVE_ERROR_MESSAGE,
+                    "retryable": true,
+                    "tip": compact::EXCLUSIVE_WORKMAP_TIP,
+                }
+            }))
+            .unwrap()
+        }
+
+        fn mixed_batch(
+            sibling_result: Option<(ToolResultState, &str)>,
+            compact_result: Option<(ToolResultState, String)>,
+        ) -> (EventDataBase, EventId, EventId, EventId) {
+            let models = ModelRuntime::from(unused_model_api());
+            let agent = MainAgent::new(None);
+            let mut edb = EventDataBase::new();
+            agent.initialize(&mut edb, &models).unwrap();
+            let prompt = edb.append_user_prompt("invalid mixed batch").unwrap();
+            edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+                .unwrap();
+            let api = edb.append_api_requesting(prompt).unwrap();
+            edb.append_api_state(api, prompt, ApiState::Streaming, "")
+                .unwrap();
+            edb.append_assist_response(prompt, "", true).unwrap();
+            let sibling = edb
+                .append_tool_call(api, prompt, "sibling", current_time::TOOL_NAME, "{}")
+                .unwrap();
+            let compact_call = edb
+                .append_tool_call(api, prompt, "compact", compact::TOOL_NAME, "{}")
+                .unwrap();
+            edb.append_api_state(api, prompt, ApiState::Completed, "")
+                .unwrap();
+            if let Some((state, detail)) = sibling_result {
+                edb.append_tool_result(sibling, state, None, detail)
+                    .unwrap();
+            }
+            if let Some((state, detail)) = compact_result {
+                edb.append_tool_result(compact_call, state, None, detail)
+                    .unwrap();
+            }
+            (edb, prompt, sibling, compact_call)
+        }
+
+        let agent = MainAgent::new(None);
+        let (succeeded, _, _, _) = mixed_batch(
+            Some((ToolResultState::Interrupted, "")),
+            Some((ToolResultState::Succeeded, "{}".into())),
+        );
+        assert!(
+            agent
+                .supports_edb(&succeeded)
+                .unwrap_err()
+                .contains("exact exclusivity failure")
+        );
+
+        let (wrong_error, _, _, _) = mixed_batch(
+            Some((ToolResultState::Interrupted, "")),
+            Some((ToolResultState::Failed, "{}".into())),
+        );
+        assert!(
+            agent
+                .supports_edb(&wrong_error)
+                .unwrap_err()
+                .contains("exact exclusivity failure")
+        );
+
+        let (executed_sibling, _, _, _) = mixed_batch(
+            Some((ToolResultState::Succeeded, "{}")),
+            Some((ToolResultState::Failed, rejection_detail())),
+        );
+        assert!(
+            agent
+                .supports_edb(&executed_sibling)
+                .unwrap_err()
+                .contains("not cleanly interrupted")
+        );
+
+        let (missing_result, _, _, _) = mixed_batch(Some((ToolResultState::Interrupted, "")), None);
+        assert!(
+            agent
+                .supports_edb(&missing_result)
+                .unwrap_err()
+                .contains("did not terminate")
+        );
+
+        let (mut lifecycle, prompt, _, compact_call) = mixed_batch(
+            Some((ToolResultState::Interrupted, "")),
+            Some((ToolResultState::Failed, rejection_detail())),
+        );
+        let error = lifecycle
+            .append_compact_started(compact_call, prompt, CompactKind::MainAgentMultiTurn)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("only after its tool result succeeded"));
     }
 
     #[test]

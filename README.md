@@ -338,13 +338,15 @@ bun test tests/gateway_webui.test.js tests/webui_*.test.js tests/me_client.test.
 sh tests/install_scripts.sh
 ```
 
-跨平台 Release 完全由 Apple Silicon macOS 主机本地构建，不使用 GitHub Actions 或外部 Windows 构建机。正式构建需要 Rust 与 Bun、Docker Buildx、LLVM、`cargo-xwin`、NSIS `makensis` 和 7-Zip：
+跨平台发行资产完全由 Apple Silicon macOS 主机本地构建，不使用 GitHub Actions 或外部 Windows 构建机。首次初始化或依赖输入变化后，需要显式运行 `./build.sh --online`，并提供可联网的 Rust、Bun、Docker/Colima、LLVM、`cargo-xwin`、NSIS `makensis` 和 7-Zip 环境；初始化完成后，日常运行 `./build.sh` 默认严格离线，一次生成 macOS universal pkg、Windows x86_64 NSIS setup、Linux x86_64/arm64 `.run` 与 `SHA256SUMS`。
 
 - macOS：原生构建 arm64/x86_64 CLI 与 Tauri universal App，再生成一个 pkg；
 - Windows：通过 `cargo-xwin`/LLVM 交叉构建 MSVC ABI x64 的三个 PE 程序，再由 macOS `makensis` 生成 NSIS setup；
-- Linux：通过本机 Docker Buildx 的 `linux/amd64` 与 `linux/arm64` 环境分别构建 CLI、AppImage 和 `.run`。
+- Linux：首次通过 `./build.sh --online` 为两个架构初始化固定的本地 builder image，以及持久的 Cargo、target 和内嵌 Python runtime 缓存；builder image 预置 AppImage 工具及固定校验的 type-2 runtime，后续使用相同 Docker runtime 环境直接复用，不重复安装或下载系统、Rust、Zig、Bun、Tauri、Python/AppImage runtime 和项目依赖。
 
-开发过程中可执行 `./release.sh --build-only` 只生成 `dist/`。正式执行 `./release.sh` 还会验证干净且已推送的 `s` 分支、统一产品版本、tag/Release 不存在；只有四个包全部构建完并通过文件大小、格式、架构、静态包内容与 SHA-256 检查后，才创建 tag 和 GitHub Release。构建验收不会运行 Windows/Linux 目标程序、AppImage、`.run` 或安装器。Release 恰好包含：
+`./build.sh` 和 `./build.sh --offline` 都严格要求 host/Linux 工具、当前依赖集合及 AppImage runtime 已初始化：host Cargo 使用 offline，Linux 容器禁用网络；缺失任何资源都会直接失败，只有显式 `./build.sh --online` 才允许初始化或下载。所有模式均先在临时 staging 完成全部构建和静态验收，成功后才原子替换 `dist/`，因此只清理旧发行包，并保留 `.build-cache`、Cargo、xwin、Docker image/volume、内嵌 Python runtime 和依赖编译缓存。构建不会运行 Windows/Linux 目标程序、AppImage、`.run` 或安装器。
+
+`./release.sh` 不执行任何构建或依赖初始化，只验证干净且已推送的 `s` 分支、`BUILD-MANIFEST.json` 与当前 commit、四包静态结构及 SHA-256，然后创建 tag 并上传现有 `dist/`。Release 恰好包含：
 
 ```text
 ME-macos-universal.pkg

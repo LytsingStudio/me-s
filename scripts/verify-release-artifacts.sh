@@ -10,7 +10,7 @@ PACKAGE_ASSETS=(
     ME-linux-x86_64.run
     ME-linux-arm64.run
 )
-EXPECTED_ASSETS=$'ME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-setup.exe\nSHA256SUMS'
+EXPECTED_ASSETS=$'BUILD-MANIFEST.json\nME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-setup.exe\nSHA256SUMS'
 
 for command in file lipo node pkgutil shasum tar xcrun; do
     command -v "$command" >/dev/null 2>&1 || { echo "error: missing static verification dependency: $command" >&2; exit 1; }

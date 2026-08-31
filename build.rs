@@ -19,6 +19,7 @@ struct PythonDistribution {
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-env-changed=ME_PYTHON_RUNTIME_ARCHIVE");
+    println!("cargo:rerun-if-env-changed=ME_BUILD_OFFLINE");
     let target = env::var("TARGET").expect("Cargo did not provide TARGET");
     prepare_python_runtime(&target);
 
@@ -111,6 +112,12 @@ fn prepare_python_runtime(target: &str) {
                 "ME_PYTHON_RUNTIME_ARCHIVE {} does not match the pinned SHA-256 {}",
                 archive.display(),
                 distribution.sha256
+            );
+        }
+        if matches!(env::var("ME_BUILD_OFFLINE").as_deref(), Ok("1")) {
+            panic!(
+                "embedded Python runtime cache {} is missing or invalid while offline",
+                archive.display()
             );
         }
         download_python(&archive, &asset, distribution.sha256);

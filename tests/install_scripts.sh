@@ -2,19 +2,24 @@
 set -eu
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+BUILD=$ROOT_DIR/build.sh
 RELEASE=$ROOT_DIR/release.sh
 UPDATER=$ROOT_DIR/src/updater.rs
 LINUX_BUILDER=$ROOT_DIR/packaging/linux/build-run.sh
 LINUX_CONTAINER=$ROOT_DIR/packaging/linux/build-container.sh
+LINUX_INITIALIZER=$ROOT_DIR/packaging/linux/initialize-environment.sh
+LINUX_APPIMAGE_PREP=$ROOT_DIR/packaging/linux/prepare-amd64-appimage-tools.sh
 WINDOWS_BUILDER=$ROOT_DIR/packaging/windows/build-installer.sh
 LINUX_IN_CONTAINER=$ROOT_DIR/packaging/linux/build-in-container.sh
 VERIFIER=$ROOT_DIR/scripts/verify-release-artifacts.sh
+MANIFEST=$ROOT_DIR/scripts/build-manifest.cjs
 
 sh -n "$ROOT_DIR/install.sh"
 sh -n "$ROOT_DIR/packaging/linux/installer.sh"
 sh -n "$LINUX_BUILDER"
 sh -n "$ROOT_DIR/packaging/macos/build-pkg.sh"
-bash -n "$RELEASE" "$LINUX_CONTAINER" "$LINUX_IN_CONTAINER" "$WINDOWS_BUILDER" "$VERIFIER"
+bash -n "$BUILD" "$RELEASE" "$LINUX_CONTAINER" "$LINUX_INITIALIZER" "$LINUX_APPIMAGE_PREP" "$LINUX_IN_CONTAINER" "$WINDOWS_BUILDER" "$VERIFIER"
+node --check "$MANIFEST"
 node "$ROOT_DIR/scripts/product-version.cjs" --print >/dev/null
 
 grep -F 'LytsingStudio/me-s' "$ROOT_DIR/install.sh" >/dev/null
@@ -26,6 +31,7 @@ if [ -e "$ROOT_DIR/.github/workflows/release.yml" ]; then
     printf 'local release construction must not retain a GitHub Actions workflow\n' >&2
     exit 1
 fi
+[ -x "$BUILD" ]
 
 for asset in \
     ME-macos-universal.pkg \
@@ -33,6 +39,7 @@ for asset in \
     ME-linux-x86_64.run \
     ME-linux-arm64.run
 do
+    grep -F "$asset" "$BUILD" >/dev/null
     grep -F "$asset" "$RELEASE" >/dev/null
     grep -F "$asset" "$UPDATER" >/dev/null
     grep -F "$asset" "$VERIFIER" >/dev/null
@@ -41,31 +48,60 @@ grep -F 'ME-macos-universal.pkg' "$ROOT_DIR/install.sh" >/dev/null
 grep -F 'ME-linux-x86_64.run' "$ROOT_DIR/install.sh" >/dev/null
 grep -F 'ME-linux-arm64.run' "$ROOT_DIR/install.sh" >/dev/null
 grep -F 'ME-windows-x86_64-setup.exe' "$ROOT_DIR/install.ps1" >/dev/null
-grep -F 'cargo xwin build' "$RELEASE" >/dev/null
-grep -F 'packaging/linux/build-container.sh' "$RELEASE" >/dev/null
-grep -F 'scripts/verify-release-artifacts.sh' "$RELEASE" >/dev/null
-grep -F 'docker run --rm \' "$LINUX_CONTAINER" >/dev/null
+grep -F 'cargo xwin build' "$BUILD" >/dev/null
+grep -F 'packaging/linux/build-container.sh' "$BUILD" >/dev/null
+grep -F 'scripts/build-manifest.cjs create' "$BUILD" >/dev/null
+grep -F 'scripts/build-manifest.cjs verify' "$RELEASE" >/dev/null
+grep -F 'gh release create' "$RELEASE" >/dev/null
+grep -F 'BUILD_OFFLINE=1' "$BUILD" >/dev/null
+grep -F 'usage: $0 [--offline|--online]' "$BUILD" >/dev/null
+grep -F 'export ME_BUILD_OFFLINE="$BUILD_OFFLINE"' "$BUILD" >/dev/null
+grep -F 'OFFLINE=${ME_BUILD_OFFLINE:-1}' "$LINUX_CONTAINER" >/dev/null
+grep -F 'offline Linux cache volume is missing' "$LINUX_CONTAINER" >/dev/null
+if grep -F '[[ -f "$HOST_DEPENDENCY_MARKER" ||' "$BUILD" >/dev/null || grep -F '[[ -f "$DEPENDENCY_MARKER" ||' "$LINUX_CONTAINER" >/dev/null; then
+    printf 'online mode must not be forced back offline by an existing readiness marker\n' >&2
+    exit 1
+fi
+grep -F 'docker image inspect' "$LINUX_CONTAINER" >/dev/null
+grep -F 'docker commit' "$LINUX_CONTAINER" >/dev/null
+grep -F 'docker volume create' "$LINUX_CONTAINER" >/dev/null
+grep -F -- '--network=none' "$LINUX_CONTAINER" >/dev/null
 grep -F 'tar -cf "$WORK/source.tar" \' "$LINUX_CONTAINER" >/dev/null
 grep -F -- '--platform "$PLATFORM" \' "$LINUX_CONTAINER" >/dev/null
-grep -F -- '--volume "$WORK/source.tar:/input/source.tar:ro" \' "$LINUX_CONTAINER" >/dev/null
+grep -F -- '--volume "$CARGO_VOLUME:/cache/cargo" \' "$LINUX_CONTAINER" >/dev/null
+grep -F 'PYTHON_VOLUME="me-s-linux-python-${TARGETARCH}-v1"' "$LINUX_CONTAINER" >/dev/null
+grep -F -- '--volume "$PYTHON_VOLUME:/cache/python" \' "$LINUX_CONTAINER" >/dev/null
+grep -F '"$ROOT_DIR/build.rs"' "$LINUX_CONTAINER" >/dev/null
+grep -F 'ln -s "$PYTHON_CACHE_DIR" "$SOURCE_DIR/.build/python"' "$LINUX_IN_CONTAINER" >/dev/null
+grep -F 'rerun-if-env-changed=ME_BUILD_OFFLINE' "$ROOT_DIR/build.rs" >/dev/null
+grep -F 'runtime-aarch64' "$LINUX_APPIMAGE_PREP" >/dev/null
+grep -F '7d5d772b7c32f0c84caf0a452a3072a5709027d7eac5856feb89a7a7a8881372' "$LINUX_APPIMAGE_PREP" >/dev/null
+grep -F -- '--runtime-file /opt/me-linuxdeploy-plugin-appimage/runtime-aarch64' "$LINUX_APPIMAGE_PREP" >/dev/null
+grep -F 'cargo install cargo-zigbuild --version' "$LINUX_INITIALIZER" >/dev/null
+grep -F 'cargo install tauri-cli --version' "$LINUX_INITIALIZER" >/dev/null
 grep -F 'cargo zigbuild' "$LINUX_IN_CONTAINER" >/dev/null
-grep -F 'makensis' "$WINDOWS_BUILDER" >/dev/null
-grep -F 'gh release create' "$RELEASE" >/dev/null
-grep -F 'LINUX_BUILD_LABEL=studio.lytsing.me-s.release=linux-build' "$RELEASE" >/dev/null
-grep -F 'docker ps --all --quiet --filter "label=$LINUX_BUILD_LABEL"' "$RELEASE" >/dev/null
-grep -F 'trap cleanup_release_linux_on_exit EXIT' "$RELEASE" >/dev/null
-grep -F '            cd /' "$RELEASE" >/dev/null
-grep -F 'colima ssh -- sudo fstrim -v /var/lib/docker' "$RELEASE" >/dev/null
-if grep -F 'docker buildx build' "$RELEASE" "$LINUX_CONTAINER" >/dev/null; then
-    printf 'Linux release must not use BuildKit emulation or retain build cache\n' >&2
+grep -F 'cargo tauri build --no-bundle' "$LINUX_IN_CONTAINER" >/dev/null
+grep -F 'cargo tauri bundle --verbose --bundles appimage' "$LINUX_IN_CONTAINER" >/dev/null
+grep -F 'BUILD-MANIFEST.json' "$MANIFEST" "$VERIFIER" >/dev/null
+grep -F '.build-cache/bin/7zz' "$RELEASE" >/dev/null
+if grep -E 'cargo (build|xwin|tauri)|docker (run|image|volume)|makensis|build-container\.sh' "$RELEASE" >/dev/null; then
+    printf 'release.sh still performs build or toolchain work\n' >&2
     exit 1
 fi
-if grep -F 'buildx prune' "$RELEASE" >/dev/null; then
-    printf 'release must not rely on shared BuildKit cache pruning\n' >&2
+if grep -E 'apt-get|curl|cargo install' "$LINUX_IN_CONTAINER" >/dev/null; then
+    printf 'normal Linux builds still install or download their toolchain\n' >&2
     exit 1
 fi
-if grep -E 'gh (workflow|run)|GitHub Actions|release\.yml' "$RELEASE" "$LINUX_CONTAINER" "$VERIFIER" >/dev/null; then
-    printf 'local release sources still depend on GitHub Actions\n' >&2
+if grep -E 'docker (image|volume) rm' "$BUILD" "$LINUX_CONTAINER" >/dev/null; then
+    printf 'build cleanup must preserve persistent images and dependency caches\n' >&2
+    exit 1
+fi
+if grep -F 'docker buildx build' "$BUILD" "$RELEASE" "$LINUX_CONTAINER" >/dev/null; then
+    printf 'Linux builds must use the verified Docker runtime path\n' >&2
+    exit 1
+fi
+if grep -E 'gh (workflow|run)|GitHub Actions|release\.yml' "$BUILD" "$RELEASE" "$LINUX_CONTAINER" "$VERIFIER" >/dev/null; then
+    printf 'local build or release sources still depend on GitHub Actions\n' >&2
     exit 1
 fi
 
