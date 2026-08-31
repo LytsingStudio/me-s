@@ -45,6 +45,7 @@ function loadRuntime(relative) {
       prepareAgentLoadProgress: typeof prepareAgentLoadProgress === "function" ? prepareAgentLoadProgress : null,
       settleAgentLoadProgress: typeof settleAgentLoadProgress === "function" ? settleAgentLoadProgress : null,
       agentLoadingState: typeof agentLoadingState === "function" ? agentLoadingState : null,
+      sessionSelectionAllowed: typeof sessionSelectionAllowed === "function" ? sessionSelectionAllowed : null,
       workspaceMetadataReady: typeof workspaceMetadataReady === "function" ? workspaceMetadataReady : null,
       applyGatewayStartupMetadata: typeof applyGatewayStartupMetadata === "function" ? applyGatewayStartupMetadata : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
@@ -525,6 +526,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
+  if (!sessionSelectionAllowed(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -739,10 +741,13 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     gateway.state.stores.set("pending", pending);
     expect(gateway.agentLoadingState("chat", "ready")).toEqual({ loading: false, percent: null });
     expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 0 });
+    expect(gateway.sessionSelectionAllowed("chat", "ready")).toBe(true);
+    expect(gateway.sessionSelectionAllowed("chat", "pending")).toBe(false);
     pending.eventCount = 4;
     expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 50 });
     pending.eventCount = 6;
     gateway.settleAgentLoadProgress(pending);
+    expect(gateway.sessionSelectionAllowed("chat", "pending")).toBe(true);
     expect(pending.loadProgress).toBeNull();
     gateway.prepareAgentLoadProgress(
       pending, { ...pendingMeta, event_count: 10 }, null, pending.eventCount, pending.mutationRevision,
@@ -750,7 +755,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(pending.loadProgress).toEqual({
       mutationRevision: 1, startEventCount: 6, targetEventCount: 10,
     });
-
+    expect(gateway.sessionSelectionAllowed("chat", "pending")).toBe(false);
 
     const inactive = gateway.emptyGatewayWorkspaceState();
     inactive.snapshot = { environment: { workspace: "/other" }, agents: [pendingMeta] };
@@ -1040,10 +1045,15 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain("const active = !loadingState.loading && sidebarAgentActive(summary);");
     expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
     expect(source).not.toContain("startupPending: true");
+    expect(index).toContain('id="session-sync-overlay"');
+    expect(index).toContain("<strong>正在同步</strong>");
+    expect(source).toContain("if (!sessionSelectionAllowed(workspaceId, agentId)) return;");
+    expect(source).toContain("node.inert = loading;");
+    expect(source).toContain("renderSessionSyncOverlay();");
     expect(source).toContain('row.classList.toggle("session-loading", loadingState.loading)');
     expect(source).toContain('class="agent-load-progress hidden"');
-    expect(source).not.toContain("item.disabled = startupLoading");
-    expect(source).not.toContain("deleteButton.disabled = startupLoading");
+    expect(source).toContain("item.disabled = loadingState.loading");
+    expect(source).toContain("deleteButton.disabled = loadingState.loading");
     expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
     expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
     expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
@@ -1057,6 +1067,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
     expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
     expect(styles).toContain(".agent-row.session-loading { opacity: .72; }");
+    expect(styles).toContain(".session-sync-overlay { position: absolute;");
+    expect(styles).toContain(".session-sync-card { display: grid;");
     expect(styles).toContain(".agent-dot.loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
     expect(styles).toContain("animation: agent-loading-spin .8s linear infinite;");
     expect(styles).toContain("@keyframes agent-loading-spin { to { transform: rotate(360deg); } }");

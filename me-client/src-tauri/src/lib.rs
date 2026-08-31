@@ -3,6 +3,9 @@ mod gateway;
 
 use std::{collections::BTreeMap, env, io, path::PathBuf};
 
+#[cfg(target_os = "macos")]
+use std::process::{Command, Stdio};
+
 use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest, RememberedDevice};
 use gateway::{
     DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport, LocalDevice,
@@ -254,9 +257,23 @@ fn database_path(data_directory: PathBuf) -> PathBuf {
     data_directory.join("me-client.sqlite3")
 }
 
+#[cfg(target_os = "macos")]
+fn spawn_client_instance() -> Result<(), io::Error> {
+    let executable = env::current_exe()?;
+    let mut child = Command::new(executable)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()?;
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
-    tauri::Builder::default()
+    let app = tauri::Builder::default()
         .setup(|app| {
             app.manage(app_state(app)?);
             if cfg!(debug_assertions) {
@@ -282,8 +299,16 @@ pub fn run() {
             cache_remove,
             download_file,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running ME Client");
+        .build(tauri::generate_context!())
+        .expect("error while building ME Client");
+    app.run(|_app_handle, _event| {
+        #[cfg(target_os = "macos")]
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            if let Err(error) = spawn_client_instance() {
+                log::error!("failed to open another ME Client instance: {error}");
+            }
+        }
+    });
 }
 
 #[cfg(test)]

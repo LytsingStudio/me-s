@@ -9,6 +9,42 @@
   let endpoint = "";
   let activeEdbCache = null;
 
+  const NATIVE_BROWSER_SHORTCUT_KEYS = new Set([
+    "r", "p", "s", "u", "f", "o", "l", "i", "j", "+", "=", "-", "0",
+  ]);
+  const NATIVE_TEXT_EDITOR_SELECTOR = "textarea, input:not([type]), input[type='text'], input[type='password'], input[type='search'], input[type='email'], input[type='url'], input[type='tel'], input[type='number'], [contenteditable='true'], [contenteditable='plaintext-only']";
+  const NATIVE_RAW_KEY_SURFACE_SELECTOR = ".xterm, .remote-control-keyboard";
+
+  function targetWithin(target, selector) {
+    return Boolean(target?.closest?.(selector));
+  }
+
+  function nativeBrowserShortcutBlocked(event) {
+    const target = event?.target;
+    if (targetWithin(target, NATIVE_RAW_KEY_SURFACE_SELECTOR)) return false;
+    const key = String(event?.key || "").toLowerCase();
+    const textEditor = targetWithin(target, NATIVE_TEXT_EDITOR_SELECTOR);
+    if (key === "f5") return true;
+    if (key === "contextmenu" || (key === "f10" && event?.shiftKey)) return !textEditor;
+    if (event?.altKey && (key === "arrowleft" || key === "arrowright")) return true;
+    if (!event?.ctrlKey && !event?.metaKey) return false;
+    if (key === "a") return !textEditor;
+    if (event.metaKey && (key === "[" || key === "]")) return true;
+    return NATIVE_BROWSER_SHORTCUT_KEYS.has(key);
+  }
+
+  function stopNativeBrowserAction(event) {
+    event.preventDefault();
+    event.stopImmediatePropagation?.();
+  }
+
+  globalThis.addEventListener?.("keydown", (event) => {
+    if (nativeBrowserShortcutBlocked(event)) stopNativeBrowserAction(event);
+  }, true);
+  document.addEventListener?.("contextmenu", (event) => {
+    if (!targetWithin(event.target, NATIVE_TEXT_EDITOR_SELECTOR)) stopNativeBrowserAction(event);
+  }, true);
+
   const DEVICE_PREFERENCE_KEYS = new Set(["me-theme", "me-color-mode", "me-send-shortcut"]);
   const devicePreferenceValues = new Map();
   let devicePreferencesReady = false;

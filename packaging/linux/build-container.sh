@@ -36,12 +36,17 @@ esac
 command -v docker >/dev/null 2>&1 || { echo "error: Docker is required" >&2; exit 1; }
 docker buildx version >/dev/null 2>&1 || { echo "error: Docker Buildx is required" >&2; exit 1; }
 
+BUILDER_ARGS=()
+if [[ -n ${ME_RELEASE_BUILDER:-} ]]; then
+    BUILDER_ARGS=(--builder "$ME_RELEASE_BUILDER")
+fi
+
 WORK=$(mktemp -d "${TMPDIR:-/tmp}/me-linux-container.XXXXXX")
 cleanup() { rm -rf "$WORK"; }
 trap cleanup EXIT HUP INT TERM
 mkdir -p "$WORK/output" "$(dirname "$OUTPUT")"
 
-docker buildx build \
+docker buildx build "${BUILDER_ARGS[@]}" \
     --platform "$PLATFORM" \
     --build-arg "ME_VERSION=$VERSION" \
     --build-arg "RUST_TARGET=$RUST_TARGET" \

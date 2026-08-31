@@ -20,7 +20,8 @@ DIST_DIR="$ROOT_DIR/dist"
 BUILD_DIR="$ROOT_DIR/.build/release"
 CACHE_DIR="${ME_RELEASE_CACHE_DIR:-$ROOT_DIR/.build/release-cache}"
 WINDOWS_TARGET=x86_64-pc-windows-msvc
-BUILD_CACHE_MAX_SIZE=10gb
+RELEASE_BUILDER_NAME=me-s-release
+RELEASE_BUILDER_ACTIVE=false
 PACKAGE_ASSETS=(
     ME-macos-universal.pkg
     ME-windows-x86_64-setup.exe
@@ -32,9 +33,7 @@ require_command() {
     command -v "$1" >/dev/null 2>&1 || { echo "error: missing release dependency: $1" >&2; exit 1; }
 }
 
-cleanup_build_cache() {
-    echo "limiting Docker BuildKit cache to $BUILD_CACHE_MAX_SIZE"
-    docker buildx prune --all --max-used-space "$BUILD_CACHE_MAX_SIZE" --force
+trim_colima_disk() {
     if command -v colima >/dev/null 2>&1 && [[ "$(docker context show)" == colima ]]; then
         echo "reclaiming unused Colima disk blocks"
         (
@@ -43,6 +42,53 @@ cleanup_build_cache() {
         )
     fi
 }
+
+remove_release_builder() {
+    if docker buildx inspect "$RELEASE_BUILDER_NAME" >/dev/null 2>&1; then
+        echo "removing disposable Linux release builder $RELEASE_BUILDER_NAME"
+        if ! docker buildx rm --force "$RELEASE_BUILDER_NAME"; then
+            echo "error: unable to remove Linux release builder $RELEASE_BUILDER_NAME" >&2
+            return 1
+        fi
+    fi
+    RELEASE_BUILDER_ACTIVE=false
+}
+
+create_release_builder() {
+    if docker buildx inspect "$RELEASE_BUILDER_NAME" >/dev/null 2>&1; then
+        echo "removing stale Linux release builder $RELEASE_BUILDER_NAME"
+        remove_release_builder
+        trim_colima_disk
+    fi
+
+    echo "creating disposable Linux release builder $RELEASE_BUILDER_NAME"
+    RELEASE_BUILDER_ACTIVE=true
+    docker buildx create \
+        --name "$RELEASE_BUILDER_NAME" \
+        --driver docker-container \
+        --bootstrap \
+        "$(docker context show)"
+    export ME_RELEASE_BUILDER="$RELEASE_BUILDER_NAME"
+}
+
+cleanup_release_builder_on_exit() {
+    local status=$?
+    trap - EXIT HUP INT TERM
+    if $RELEASE_BUILDER_ACTIVE; then
+        if ! remove_release_builder; then
+            status=1
+        fi
+        if ! trim_colima_disk; then
+            status=1
+        fi
+    fi
+    exit "$status"
+}
+
+trap cleanup_release_builder_on_exit EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 for command in bun cargo docker file git lipo makensis node pkgbuild pkgutil rustup shasum xcrun; do
     require_command "$command"
@@ -165,9 +211,13 @@ packaging/windows/build-installer.sh \
     "me-client/src-tauri/target/$WINDOWS_TARGET/release/me-client.exe" \
     "$DIST_DIR/ME-windows-x86_64-setup.exe"
 
+create_release_builder
 echo "building Linux product packages in local containers"
 packaging/linux/build-container.sh "$VERSION" x86_64 "$DIST_DIR/ME-linux-x86_64.run"
 packaging/linux/build-container.sh "$VERSION" arm64 "$DIST_DIR/ME-linux-arm64.run"
+
+remove_release_builder
+trim_colima_disk
 
 (
     cd "$DIST_DIR"
@@ -177,7 +227,6 @@ scripts/verify-release-artifacts.sh "$DIST_DIR"
 
 echo "all release assets were built and statically verified in $DIST_DIR"
 if $BUILD_ONLY; then
-    cleanup_build_cache
     exit 0
 fi
 
@@ -209,7 +258,6 @@ if [[ "$REMOTE_TAG_COMMIT" != "$HEAD_COMMIT" ]]; then
 fi
 
 RELEASE_URL="$(gh release view "$TAG" --repo "$REPOSITORY" --json url --jq .url)"
-cleanup_build_cache
 
 echo "published release:"
 printf '%s\n' "$RELEASE_URL"

@@ -158,6 +158,9 @@ let workspacePanelSequence = 0;
 const $ = (selector) => document.querySelector(selector);
 const elements = {
   app: $("#app"),
+  workspace: $(".workspace"),
+  sessionSyncOverlay: $("#session-sync-overlay"),
+  sessionSyncProgress: $("#session-sync-progress"),
   loginScreen: $("#login-screen"),
   loginForm: $("#login-form"),
   loginPassword: $("#login-password"),
@@ -3096,6 +3099,35 @@ function agentLoadingState(workspaceId, agentId) {
   };
 }
 
+function sessionSelectionAllowed(workspaceId, agentId) {
+  return !agentLoadingState(workspaceId, agentId).loading;
+}
+
+function selectedAgentLoadingState() {
+  if (!state.workspaceId || !state.selectedAgent) return { loading: false, percent: null };
+  return agentLoadingState(state.workspaceId, state.selectedAgent);
+}
+
+function renderSessionSyncOverlay() {
+  const loadingState = selectedAgentLoadingState();
+  const loading = loadingState.loading;
+  const wasVisible = !elements.sessionSyncOverlay.classList.contains("hidden");
+  elements.sessionSyncOverlay.classList.toggle("hidden", !loading);
+  elements.sessionSyncOverlay.setAttribute("aria-hidden", String(!loading));
+  elements.sessionSyncProgress.textContent = loadingState.percent == null
+    ? "正在准备会话，请稍候。" : `已完成 ${loadingState.percent}%`;
+  elements.workspace.querySelectorAll(":scope > .view, :scope > .statusbar").forEach((node) => {
+    node.inert = loading;
+  });
+  if (loading && elements.workspace.contains(document.activeElement)
+      && document.activeElement !== elements.mobileSidebarToggle) {
+    elements.sessionSyncOverlay.focus({ preventScroll: true });
+  } else if (!loading && wasVisible && document.activeElement === elements.sessionSyncOverlay
+      && state.view.kind === "chat") {
+    elements.input.focus({ preventScroll: true });
+  }
+}
+
 function renderAgents() {
   const workspaces = state.gateway.workspaces || [];
   const chat = workspaces.find((workspace) => workspace.builtin);
@@ -3131,6 +3163,7 @@ function renderAgents() {
       trigger.setAttribute("aria-expanded", "true");
     } else closeWorkspaceMenu();
   }
+  renderSessionSyncOverlay();
 }
 
 function createWorkspaceGroup(workspace) {
@@ -3227,6 +3260,7 @@ function updateAgentRow(row, agent, workspaceId, bucket) {
   row.setAttribute("aria-busy", String(loadingState.loading));
   const item = row.querySelector(".agent-item");
   item.title = loadingState.loading ? loadingLabel : "";
+  item.disabled = loadingState.loading;
   const dot = row.querySelector(".agent-dot");
   dot.classList.toggle("loading", loadingState.loading);
   dot.classList.toggle("active", active);
@@ -3239,6 +3273,7 @@ function updateAgentRow(row, agent, workspaceId, bucket) {
   const deleteButton = row.querySelector(".agent-delete");
   deleteButton.setAttribute("aria-label", `删除 ${label}`);
   deleteButton.title = `删除 ${label}`;
+  deleteButton.disabled = loadingState.loading;
 }
 
 function createAgentRow(agent, workspaceId = state.workspaceId) {
@@ -3264,6 +3299,7 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
 }
 
 function selectWorkspaceAgent(workspaceId, agentId) {
+  if (!sessionSelectionAllowed(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -3294,6 +3330,7 @@ function finishAgentSelection(id) {
 }
 
 function selectAgent(id) {
+  if (!sessionSelectionAllowed(state.workspaceId, id)) return;
   finishAgentSelection(id);
 }
 

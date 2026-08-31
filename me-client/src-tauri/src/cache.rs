@@ -1,7 +1,7 @@
 use std::{
     fs,
     path::PathBuf,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 #[cfg(test)]
@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 const MAX_CHUNK_BYTES: u64 = 4 * 1024 * 1024;
+const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Clone)]
 pub struct CacheDatabase {
@@ -102,6 +103,9 @@ impl CacheDatabase {
     fn connect(&self) -> Result<Connection, String> {
         let connection = Connection::open(&self.path)
             .map_err(|error| format!("无法打开客户端数据库：{error}"))?;
+        connection
+            .busy_timeout(DATABASE_BUSY_TIMEOUT)
+            .map_err(|error| format!("无法配置客户端数据库锁等待：{error}"))?;
         connection
             .execute_batch(
                 "PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;",
@@ -973,6 +977,35 @@ mod tests {
         );
         assert!(database.save(invalid).is_err());
         assert!(database.list().unwrap().is_empty());
+        cleanup(database);
+    }
+
+    #[test]
+    fn concurrent_writers_wait_for_the_shared_database_lock() {
+        let database = test_database("busy-timeout");
+        let second = CacheDatabase::new(database.path().to_owned()).unwrap();
+        let lock = database.connect().unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE;").unwrap();
+
+        let (started_tx, started_rx) = std::sync::mpsc::sync_channel(0);
+        let writer = std::thread::spawn(move || {
+            started_tx.send(()).unwrap();
+            second.set_setting("concurrent-writer", "completed")
+        });
+        started_rx.recv().unwrap();
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(
+            !writer.is_finished(),
+            "the second writer should still be waiting for the SQLite write lock"
+        );
+
+        lock.execute_batch("COMMIT;").unwrap();
+        writer.join().unwrap().unwrap();
+        assert_eq!(
+            database.setting("concurrent-writer").unwrap().as_deref(),
+            Some("completed")
+        );
+        drop(lock);
         cleanup(database);
     }
 }

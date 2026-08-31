@@ -9,6 +9,8 @@ function loadClientRuntime() {
   const source = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
   const calls = [];
   const browserBeacons = [];
+  const nativeWindowListeners = new Map();
+  const nativeDocumentListeners = new Map();
   const edbId = "a".repeat(64);
   const cachedEvents = [
     { EdbIdGeneration: { edb_id: edbId } },
@@ -24,6 +26,7 @@ function loadClientRuntime() {
     updatedAt: 1,
   };
   const sandbox = {
+    addEventListener(type, listener) { nativeWindowListeners.set(type, listener); },
     __TAURI__: {
       core: {
         async invoke(command, payload) {
@@ -90,6 +93,7 @@ function loadClientRuntime() {
     },
   };
   const documentValue = {
+    addEventListener(type, listener) { nativeDocumentListeners.set(type, listener); },
     baseURI: "http://tauri.localhost/",
     documentElement: { classList: { add() {} } },
   };
@@ -102,7 +106,10 @@ function loadClientRuntime() {
     sandbox, documentValue, URL, Headers, Request, Response, Blob,
     DOMException, TextEncoder, atob, btoa,
   );
-  return { runtime, sandbox, calls, browserBeacons, edbId, cachedEvents };
+  return {
+    runtime, sandbox, calls, browserBeacons, edbId, cachedEvents,
+    nativeWindowListeners, nativeDocumentListeners,
+  };
 }
 
 describe("ME Client native adapter", () => {
@@ -119,6 +126,41 @@ describe("ME Client native adapter", () => {
     expect(request.path).toBe("/api/auth/status");
     expect(request.bodyBase64).toBeUndefined();
     expect(await (await sandbox.fetch("/theme.js")).text()).toBe("browser");
+  });
+
+  test("suppresses browser chrome gestures without breaking native text editing or terminal keys", () => {
+    const { nativeWindowListeners, nativeDocumentListeners } = loadClientRuntime();
+    const keydown = nativeWindowListeners.get("keydown");
+    const contextmenu = nativeDocumentListeners.get("contextmenu");
+    const target = (kind) => ({
+      closest(selector) {
+        if (kind === "editor" && selector.includes("textarea")) return this;
+        if (kind === "raw" && selector.includes(".xterm")) return this;
+        return null;
+      },
+    });
+    const dispatch = (listener, properties) => {
+      const event = {
+        prevented: false, stopped: false,
+        preventDefault() { this.prevented = true; },
+        stopImmediatePropagation() { this.stopped = true; },
+        ...properties,
+      };
+      listener(event);
+      return event;
+    };
+
+    expect(dispatch(keydown, { key: "F5", target: target("body") }).prevented).toBe(true);
+    expect(dispatch(keydown, { key: "a", ctrlKey: true, target: target("body") }).prevented).toBe(true);
+    expect(dispatch(keydown, { key: "a", metaKey: true, target: target("editor") }).prevented).toBe(false);
+    expect(dispatch(keydown, { key: "r", metaKey: true, target: target("editor") }).prevented).toBe(true);
+    expect(dispatch(keydown, { key: "r", ctrlKey: true, target: target("raw") }).prevented).toBe(false);
+    expect(dispatch(keydown, { key: "ArrowLeft", altKey: true, target: target("body") }).prevented).toBe(true);
+    expect(dispatch(contextmenu, { target: target("body") }).prevented).toBe(true);
+    expect(dispatch(contextmenu, { target: target("editor") }).prevented).toBe(false);
+
+    const config = readFileSync(join(import.meta.dir, "../me-client/src-tauri/tauri.conf.json"), "utf8");
+    expect(config).toContain('"devtools": false');
   });
 
   test("persists target-independent UI preferences through the native settings adapter", async () => {
@@ -186,7 +228,16 @@ describe("ME Client native adapter", () => {
     expect(nativeGateway).toContain("pub async fn online_remembered_devices");
   });
 
-
+  test("opens independent macOS processes and waits for shared SQLite writers", () => {
+    const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
+    const nativeCache = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/cache.rs"), "utf8");
+    expect(nativeRuntime).toContain("tauri::RunEvent::Reopen");
+    expect(nativeRuntime).toContain("env::current_exe()");
+    expect(nativeRuntime).toContain("Command::new(executable)");
+    expect(nativeRuntime).toContain(".build(tauri::generate_context!())");
+    expect(nativeCache).toContain("const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);");
+    expect(nativeCache).toContain(".busy_timeout(DATABASE_BUSY_TIMEOUT)");
+  });
 
   test("routes page-close JSON beacons as text through the native transport", async () => {
     const { sandbox, calls, browserBeacons } = loadClientRuntime();
@@ -322,11 +373,14 @@ describe("ME Client native adapter", () => {
     expect(release).toContain("packaging/linux/build-container.sh");
     expect(release).toContain("scripts/verify-release-artifacts.sh");
     expect(release).toContain("gh release create");
-    expect(release).toContain("BUILD_CACHE_MAX_SIZE=10gb");
-    expect(release).toContain('docker buildx prune --all --max-used-space "$BUILD_CACHE_MAX_SIZE" --force');
+    expect(release).toContain("RELEASE_BUILDER_NAME=me-s-release");
+    expect(release).toContain("--driver docker-container");
+    expect(release).toContain('docker buildx rm --force "$RELEASE_BUILDER_NAME"');
+    expect(release).toContain("trap cleanup_release_builder_on_exit EXIT");
+    expect(release).toContain("create_release_builder");
+    expect(linuxBuilder).toContain('BUILDER_ARGS=(--builder "$ME_RELEASE_BUILDER")');
     expect(release).toContain("            cd /");
     expect(release).toContain("colima ssh -- sudo fstrim -v /var/lib/docker");
-    expect(release.lastIndexOf("\ncleanup_build_cache\n")).toBeGreaterThan(release.indexOf("REMOTE_TAG_COMMIT="));
     expect(release).not.toMatch(/gh (?:workflow|run)|GitHub Actions|release\.yml/);
     expect(linuxDockerfile).toContain("cargo zigbuild");
     expect(linuxDockerfile).toContain("build --no-bundle");
