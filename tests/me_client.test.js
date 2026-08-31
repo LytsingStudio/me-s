@@ -239,7 +239,7 @@ describe("ME Client native adapter", () => {
     expect(reopenStart).toBeGreaterThan(-1);
     expect(newWindowStart).toBeGreaterThan(-1);
     expect(newWindowEnd).toBeGreaterThan(newWindowStart);
-    expect(reopenHandler).toContain("restore_client_window(app_handle)");
+    expect(reopenHandler).toContain("restore_client_window(_app_handle)");
     expect(reopenHandler).not.toContain("spawn_client_instance()");
     expect(nativeRuntime).toContain("const NEW_CLIENT_WINDOW_LABEL: &str = \"新建窗口\"");
     expect(nativeRuntime).toContain("item.setAction(Some(sel!(newMeClientWindow:)))");

@@ -414,10 +414,10 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("error while building ME Client");
-    app.run(|app_handle, event| {
+    app.run(|_app_handle, _event| {
         #[cfg(target_os = "macos")]
-        if let tauri::RunEvent::Reopen { .. } = event {
-            if let Err(error) = restore_client_window(app_handle) {
+        if let tauri::RunEvent::Reopen { .. } = _event {
+            if let Err(error) = restore_client_window(_app_handle) {
                 log::error!("failed to restore the ME Client window: {error}");
             }
         }
