@@ -485,10 +485,10 @@
     if (!windowReadyPromise) {
       initialDocumentRoot?.removeAttribute?.("data-me-client-startup");
       if (initialDocumentRoot?.style) initialDocumentRoot.style.visibility = "";
-      windowReadyPromise = waitForFirstPaint()
-        .then(() => refreshWindowState())
+      windowReadyPromise = refreshWindowState()
         .then(() => invoke("client_window_action", { action: "show" }))
-        .then(applyWindowState);
+        .then(applyWindowState)
+        .then((state) => waitForFirstPaint().then(() => state));
     }
     return windowReadyPromise;
   }

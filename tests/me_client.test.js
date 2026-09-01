@@ -152,6 +152,12 @@ describe("ME Client native adapter", () => {
     const actions = calls.filter((call) => call.command === "client_window_action");
     expect(actions.map((call) => call.payload.action)).toEqual(["state", "show"]);
     expect(actions.filter((call) => call.payload.action === "show")).toHaveLength(1);
+
+    const source = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
+    const readyStart = source.indexOf("function windowReady()");
+    const readyEnd = source.indexOf("const runtime =", readyStart);
+    const readiness = source.slice(readyStart, readyEnd);
+    expect(readiness.indexOf('action: "show"')).toBeLessThan(readiness.indexOf("waitForFirstPaint()"));
   });
 
   test("caches dynamic native window titles", async () => {
@@ -198,18 +204,22 @@ describe("ME Client native adapter", () => {
     expect(dispatch(contextmenu, { target: target("editor") }).prevented).toBe(false);
 
     const config = readFileSync(join(import.meta.dir, "../me-client/src-tauri/tauri.conf.json"), "utf8");
+    const windowsConfig = readFileSync(join(import.meta.dir, "../me-client/src-tauri/tauri.windows.conf.json"), "utf8");
     expect(config).toContain('"devtools": false');
     expect(config).toContain('"visible": false');
     expect(config).toContain('"decorations": false');
     expect(config).toContain('"transparent": true');
     expect(config).toContain('"shadow": true');
+    expect(windowsConfig).toContain('"transparent": false');
+    expect(windowsConfig).toContain('"shadow": true');
   });
 
 
-  test("defines integrated client chrome and real platform window shaping", () => {
+  test("defines integrated client chrome and compositor-owned platform window shaping", () => {
     const runtime = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
     const css = readFileSync(join(import.meta.dir, "../me-client/client.css"), "utf8");
     const native = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
+    const windowsConfig = readFileSync(join(import.meta.dir, "../me-client/src-tauri/tauri.windows.conf.json"), "utf8");
     const capability = readFileSync(join(import.meta.dir, "../me-client/src-tauri/capabilities/default.json"), "utf8");
     const shared = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(runtime).toContain('setAttribute?.("data-tauri-drag-region", "")');
@@ -221,18 +231,28 @@ describe("ME Client native adapter", () => {
     expect(runtime).toContain('dynamicWindowTitle: true');
     expect(capability).toContain('"core:window:allow-start-dragging"');
     expect(css).toContain("--client-window-radius: 18px");
+    expect(css).toContain("--client-window-radius: 8px");
+    expect(css).toContain("--client-window-outline: color-mix");
+    expect(css).toContain("html.me-client body::after");
+    expect(css).toContain("border: 1px solid var(--client-window-outline)");
+    expect(css).toContain("html.me-client-platform-macos body,");
+    expect(css).toContain("html.me-client-window-maximized body::after");
     expect(css).toContain(".client-window-drag-handle");
     expect(css).toContain(".me-client-platform-macos .sidebar-scroll > .sidebar-section:first-child > .sidebar-heading");
     expect(css).toContain(".me-client-platform-windows .view-tabs");
     expect(css).toContain("pointer-events: none;");
     expect(css).toContain("inset: 0;");
-    expect(css).toContain("html.me-client-window-maximized body");
     expect(css).not.toContain("backdrop-filter");
     expect(native).toContain('setCornerCurve: &*curve');
+    expect(native).toContain("setHasShadow: floating");
+    expect(native).toContain("invalidateShadow");
     expect(native).toContain("DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33");
-    expect(native).toContain("CreateRoundRectRgn");
-    expect(native).toContain("SetWindowRgn");
-    expect(native).toContain("ptr::null_mut()");
+    expect(native).toContain("DWMWA_BORDER_COLOR: u32 = 34");
+    expect(native).toContain("DWMWA_COLOR_NONE: u32 = 0xffff_fffe");
+    expect(native).not.toContain("CreateRoundRectRgn");
+    expect(native).not.toContain("SetWindowRgn");
+    expect(windowsConfig).toContain('"transparent": false');
+    expect(windowsConfig).toContain('"shadow": true');
     expect(shared).toContain("dynamicWindowTitle: false");
     expect(shared).toContain('`${sessionTitle} - ${runtimeCapabilities.pageTitle}`');
   });
@@ -348,6 +368,12 @@ describe("ME Client native adapter", () => {
     const restoreAction = nativeRuntime.slice(restoreStart, restoreEnd);
     expect(restoreAction.indexOf("window_revealed")).toBeGreaterThan(-1);
     expect(restoreAction.indexOf("window_revealed")).toBeLessThan(restoreAction.indexOf("app.show()?"));
+    const closeStart = nativeRuntime.indexOf('#[cfg(target_os = "macos")]\nfn close_client_window');
+    const closeEnd = nativeRuntime.indexOf('#[cfg(not(target_os = "macos"))]', closeStart);
+    const closeAction = nativeRuntime.slice(closeStart, closeEnd);
+    expect(closeStart).toBeGreaterThan(-1);
+    expect(closeAction).toContain("window.hide()");
+    expect(closeAction).not.toContain("window.close()");
     expect(nativeRuntime).toContain("state.window_revealed.store(true, Ordering::Release)");
     expect(nativeRuntime).toContain("window.hide()?");
     expect(nativeRuntime).toContain("app.show()?");

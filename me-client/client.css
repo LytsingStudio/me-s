@@ -47,19 +47,45 @@ html.me-client :is(
 html.me-client {
   --client-chrome-height: 38px;
   --client-window-radius: 18px;
+  --client-window-outline: color-mix(in srgb, var(--accent) 42%, var(--border-bright));
   background: transparent;
+}
+
+html.me-client-platform-windows {
+  --client-window-radius: 8px;
+  background: var(--bg);
 }
 
 html.me-client body {
   overflow: hidden;
   border-radius: var(--client-window-radius);
   background: var(--bg);
-  transition: border-radius 120ms ease-out;
+}
+
+html.me-client-platform-macos body,
+html.me-client-platform-windows body {
+  border-radius: 0;
+}
+
+html.me-client body::after {
+  position: fixed;
+  z-index: 2147483647;
+  inset: 0;
+  box-sizing: border-box;
+  border: 1px solid var(--client-window-outline);
+  border-radius: var(--client-window-radius);
+  pointer-events: none;
+  content: "";
 }
 
 html.me-client-window-maximized body,
 html.me-client-window-fullscreen body {
   --client-window-radius: 0px;
+}
+
+html.me-client-window-maximized body::after,
+html.me-client-window-fullscreen body::after {
+  display: none;
 }
 
 .me-client #login-screen,

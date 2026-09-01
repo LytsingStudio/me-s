@@ -35,7 +35,7 @@ pub const API_INTERACT: &str = "Terminal_Interact";
 pub const API_STATUS: &str = "Terminal_Status";
 pub const API_LIST: &str = "Terminal_List";
 pub const API_KILL: &str = "Terminal_Kill";
-pub const TOOL_VERSION: &str = "8";
+pub const TOOL_VERSION: &str = "9";
 
 const DEFAULT_WIDTH: u16 = 120;
 const DEFAULT_HEIGHT: u16 = 40;
@@ -43,7 +43,7 @@ const DEFAULT_WAIT_MS: u32 = 1_000;
 const DEFAULT_MAX_WAIT_MS: u32 = 10_000;
 const DEFAULT_MAX_OUTPUT_CHARS: u32 = 20_000;
 const MAX_DIMENSION: u16 = 500;
-const MAX_WAIT_MS: u32 = 60_000;
+const MAX_WAIT_MS: u32 = 300_000;
 const MAX_OUTPUT_CHARS: u32 = 200_000;
 const MAX_INPUT_ACTIONS: usize = 256;
 const MAX_KEY_REPEAT: u16 = 1_000;
@@ -88,6 +88,7 @@ Important behavior:
 - Create waits for the initial shell output with the same idle/maximum wait rules as Interact. That initial output is returned as tool output, so inspect it before the next action.
 - Every operation that reads a PTY session uses the same output state and idle/maximum wait rules. PTY stdout and stderr are one terminal stream.
 - `wait_ms` is the required quiet interval after the latest received PTY output; any newer output restarts it. `max_wait_ms` is the hard upper bound for that tool call.
+- `wait_ms` and `max_wait_ms` are each limited to 300000 milliseconds, and `wait_ms` must not exceed `max_wait_ms`.
 - For a non-empty `input`, the quiet interval never starts before all input bytes have been successfully written. Old unread output cannot make newly submitted input return immediately. For an empty polling input, already-pending output that has been quiet long enough may return immediately.
 - An idle return only says the PTY stopped producing output for `wait_ms`; it does not prove a foreground command finished. Confirm a shell prompt or the interactive program's known state. If output is inconclusive, poll with `input:[]`; do not submit a second shell command into a possibly running foreground process.
 - The PTY size is fixed for the whole session. Terminal resize is intentionally unavailable.
@@ -2433,7 +2434,8 @@ mod tests {
 
     #[test]
     fn exposes_all_terminal_actions_and_shell_prompt() {
-        let names = tool_definitions()
+        let definitions = tool_definitions();
+        let names = definitions
             .iter()
             .map(|tool| tool["function"]["name"].as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
@@ -2441,6 +2443,11 @@ mod tests {
             names,
             vec![API_CREATE, API_INTERACT, API_STATUS, API_LIST, API_KILL]
         );
+        for definition in &definitions[..2] {
+            let properties = &definition["function"]["parameters"]["properties"];
+            assert_eq!(properties["wait_ms"]["maximum"], 300_000);
+            assert_eq!(properties["max_wait_ms"]["maximum"], 300_000);
+        }
         let manager = TerminalManager::new();
         let shell = manager.shell_backend();
         #[cfg(unix)]
@@ -2631,6 +2638,22 @@ mod tests {
             parse_request(
                 INTERACT,
                 r#"{"session_id":"pty-1","wait_ms":11,"max_wait_ms":10}"#
+            )
+            .is_err()
+        );
+        assert!(parse_request(CREATE, r#"{"wait_ms":300000,"max_wait_ms":300000}"#).is_ok());
+        assert!(parse_request(CREATE, r#"{"wait_ms":300001,"max_wait_ms":300001}"#).is_err());
+        assert!(
+            parse_request(
+                INTERACT,
+                r#"{"session_id":"pty-1","wait_ms":300000,"max_wait_ms":300000}"#
+            )
+            .is_ok()
+        );
+        assert!(
+            parse_request(
+                INTERACT,
+                r#"{"session_id":"pty-1","wait_ms":300001,"max_wait_ms":300001}"#
             )
             .is_err()
         );

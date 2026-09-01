@@ -12,7 +12,7 @@ use std::{
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "windows")]
-use std::{ffi::c_void, ptr};
+use std::ffi::c_void;
 
 #[cfg(target_os = "macos")]
 use objc2::{
@@ -98,11 +98,8 @@ fn apply_platform_window_shape(
     if ns_window.is_null() {
         return Err("macOS window is unavailable".into());
     }
-    let corner_radius = if state.maximized || state.fullscreen {
-        0.0
-    } else {
-        18.0
-    };
+    let floating = !state.maximized && !state.fullscreen;
+    let corner_radius = if floating { 18.0 } else { 0.0 };
     unsafe {
         let content_view: *mut AnyObject = msg_send![ns_window, contentView];
         if content_view.is_null() {
@@ -117,7 +114,8 @@ fn apply_platform_window_shape(
         let _: () = msg_send![layer, setCornerCurve: &*curve];
         let _: () = msg_send![layer, setCornerRadius: corner_radius];
         let _: () = msg_send![layer, setMasksToBounds: true];
-        let _: () = msg_send![ns_window, setHasShadow: true];
+        let _: () = msg_send![ns_window, setHasShadow: floating];
+        let _: () = msg_send![ns_window, invalidateShadow];
     }
     Ok(())
 }
@@ -134,83 +132,13 @@ unsafe extern "system" {
 }
 
 #[cfg(target_os = "windows")]
-#[link(name = "gdi32")]
-unsafe extern "system" {
-    fn CreateRoundRectRgn(
-        left: i32,
-        top: i32,
-        right: i32,
-        bottom: i32,
-        ellipse_width: i32,
-        ellipse_height: i32,
-    ) -> *mut c_void;
-    fn DeleteObject(object: *mut c_void) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-#[link(name = "user32")]
-unsafe extern "system" {
-    fn SetWindowRgn(hwnd: *mut c_void, region: *mut c_void, redraw: i32) -> i32;
-}
-
-#[cfg(target_os = "windows")]
-fn apply_windows_window_region(
-    window: &WebviewWindow,
-    state: &ClientWindowState,
-    hwnd: *mut c_void,
-) -> Result<(), String> {
-    if state.maximized || state.fullscreen {
-        let changed = unsafe { SetWindowRgn(hwnd, ptr::null_mut(), 1) };
-        if changed == 0 {
-            return Err(format!(
-                "unable to clear the Windows window region: {}",
-                io::Error::last_os_error()
-            ));
-        }
-        return Ok(());
-    }
-
-    let size = window.outer_size().map_err(|error| error.to_string())?;
-    let scale = window.scale_factor().map_err(|error| error.to_string())?;
-    let width = i32::try_from(size.width).map_err(|_| "Windows window width is too large")?;
-    let height = i32::try_from(size.height).map_err(|_| "Windows window height is too large")?;
-    let radius = (18.0 * scale).round().max(1.0) as i32;
-    let diameter = radius.saturating_mul(2);
-    let region = unsafe {
-        CreateRoundRectRgn(
-            0,
-            0,
-            width.saturating_add(1),
-            height.saturating_add(1),
-            diameter,
-            diameter,
-        )
-    };
-    if region.is_null() {
-        return Err(format!(
-            "unable to create the Windows rounded window region: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    let changed = unsafe { SetWindowRgn(hwnd, region, 1) };
-    if changed == 0 {
-        unsafe {
-            let _ = DeleteObject(region);
-        }
-        return Err(format!(
-            "unable to apply the Windows rounded window region: {}",
-            io::Error::last_os_error()
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(target_os = "windows")]
 fn apply_platform_window_shape(
     window: &WebviewWindow,
     state: &ClientWindowState,
 ) -> Result<(), String> {
     const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWA_BORDER_COLOR: u32 = 34;
+    const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
     const DWMWCP_DONOTROUND: u32 = 1;
     const DWMWCP_ROUND: u32 = 2;
     let preference = if state.maximized || state.fullscreen {
@@ -219,8 +147,13 @@ fn apply_platform_window_shape(
         DWMWCP_ROUND
     };
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
-    apply_windows_window_region(window, state, hwnd.0)?;
     unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd.0,
+            DWMWA_BORDER_COLOR,
+            (&DWMWA_COLOR_NONE as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
         let _ = DwmSetWindowAttribute(
             hwnd.0,
             DWMWA_WINDOW_CORNER_PREFERENCE,
@@ -255,6 +188,16 @@ fn client_window_state(window: &WebviewWindow) -> Result<ClientWindowState, Stri
     Ok(state)
 }
 
+#[cfg(target_os = "macos")]
+fn close_client_window(window: &WebviewWindow) -> tauri::Result<()> {
+    window.hide()
+}
+
+#[cfg(not(target_os = "macos"))]
+fn close_client_window(window: &WebviewWindow) -> tauri::Result<()> {
+    window.close()
+}
+
 #[tauri::command]
 fn client_window_action(
     action: String,
@@ -271,7 +214,7 @@ fn client_window_action(
                 window.maximize()
             }
         }
-        "close" => window.close(),
+        "close" => close_client_window(&window),
         "state" => Ok(()),
         "set_title" => {
             let title = normalized_window_title(value);
