@@ -163,6 +163,30 @@ describe("ME Client native adapter", () => {
     expect(config).toContain('"devtools": false');
   });
 
+  test("uses native app selection boundaries while keeping content copyable", () => {
+    const css = readFileSync(join(import.meta.dir, "../me-client/client.css"), "utf8");
+    expect(css).toContain("html.me-client body {");
+    expect(css).toContain("-webkit-user-select: none;");
+    expect(css).toContain("user-select: none;");
+    for (const selector of [
+      "input,",
+      "textarea,",
+      "[contenteditable=\"true\"]",
+      ".user-message-content,",
+      ".message-block.assistant .markdown,",
+      ".notice-content,",
+      ".session-content,",
+      ".tool-details,",
+      ".document-view,",
+      ".compact-summary-content,",
+      ".context-detail-raw,",
+      ".message-modal-backdrop .modal > p",
+    ]) expect(css).toContain(selector);
+    expect(css).toContain("-webkit-user-select: text;");
+    expect(css).toContain("user-select: text;");
+    expect(css).not.toContain("selectstart");
+  });
+
   test("persists target-independent UI preferences through the native settings adapter", async () => {
     const { runtime, calls } = loadClientRuntime();
     expect(runtime.devicePreferences.getItem("me-theme")).toBeNull();

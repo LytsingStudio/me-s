@@ -1,6 +1,27 @@
 html.me-client,
 html.me-client body {
   overscroll-behavior: none;
+  -webkit-user-select: none;
+  user-select: none;
+}
+
+html.me-client :is(
+  input,
+  textarea,
+  [contenteditable="true"],
+  [contenteditable="plaintext-only"],
+  .user-message-content,
+  .message-block.assistant .markdown,
+  .notice-content,
+  .session-content,
+  .tool-details,
+  .document-view,
+  .compact-summary-content,
+  .context-detail-raw,
+  .message-modal-backdrop .modal > p
+) {
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .me-client .login-card {
