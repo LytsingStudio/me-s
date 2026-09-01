@@ -158,4 +158,49 @@ describe("shared WebUI tool presenters", () => {
     expect(html).toContain("&lt;unsafe&gt;");
     expect(html).not.toContain("<unsafe>");
   });
+
+  test("presents every WorkMap action and structured detail in direct Chinese", () => {
+    const titles = {
+      "WorkMap.Read": "查看工作图",
+      "WorkMap.ReadHistory": "查看工作图历史",
+      "WorkMap.Start": "创建目标",
+      "WorkMap.UpdatePlanState": "更新计划",
+      "WorkMap.AddNote": "添加笔记",
+      "WorkMap.ChangePlan": "修改计划",
+      "WorkMap.AddPlan": "添加计划",
+      "WorkMap.CloseObjective": "关闭目标",
+      "WorkMap.AddMemory": "添加记忆",
+      "WorkMap.InvalidateMemory": "更新记忆",
+    };
+    for (const [name, title] of Object.entries(titles)) {
+      expect(presenters.summarize(name, {}).title).toBe(title);
+    }
+
+    const current = presenters.describe("WorkMap.Read", {}, succeeded({
+      memory: { facts: [{}], agreements: [{}] },
+      current: {
+        objective: { id: "objective-1", title: "目标", state: "active" },
+        plans: [{ plan: { id: "plan-1", order: 1, title: "计划", state: "active" } }],
+      },
+    }));
+    expect(current.outputBlocks.map((block) => block.title)).toEqual(["记忆", "目标", "计划"]);
+    expect(current.outputBlocks[0].entries.map((entry) => entry.label)).toEqual(["事实", "约定"]);
+
+    const note = presenters.describe("WorkMap.AddNote", {
+      plan_id: "plan-1", kind: "finding", content: "发现内容",
+    }, succeeded({ records: [{ kind: "note", record: { id: "note-1", content: "发现内容" } }] }));
+    expect(presenters.summarize("WorkMap.AddNote", { plan_id: "plan-1", kind: "finding", content: "发现内容" }).summary).toContain("发现");
+    expect(note.inputBlocks[0].title).toBe("笔记");
+    expect(note.inputBlocks[0].entries.map((entry) => entry.label)).toEqual(["计划", "类型"]);
+    expect(note.outputBlocks[0].title).toBe("已添加笔记");
+    expect(note.outputBlocks[0].rows[0].kind).toBe("笔记");
+
+    const memory = presenters.describe("WorkMap.InvalidateMemory", {
+      memory_id: "memory-1", reason: "已变化", replacement: { kind: "fact", content: "新内容" },
+    }, succeeded({ records: [{ kind: "memory", record: { id: "memory-2", content: "新内容" } }] }));
+    expect(presenters.summarize("WorkMap.InvalidateMemory", { memory_id: "memory-1", replacement: {} }).summary).toContain("替换");
+    expect(memory.inputBlocks.map((block) => block.title)).toEqual(["原记忆", "替换内容"]);
+    expect(memory.outputBlocks[0].title).toBe("记忆已更新");
+    expect(memory.outputBlocks[0].rows[0].kind).toBe("记忆");
+  });
 });

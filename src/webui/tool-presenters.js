@@ -918,36 +918,49 @@
     return objectValue(resultValue(output)).records || [];
   }
 
+  function workMapNoteKind(kind) {
+    const labels = {
+      action: "操作", finding: "发现", decision: "决策", validation: "验证",
+      adjustment: "调整", blocker: "阻塞", next: "下一步", note: "笔记",
+    };
+    return labels[normalized(kind)] || String(kind || "笔记");
+  }
+
+  function workMapRecordKind(kind) {
+    const labels = { objective: "目标", plan: "计划", note: "笔记", memory: "记忆" };
+    return labels[normalized(kind)] || String(kind || "");
+  }
+
   function currentWorkMapBlocks(value) {
     const current = value?.current;
     const memory = value?.memory || {};
-    const blocks = [fieldBlock("Memory", [["Facts", memory.facts?.length || 0], ["Agreements", memory.agreements?.length || 0]])];
+    const blocks = [fieldBlock("记忆", [["事实", memory.facts?.length || 0], ["约定", memory.agreements?.length || 0]])];
     if (!current?.objective) {
-      blocks.push(noticeBlock("Current", "当前没有开放 Objective", "muted"));
+      blocks.push(noticeBlock("当前状态", "当前没有进行中的目标", "muted"));
       return blocks;
     }
-    blocks.push(fieldBlock("Objective", [["ID", current.objective.id], ["标题", current.objective.title], ["状态", labelState(current.objective.state)], ["描述", current.objective.description]]));
+    blocks.push(fieldBlock("目标", [["ID", current.objective.id], ["标题", current.objective.title], ["状态", labelState(current.objective.state)], ["描述", current.objective.description]]));
     const plans = (current.plans || []).map((entry) => entry.plan || entry).map((plan) => ({ order: plan.order, title: plan.title, state: labelState(plan.state), id: plan.id }));
-    if (plans.length) blocks.push(tableBlock("Plans", [{ key: "order", label: "#" }, { key: "title", label: "标题" }, { key: "state", label: "状态" }, { key: "id", label: "ID" }], plans));
+    if (plans.length) blocks.push(tableBlock("计划", [{ key: "order", label: "#" }, { key: "title", label: "标题" }, { key: "state", label: "状态" }, { key: "id", label: "ID" }], plans));
     return blocks;
   }
 
   define("WorkMap.Read", {
-    title: "读取 WorkMap", icon: "workmap",
+    title: "查看工作图", icon: "workmap",
     summary: () => "当前状态",
     input: () => [noticeBlock("参数", "无参数", "muted")],
     output(input, output) { return currentWorkMapBlocks(objectValue(resultValue(output))); },
   });
 
   define("WorkMap.ReadHistory", {
-    title: "读取 WorkMap 历史", icon: "workmap-history",
-    summary: (input) => input.objective_id || "历史 Objective 列表",
-    input: (input) => [fieldBlock("历史范围", [["Objective", input.objective_id || "全部"]])],
+    title: "查看工作图历史", icon: "workmap-history",
+    summary: (input) => input.objective_id || "历史目标",
+    input: (input) => [fieldBlock("历史范围", [["目标", input.objective_id || "全部"]])],
     output(input, output) {
       const value = resultValue(output);
       const history = Array.isArray(value) ? value : value?.history;
-      if (Array.isArray(history)) return [tableBlock("历史 Objective", [{ key: "title", label: "标题" }, { key: "state", label: "状态" }, { key: "id", label: "ID" }], history.map((item) => ({ title: item.title || item.objective?.title || "", state: labelState(item.state || item.objective?.state), id: item.id || item.objective?.id || "" })))];
-      return genericObjectBlocks("历史 Objective", value);
+      if (Array.isArray(history)) return [tableBlock("历史目标", [{ key: "title", label: "标题" }, { key: "state", label: "状态" }, { key: "id", label: "ID" }], history.map((item) => ({ title: item.title || item.objective?.title || "", state: labelState(item.state || item.objective?.state), id: item.id || item.objective?.id || "" })))];
+      return genericObjectBlocks("历史目标", value);
     },
   });
 
@@ -955,8 +968,8 @@
     const objective = objectValue(input.objective);
     const plans = input.plans || [];
     return [
-      fieldBlock("Objective", [["标题", objective.title], ["描述", objective.description]]),
-      tableBlock("Plans", [{ key: "order", label: "#" }, { key: "title", label: "标题" }, { key: "description", label: "描述" }], plans.map((plan, index) => ({ order: index + 1, title: plan.title || "", description: plan.description || "" }))),
+      fieldBlock("目标", [["标题", objective.title], ["描述", objective.description]]),
+      tableBlock("计划", [{ key: "order", label: "#" }, { key: "title", label: "标题" }, { key: "description", label: "描述" }], plans.map((plan, index) => ({ order: index + 1, title: plan.title || "", description: plan.description || "" }))),
     ];
   }
 
@@ -965,64 +978,64 @@
     if (!records.length) return currentWorkMapBlocks(objectValue(resultValue(output)));
     return [tableBlock(title, [{ key: "kind", label: "类型" }, { key: "title", label: "标题" }, { key: "state", label: "状态" }, { key: "id", label: "ID" }], records.map((entry) => {
       const record = entry.record || {};
-      return { kind: entry.kind || "", title: record.title || record.content || "", state: labelState(record.state), id: record.id || "" };
+      return { kind: workMapRecordKind(entry.kind), title: record.title || record.content || "", state: labelState(record.state), id: record.id || "" };
     }))];
   }
 
   define("WorkMap.Start", {
-    title: "创建 Objective", icon: "workmap-add",
+    title: "创建目标", icon: "workmap-add",
     summary: (input) => `${input.objective?.title || ""} · ${itemCount(input.plans, "个计划")}`,
     input: planDefinitionBlocks,
     output(input, output) { return recordBlocks(output, "已创建记录"); },
   });
 
   define("WorkMap.UpdatePlanState", {
-    title: "更新 Plan 状态", icon: "plan-state",
+    title: "更新计划", icon: "plan-state",
     summary: (input) => `${({ completed: "完成", cancelled: "取消", superseded: "取代" })[input.state] || input.state || "更新"} · ${input.plan_id || ""}`,
-    input: (input) => [fieldBlock("Plan", [["ID", input.plan_id], ["新状态", labelState(input.state)], ["结果", input.outcome], ["验证", input.verification], ["原因", input.reason]])],
+    input: (input) => [fieldBlock("计划", [["ID", input.plan_id], ["新状态", labelState(input.state)], ["结果", input.outcome], ["验证", input.verification], ["原因", input.reason]])],
     output(input, output) { return currentWorkMapBlocks(objectValue(resultValue(output))); },
   });
 
   define("WorkMap.AddNote", {
-    title: "添加 Note", icon: "note-add",
-    summary: (input) => `${humanizeKey(input.kind || "note")} · ${input.plan_id || ""} · ${quotedPreview(input.content)}`,
-    input: (input) => [fieldBlock("Note", [["Plan", input.plan_id], ["类型", humanizeKey(input.kind || "note")]]), codeBlock("内容", input.content || "")],
-    output(input, output) { return recordBlocks(output, "新增 Note"); },
+    title: "添加笔记", icon: "note-add",
+    summary: (input) => `${workMapNoteKind(input.kind || "note")} · ${input.plan_id || ""} · ${quotedPreview(input.content)}`,
+    input: (input) => [fieldBlock("笔记", [["计划", input.plan_id], ["类型", workMapNoteKind(input.kind || "note")]]), codeBlock("内容", input.content || "")],
+    output(input, output) { return recordBlocks(output, "已添加笔记"); },
   });
 
   define("WorkMap.ChangePlan", {
-    title: "修改 Plan", icon: "plan-edit",
+    title: "修改计划", icon: "plan-edit",
     summary: (input) => `${input.plan_id || ""}${input.title ? ` · ${input.title}` : ""}`,
-    input: (input) => [fieldBlock("修改内容", [["Plan", input.plan_id], ["新标题", input.title], ["新描述", input.description], ["清空描述", input.clear_description ? "是" : ""], ["原因", input.reason]])],
-    output(input, output) { return recordBlocks(output, "已修改 Plan"); },
+    input: (input) => [fieldBlock("修改内容", [["计划", input.plan_id], ["新标题", input.title], ["新描述", input.description], ["清空描述", input.clear_description ? "是" : ""], ["原因", input.reason]])],
+    output(input, output) { return recordBlocks(output, "已修改计划"); },
   });
 
   define("WorkMap.AddPlan", {
-    title: "新增 Plan", icon: "plan-add",
+    title: "添加计划", icon: "plan-add",
     summary: (input) => `${input.plan?.title || ""}${input.after_plan_id ? ` · 位于 ${input.after_plan_id} 后` : " · 追加"}`,
-    input: (input) => [fieldBlock("Plan", [["标题", input.plan?.title], ["描述", input.plan?.description], ["插入位置", input.after_plan_id ? `${input.after_plan_id} 后` : "末尾"]])],
-    output(input, output) { return recordBlocks(output, "新增 Plan"); },
+    input: (input) => [fieldBlock("计划", [["标题", input.plan?.title], ["描述", input.plan?.description], ["插入位置", input.after_plan_id ? `${input.after_plan_id} 后` : "末尾"]])],
+    output(input, output) { return recordBlocks(output, "已添加计划"); },
   });
 
   define("WorkMap.CloseObjective", {
-    title: "关闭 Objective", icon: "workmap-close",
+    title: "关闭目标", icon: "workmap-close",
     summary: (input) => `${input.state === "superseded" ? "取代" : "取消"} · ${quotedPreview(input.reason)}`,
     input: (input) => [fieldBlock("关闭方式", [["状态", labelState(input.state)], ["原因", input.reason]])],
-    output(input, output) { return recordBlocks(output, "已关闭记录"); },
+    output(input, output) { return recordBlocks(output, "已关闭目标"); },
   });
 
   define("WorkMap.AddMemory", {
-    title: "添加 Memory", icon: "memory-add",
+    title: "添加记忆", icon: "memory-add",
     summary: (input) => `${input.kind === "agreement" ? "全局约定" : "全局事实"} · ${quotedPreview(input.content)}`,
-    input: (input) => [fieldBlock("Memory", [["类型", input.kind === "agreement" ? "全局约定" : "全局事实"], ["依据", input.basis]]), codeBlock("内容", input.content || "")],
-    output(input, output) { return recordBlocks(output, "新增 Memory"); },
+    input: (input) => [fieldBlock("记忆", [["类型", input.kind === "agreement" ? "全局约定" : "全局事实"], ["依据", input.basis]]), codeBlock("内容", input.content || "")],
+    output(input, output) { return recordBlocks(output, "已添加记忆"); },
   });
 
   define("WorkMap.InvalidateMemory", {
-    title: "失效 Memory", icon: "memory-remove",
-    summary: (input) => `${input.replacement ? "替换" : "失效"} · ${input.memory_id || ""}`,
-    input: (input) => [fieldBlock("原 Memory", [["ID", input.memory_id], ["原因", input.reason], ["处理", input.replacement ? "使用新记录替换" : "仅失效"]]), ...(input.replacement ? [codeBlock("Replacement", JSON.stringify(input.replacement, null, 2))] : [])],
-    output(input, output) { return recordBlocks(output, "Memory 变更"); },
+    title: "更新记忆", icon: "memory-remove",
+    summary: (input) => `${input.replacement ? "替换" : "移除"} · ${input.memory_id || ""}`,
+    input: (input) => [fieldBlock("原记忆", [["ID", input.memory_id], ["原因", input.reason], ["处理", input.replacement ? "使用新记录替换" : "移除现有记录"]]), ...(input.replacement ? [codeBlock("替换内容", JSON.stringify(input.replacement, null, 2))] : [])],
+    output(input, output) { return recordBlocks(output, "记忆已更新"); },
   });
 
   function workerOutputBlocks(output) {
