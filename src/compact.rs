@@ -19,13 +19,13 @@ Call Compact only after the runtime explicitly warns that context space is runni
 
 The response that requests Compact must contain exactly one direct tool call: Compact with `{}`, and nothing else. It must not contain prose, WorkMap.Read, a WorkMap maintenance call, an unrelated tool, another Compact call, a sequential or parallel sibling, or a batch wrapper. If Compact appears with any other tool call, the runtime rejects the entire batch before any tool executes and returns `compact_must_be_only_tool_call`; finish necessary maintenance first, then call Compact alone in a later response.
 
-The runtime rejects Compact when no warning is active and reports the current context usage. After accepting a valid lone call, the runtime performs context compaction, activates the resulting continuation summary only after successful completion, then continues the same Agent turn. WorkMap survives independently of the summary. After compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. Do not call Compact merely to shorten a healthy context, and do not narrate or imitate compaction in assistant text."#;
+The runtime rejects Compact when no warning is active and reports the current context usage. After accepting a valid lone call, the runtime performs context compaction and activates the resulting continuation summary only after successful completion. Only a successful compaction continues the same Agent turn. WorkMap survives independently of the summary. After compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. If summary generation fails or is interrupted, the pre-compaction conversation, WorkMap, and accepted Compact exchange remain effective; the current Agent turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which a new context-low warning may allow retry. Do not call WorkMap.Read after such a failure; the post-Compact Read rule applies only after success. Do not call Compact merely to shorten a healthy context, and do not narrate or imitate compaction in assistant text."#;
 
-const INSTRUCTIONS: &str = r#"Call with an empty object only after the runtime explicitly issues a context-low warning. If any other action or tool call is needed first, complete it in an earlier model response. The response requesting Compact must contain exactly one direct Compact tool call and nothing else: no prose, no sibling tool call, and no parallel or batch wrapper. A mixed batch is rejected before any tool executes. A call made without an active warning is rejected with the current context usage. After a valid lone call is accepted, the runtime performs context compaction automatically."#;
+const INSTRUCTIONS: &str = r#"Call with an empty object only after the runtime explicitly issues a context-low warning. If any other action or tool call is needed first, complete it in an earlier model response. The response requesting Compact must contain exactly one direct Compact tool call and nothing else: no prose, no sibling tool call, and no parallel or batch wrapper. A mixed batch is rejected before any tool executes. A call made without an active warning is rejected with the current context usage. After a valid lone call is accepted, the runtime attempts context compaction. Only successful summarization continues the current turn. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective, the current turn stops without an automatic retry, and another attempt requires a later user message."#;
 
 const CHATBOT_TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a concise continuation summary when context space is running low.
 
-Call Compact only after the runtime explicitly warns that context space is running low. Finish any other conversational action first. Then send a later model response containing exactly one direct Compact tool call with `{}` and nothing else: no prose, sibling tool, second Compact call, or parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime creates a conversational continuity summary and continues the same user turn from it. If summarization fails or is interrupted, the previous conversation remains effective. Do not call Compact merely to shorten a healthy conversation."#;
+Call Compact only after the runtime explicitly warns that context space is running low. Finish any other conversational action first. Then send a later model response containing exactly one direct Compact tool call with `{}` and nothing else: no prose, sibling tool, second Compact call, or parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime creates a conversational continuity summary and continues the same user turn only if summarization succeeds. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective; the current user turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which a new context-low warning may allow retry. Do not call Compact merely to shorten a healthy conversation."#;
 const LOW_CONTEXT_WINDOW_MAX: u64 = 384_000;
 const MEDIUM_CONTEXT_WINDOW_MAX: u64 = 680_000;
 const ROUTE: &str = "After a context-low warning and any earlier required actions, request compaction in a response containing exactly one direct Compact tool call and nothing else.";
@@ -619,6 +619,18 @@ mod tests {
         assert!(!CHATBOT_COMPACT_PROMPT.contains("WorkMap"));
         assert!(!CHATBOT_COMPACT_PROMPT.contains("Active Tool Sessions"));
         assert!(!CHATBOT_COMPACT_PROMPT.contains("Worker conversation"));
+        assert!(
+            TOOLBOX_BRIEF.contains("Only a successful compaction continues the same Agent turn")
+        );
+        assert!(TOOLBOX_BRIEF.contains("accepted Compact exchange remain effective"));
+        assert!(TOOLBOX_BRIEF.contains("no automatic model request or Compact retry"));
+        assert!(TOOLBOX_BRIEF.contains("post-Compact Read rule applies only after success"));
+        assert!(INSTRUCTIONS.contains("Only successful summarization continues the current turn"));
+        assert!(INSTRUCTIONS.contains("another attempt requires a later user message"));
+        assert!(CHATBOT_TOOLBOX_BRIEF.contains("current user turn stops"));
+        assert!(CHATBOT_TOOLBOX_BRIEF.contains("no automatic model request or Compact retry"));
+        assert!(CHATBOT_TOOLBOX_BRIEF.contains("later user message starts a new turn"));
+        assert!(!CHATBOT_TOOLBOX_BRIEF.contains("WorkMap"));
 
         let formatted =
             format_summary("<analysis>draft</analysis>\n\n<summary>\nalpha\n\n\n beta\n</summary>");

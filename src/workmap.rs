@@ -2348,7 +2348,7 @@ fn instructions(tool: &str) -> &'static str {
 fn route(tool: &str) -> &'static str {
     match tool {
         "Read" => {
-            "Use before substantial work, immediately after compaction, and for a final audit only when a successful UpdatePlanState result did not already establish the final Current state."
+            "Use before substantial work, immediately after successful compaction, and for a final audit only when a successful UpdatePlanState result did not already establish the final Current state."
         }
         "ReadHistory" => {
             "Use only when earlier closed work is genuinely needed; never for routine final audits."
@@ -2505,6 +2505,10 @@ mod tests {
         assert!(
             read.route
                 .contains("only when a successful UpdatePlanState result did not already")
+        );
+        assert!(
+            read.route
+                .contains("immediately after successful compaction")
         );
         assert!(!read.route.contains("mandatory final audit"));
         let start = tools.iter().find(|tool| tool.full_name == START).unwrap();

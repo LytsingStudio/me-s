@@ -2102,7 +2102,16 @@ impl MainAgent {
             {
                 match self.run_compact(prompt_id, tool_call_id, edb, models, on_event)? {
                     CompactOutcome::Completed => compact_warning_latched = false,
-                    CompactOutcome::Failed => {}
+                    CompactOutcome::Failed => {
+                        close_agent_turn(
+                            edb,
+                            prompt_id,
+                            AgentTurnState::Interrupted,
+                            "Compact failed before producing a continuation summary",
+                            on_event,
+                        )?;
+                        return Ok(());
+                    }
                     CompactOutcome::Aborted => {
                         close_agent_turn(
                             edb,
@@ -3174,7 +3183,16 @@ impl Chatbot {
             {
                 match self.run_compact(prompt_id, tool_call_id, edb, models, on_event)? {
                     CompactOutcome::Completed => compact_warning_latched = false,
-                    CompactOutcome::Failed => {}
+                    CompactOutcome::Failed => {
+                        close_agent_turn(
+                            edb,
+                            prompt_id,
+                            AgentTurnState::Interrupted,
+                            "Compact failed before producing a continuation summary",
+                            on_event,
+                        )?;
+                        return Ok(());
+                    }
                     CompactOutcome::Aborted => {
                         close_agent_turn(
                             edb,
@@ -14522,6 +14540,295 @@ for line in sys.stdin:
         }));
         drop(runtime);
         std::fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn failed_compact_stops_turn_and_a_new_user_turn_can_retry() {
+        fn run_case(chatbot: bool) {
+            fn write_compact_call(stream: &mut TcpStream, id: &str) {
+                let payload = json!({
+                    "choices": [{
+                        "delta": {
+                            "tool_calls": [{
+                                "index": 0,
+                                "id": id,
+                                "function": {"name": "Compact", "arguments": "{}"}
+                            }]
+                        }
+                    }]
+                });
+                let usage = json!({
+                    "choices": [],
+                    "usage": {
+                        "prompt_tokens": 220_000,
+                        "completion_tokens": 10_000,
+                        "total_tokens": 230_000
+                    }
+                });
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {payload}\n\ndata: {usage}\n\ndata: [DONE]\n\n"
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+
+            fn write_bad_request(stream: &mut TcpStream) {
+                let body =
+                    r#"{"error":{"message":"summary rejected","code":"invalid_request_error"}}"#;
+                let response = format!(
+                    "HTTP/1.1 400 Bad Request\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).unwrap();
+                stream.flush().unwrap();
+            }
+
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let allow_user_retry = Arc::new(AtomicBool::new(false));
+            let automatic_retry = Arc::new(AtomicBool::new(false));
+            let server_allow_user_retry = Arc::clone(&allow_user_retry);
+            let server_automatic_retry = Arc::clone(&automatic_retry);
+            let server = thread::spawn(move || {
+                let (mut first_turn, _) = listener.accept().unwrap();
+                let first_request = read_http_json_request(&mut first_turn);
+                assert!(first_request.to_string().contains("compact_advisory"));
+                write_compact_call(&mut first_turn, "first-compact");
+                drop(first_turn);
+
+                let (mut first_summary, _) = listener.accept().unwrap();
+                let first_summary_request = read_http_json_request(&mut first_summary);
+                assert!(
+                    first_summary_request
+                        .get("tools")
+                        .and_then(Value::as_array)
+                        .is_none_or(Vec::is_empty),
+                    "unexpected first Compact summary request: {first_summary_request}"
+                );
+                write_bad_request(&mut first_summary);
+                drop(first_summary);
+
+                listener.set_nonblocking(true).unwrap();
+                let retry_deadline = Instant::now() + Duration::from_secs(5);
+                let mut retry_turn = loop {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            if !server_allow_user_retry.load(Ordering::Acquire) {
+                                server_automatic_retry.store(true, Ordering::Release);
+                                write_sse_content(&mut stream, "unexpected automatic retry");
+                                return;
+                            }
+                            break stream;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            assert!(
+                                Instant::now() < retry_deadline,
+                                "new user turn did not retry Compact"
+                            );
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("failed to accept retry turn: {error}"),
+                    }
+                };
+                retry_turn.set_nonblocking(false).unwrap();
+                let retry_request = read_http_json_request(&mut retry_turn);
+                let retry_request = retry_request.to_string();
+                assert!(
+                    retry_request.contains("compact_advisory"),
+                    "retry request did not contain advisory: {retry_request}"
+                );
+                assert!(retry_request.contains("continue"));
+                assert!(retry_request.contains("accepted"));
+                assert!(retry_request.contains("prior answer"));
+                write_compact_call(&mut retry_turn, "second-compact");
+                drop(retry_turn);
+
+                listener.set_nonblocking(false).unwrap();
+                let (mut second_summary, _) = listener.accept().unwrap();
+                let _ = read_http_json_request(&mut second_summary);
+                write_bad_request(&mut second_summary);
+                drop(second_summary);
+
+                listener.set_nonblocking(true).unwrap();
+                let quiet_deadline = Instant::now() + Duration::from_millis(300);
+                while Instant::now() < quiet_deadline {
+                    match listener.accept() {
+                        Ok((mut stream, _)) => {
+                            server_automatic_retry.store(true, Ordering::Release);
+                            write_sse_content(&mut stream, "unexpected second automatic retry");
+                            break;
+                        }
+                        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                            thread::sleep(Duration::from_millis(1));
+                        }
+                        Err(error) => panic!("failed while checking for an extra retry: {error}"),
+                    }
+                }
+            });
+
+            let workspace = (!chatbot).then(|| {
+                let nonce = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos();
+                let directory = std::env::temp_dir().join(format!(
+                    "me-failed-compact-turn-{}-{nonce}",
+                    std::process::id()
+                ));
+                let tools = directory.join(".me/tools");
+                std::fs::create_dir_all(&tools).unwrap();
+                std::fs::write(
+                    tools.join("Empty.py"),
+                    r#"import json
+import sys
+
+for line in sys.stdin:
+    request = json.loads(line)
+    if request["cmd"] == "getTools":
+        output = []
+    elif request["cmd"] == "getBrief":
+        output = "Empty test toolbox."
+    else:
+        raise RuntimeError("unexpected command")
+    print(json.dumps({"id": request["id"], "type": "result", "output": output}), flush=True)
+"#,
+                )
+                .unwrap();
+                directory
+            });
+
+            let mut model = test_model_config("local", &["unset"]);
+            model.base_url = format!("http://{address}");
+            model.timeout_seconds = 2;
+            model.reserve_output_context = false;
+            model.capabilities.context_window = 272_000;
+            let mut models = ModelRuntime::new(vec![model], "local").unwrap();
+            let mut edb = EventDataBase::new();
+            let mut orchestrator: Box<dyn Orchestrator> = if chatbot {
+                let chatbot = Chatbot::new(None);
+                chatbot.initialize(&mut edb, &models).unwrap();
+                Box::new(chatbot)
+            } else {
+                let mut agent = MainAgent::new(None);
+                agent
+                    .configure_workspace(workspace.as_ref().unwrap())
+                    .unwrap();
+                agent.initialize(&mut edb, &models).unwrap();
+                Box::new(agent)
+            };
+            let prior_prompt = edb.append_user_prompt("prior request").unwrap();
+            edb.append_agent_turn(prior_prompt, prior_prompt, AgentTurnState::Started, "")
+                .unwrap();
+            let prior_api = edb.append_api_requesting(prior_prompt).unwrap();
+            edb.append_api_state(prior_api, prior_prompt, ApiState::Streaming, "")
+                .unwrap();
+            edb.append_assist_response(prior_prompt, "prior answer", true)
+                .unwrap();
+            edb.append_api_state_with_usage(
+                prior_api,
+                prior_prompt,
+                ApiState::Completed,
+                Some(ApiUsage {
+                    input_tokens: 220_000,
+                    output_tokens: 10_000,
+                    total_tokens: 230_000,
+                }),
+                "",
+            )
+            .unwrap();
+            edb.append_agent_turn(prior_prompt, prior_prompt, AgentTurnState::Completed, "")
+                .unwrap();
+            orchestrator.restore(&edb, &mut models).unwrap();
+            let mut runtime = AgentRuntime::new(edb, orchestrator, models);
+
+            runtime.submit_user_prompt("start compact".into()).unwrap();
+            let first_deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(
+                    Instant::now() < first_deadline,
+                    "first Compact failure timed out"
+                );
+                runtime.poll_edb().unwrap();
+                if runtime.edb_events().iter().any(|event| {
+                    matches!(event, Event::CompactStateUpdate(update) if update.state == CompactState::Failed)
+                }) && latest_agent_turn(runtime.edb_events())
+                    .unwrap()
+                    .is_some_and(|turn| turn.state.is_terminal())
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            let first_turn = latest_agent_turn(runtime.edb_events()).unwrap().unwrap();
+            assert_eq!(first_turn.state, AgentTurnState::Interrupted);
+            assert_eq!(
+                first_turn.detail,
+                "Compact failed before producing a continuation summary"
+            );
+            let first_call = runtime
+                .edb_events()
+                .iter()
+                .find_map(|event| match event {
+                    Event::ToolCall(call) if call.provider_call_id == "first-compact" => {
+                        Some(call.id)
+                    }
+                    _ => None,
+                })
+                .unwrap();
+            assert!(runtime.edb_events().iter().any(|event| {
+                matches!(
+                    event,
+                    Event::ToolCallResult(result)
+                        if result.tool_call_id == first_call
+                            && result.state == ToolResultState::Succeeded
+                            && result.detail.contains("accepted")
+                )
+            }));
+
+            allow_user_retry.store(true, Ordering::Release);
+            runtime.submit_user_prompt("continue".into()).unwrap();
+            let second_deadline = Instant::now() + Duration::from_secs(5);
+            loop {
+                assert!(
+                    Instant::now() < second_deadline,
+                    "second Compact failure timed out"
+                );
+                runtime.poll_edb().unwrap();
+                let failed = runtime
+                    .edb_events()
+                    .iter()
+                    .filter(|event| {
+                        matches!(event, Event::CompactStateUpdate(update) if update.state == CompactState::Failed)
+                    })
+                    .count();
+                if failed == 2
+                    && latest_agent_turn(runtime.edb_events())
+                        .unwrap()
+                        .is_some_and(|turn| turn.state == AgentTurnState::Interrupted)
+                    && !runtime.is_advancing()
+                {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(1));
+            }
+            server.join().unwrap();
+            assert!(!automatic_retry.load(Ordering::Acquire));
+            assert_eq!(
+                runtime
+                    .edb_events()
+                    .iter()
+                    .filter(|event| matches!(event, Event::ToolCall(call) if call.name == compact::TOOL_NAME))
+                    .count(),
+                2
+            );
+            drop(runtime);
+            if let Some(workspace) = workspace {
+                std::fs::remove_dir_all(workspace).unwrap();
+            }
+        }
+
+        run_case(false);
+        run_case(true);
     }
 
     #[test]
