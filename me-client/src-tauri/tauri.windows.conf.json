@@ -13,7 +13,7 @@
         "fullscreen": false,
         "visible": false,
         "decorations": false,
-        "transparent": false,
+        "transparent": true,
         "shadow": false,
         "devtools": false
       }

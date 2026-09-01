@@ -53,7 +53,7 @@ html.me-client {
 
 html.me-client-platform-windows {
   --client-window-radius: 8px;
-  background: var(--bg);
+  background: transparent;
 }
 
 html.me-client body {
@@ -62,8 +62,7 @@ html.me-client body {
   background: var(--bg);
 }
 
-html.me-client-platform-macos body,
-html.me-client-platform-windows body {
+html.me-client-platform-macos body {
   border-radius: 0;
 }
 
@@ -103,16 +102,6 @@ html.me-client-window-fullscreen body::after {
   height: var(--client-chrome-height);
   color: var(--text);
   pointer-events: none;
-}
-
-.client-window-drag-handle {
-  position: absolute;
-  top: 0;
-  left: 50%;
-  width: min(180px, 20vw);
-  height: 10px;
-  transform: translateX(-50%);
-  pointer-events: auto;
 }
 
 .client-titlebar-title {
@@ -157,8 +146,12 @@ html.me-client-window-fullscreen body::after {
   padding-left: 13px;
 }
 
-.me-client-platform-macos .sidebar {
-  padding-top: var(--client-chrome-height);
+.me-client-platform-macos .client-sidebar-drag-region {
+  display: block;
+  align-self: stretch;
+  flex: 0 0 var(--client-chrome-height);
+  margin-left: 88px;
+  pointer-events: auto;
 }
 
 .me-client-platform-macos .client-window-control {

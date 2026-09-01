@@ -121,6 +121,24 @@ fn apply_platform_window_shape(
 }
 
 #[cfg(target_os = "windows")]
+type WindowsHwnd = *mut c_void;
+
+#[cfg(target_os = "windows")]
+type WindowsSubclassProc = Option<
+    unsafe extern "system" fn(WindowsHwnd, u32, usize, isize, usize, usize) -> isize,
+>;
+
+#[cfg(target_os = "windows")]
+#[repr(C)]
+#[derive(Default)]
+struct WindowRect {
+    left: i32,
+    top: i32,
+    right: i32,
+    bottom: i32,
+}
+
+#[cfg(target_os = "windows")]
 #[repr(C)]
 struct DwmMargins {
     cx_left_width: i32,
@@ -130,15 +148,113 @@ struct DwmMargins {
 }
 
 #[cfg(target_os = "windows")]
+const WINDOWS_CORNER_RADIUS_CSS_PX: i32 = 8;
+#[cfg(target_os = "windows")]
+const WINDOWS_SUBCLASS_ID: usize = 0x4d45;
+#[cfg(target_os = "windows")]
+const WM_NCHITTEST: u32 = 0x0084;
+#[cfg(target_os = "windows")]
+const HTNOWHERE: isize = 0;
+
+#[cfg(target_os = "windows")]
+static WINDOWS_WINDOW_SQUARE: AtomicBool = AtomicBool::new(false);
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn GetWindowRect(hwnd: WindowsHwnd, rect: *mut WindowRect) -> i32;
+    fn GetDpiForWindow(hwnd: WindowsHwnd) -> u32;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "comctl32")]
+unsafe extern "system" {
+    fn SetWindowSubclass(
+        hwnd: WindowsHwnd,
+        proc: WindowsSubclassProc,
+        id: usize,
+        reference_data: usize,
+    ) -> i32;
+    fn DefSubclassProc(hwnd: WindowsHwnd, msg: u32, wparam: usize, lparam: isize) -> isize;
+}
+
+#[cfg(target_os = "windows")]
 #[link(name = "dwmapi")]
 unsafe extern "system" {
-    fn DwmExtendFrameIntoClientArea(hwnd: *mut c_void, margins: *const DwmMargins) -> i32;
+    fn DwmExtendFrameIntoClientArea(hwnd: WindowsHwnd, margins: *const DwmMargins) -> i32;
     fn DwmSetWindowAttribute(
-        hwnd: *mut c_void,
+        hwnd: WindowsHwnd,
         attribute: u32,
         value: *const c_void,
         value_size: u32,
     ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn outside_rounded_corner(x: i32, y: i32, width: i32, height: i32, radius: i32) -> bool {
+    let outside_circle = |px: i32, py: i32, center_x: i32, center_y: i32| {
+        let dx = px - center_x;
+        let dy = py - center_y;
+        dx * dx + dy * dy > radius * radius
+    };
+    (x < radius && y < radius && outside_circle(x, y, radius, radius))
+        || (x >= width - radius
+            && y < radius
+            && outside_circle(x, y, width - radius - 1, radius))
+        || (x < radius
+            && y >= height - radius
+            && outside_circle(x, y, radius, height - radius - 1))
+        || (x >= width - radius
+            && y >= height - radius
+            && outside_circle(x, y, width - radius - 1, height - radius - 1))
+}
+
+#[cfg(target_os = "windows")]
+unsafe extern "system" fn windows_rounded_hit_test(
+    hwnd: WindowsHwnd,
+    msg: u32,
+    wparam: usize,
+    lparam: isize,
+    _id: usize,
+    _reference_data: usize,
+) -> isize {
+    if msg == WM_NCHITTEST && !WINDOWS_WINDOW_SQUARE.load(Ordering::Acquire) {
+        let mut rect = WindowRect::default();
+        if unsafe { GetWindowRect(hwnd, &mut rect) } != 0 {
+            let screen_x = (lparam as u16 as i16) as i32;
+            let screen_y = ((lparam >> 16) as u16 as i16) as i32;
+            let x = screen_x - rect.left;
+            let y = screen_y - rect.top;
+            let width = rect.right - rect.left;
+            let height = rect.bottom - rect.top;
+            let dpi = unsafe { GetDpiForWindow(hwnd) } as i32;
+            let dpi = if dpi == 0 { 96 } else { dpi };
+            let radius = (WINDOWS_CORNER_RADIUS_CSS_PX * dpi + 48) / 96;
+            if width > 0
+                && height > 0
+                && outside_rounded_corner(x, y, width, height, radius)
+            {
+                return HTNOWHERE;
+            }
+        }
+    }
+    unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) }
+}
+
+#[cfg(target_os = "windows")]
+fn install_windows_rounded_hit_test(hwnd: WindowsHwnd) -> Result<(), String> {
+    let installed = unsafe {
+        SetWindowSubclass(
+            hwnd,
+            Some(windows_rounded_hit_test),
+            WINDOWS_SUBCLASS_ID,
+            0,
+        )
+    };
+    if installed == 0 {
+        return Err("SetWindowSubclass failed".into());
+    }
+    Ok(())
 }
 
 #[cfg(target_os = "windows")]
@@ -152,6 +268,7 @@ fn apply_platform_window_shape(
     const DWMWCP_DONOTROUND: u32 = 1;
     const DWMWCP_ROUND: u32 = 2;
     let floating = !state.maximized && !state.fullscreen;
+    WINDOWS_WINDOW_SQUARE.store(!floating, Ordering::Release);
     let preference = if floating {
         DWMWCP_ROUND
     } else {
@@ -164,9 +281,9 @@ fn apply_platform_window_shape(
         cy_top_height: frame_margin,
         cy_bottom_height: frame_margin,
     };
-    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?.0;
     unsafe {
-        let frame_result = DwmExtendFrameIntoClientArea(hwnd.0, &margins);
+        let frame_result = DwmExtendFrameIntoClientArea(hwnd, &margins);
         if frame_result < 0 {
             return Err(format!(
                 "DwmExtendFrameIntoClientArea failed: HRESULT 0x{:08x}",
@@ -175,19 +292,19 @@ fn apply_platform_window_shape(
         }
         // Border color and corner preference are optional Windows 11 attributes.
         let _ = DwmSetWindowAttribute(
-            hwnd.0,
+            hwnd,
             DWMWA_BORDER_COLOR,
             (&DWMWA_COLOR_NONE as *const u32).cast(),
             std::mem::size_of::<u32>() as u32,
         );
         let _ = DwmSetWindowAttribute(
-            hwnd.0,
+            hwnd,
             DWMWA_WINDOW_CORNER_PREFERENCE,
             (&preference as *const u32).cast(),
             std::mem::size_of::<u32>() as u32,
         );
     }
-    Ok(())
+    install_windows_rounded_hit_test(hwnd)
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "windows")))]

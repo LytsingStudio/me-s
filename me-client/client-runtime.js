@@ -399,16 +399,22 @@
     const titleBar = document.createElement("div");
     titleBar.id = "client-titlebar";
     titleBar.className = "client-titlebar";
-    const dragHandle = markDragRegion(document.createElement("div"));
-    dragHandle.className = "client-window-drag-handle";
-    dragHandle.setAttribute("aria-hidden", "true");
     const text = document.createElement("span");
     text.className = "client-titlebar-title";
     text.textContent = currentWindowTitle || "ME Client";
     titleBarTitleElement = text;
-    titleBar.append(dragHandle, text, windowControls(platform));
+    titleBar.append(text, windowControls(platform));
     document.body.prepend(titleBar);
-    for (const element of document.querySelectorAll?.("#login-screen, .sidebar-heading, .view-tabs") || []) {
+    if (platform === "macos") {
+      const sidebar = document.querySelector?.(".sidebar");
+      if (sidebar) {
+        const sidebarDragRegion = markDragRegion(document.createElement("div"));
+        sidebarDragRegion.className = "client-sidebar-drag-region";
+        sidebarDragRegion.setAttribute("aria-hidden", "true");
+        sidebar.prepend(sidebarDragRegion);
+      }
+    }
+    for (const element of document.querySelectorAll?.("#login-screen, .view-tabs") || []) {
       markDragRegion(element);
     }
     globalThis.addEventListener?.("resize", scheduleWindowStateRefresh);

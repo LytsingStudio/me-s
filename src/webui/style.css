@@ -247,8 +247,8 @@ button { color: inherit; }
 .session-sync-card strong { margin-top: 4px; font-size: 16px; }
 .session-sync-card > span:last-child { color: var(--muted); font-size: 12px; }
 
-.view-tabs { display: flex; align-items: center; gap: 4px; min-height: 46px; padding: 0 25px; border-bottom: 1px solid var(--border); overflow-x: auto; }
-.view-tabs button { height: 45px; padding: 0 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.view-tabs { display: flex; align-items: flex-end; gap: 4px; min-height: 46px; padding: 0 25px; border-bottom: 1px solid var(--border); overflow-x: auto; }
+.view-tabs button { display: inline-flex; height: 38px; align-items: center; justify-content: center; padding: 0 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .view-tabs button:hover { color: var(--text); }
 .view-tabs button.active { color: var(--text); border-bottom-color: var(--violet); }
 #terminal-tabs { display: contents; }
@@ -647,13 +647,13 @@ button { color: inherit; }
     overscroll-behavior-x: contain;
     scrollbar-width: none;
   }
-  .view-tabs button { height: 50px; padding: 0 12px; }
+  .view-tabs button { height: 44px; padding: 0 12px; }
   .view-tabs .mobile-sidebar-toggle {
     position: sticky;
     left: 0;
     z-index: 2;
     display: grid;
-    flex: 0 0 50px;
+    flex: 0 0 44px;
     place-items: center;
     padding: 0;
     border-bottom-color: transparent;
