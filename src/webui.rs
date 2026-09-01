@@ -3083,7 +3083,7 @@ mod tests {
     #[test]
     fn embedded_webui_uses_the_shared_chat_tool_visibility_policy() {
         assert_eq!(CHAT_HIDDEN_TOOL_NAMES, &[crate::agent_title::TOOL_NAME]);
-        assert_eq!(CHAT_HIDDEN_TOOL_PREFIXES, &["WorkMap.", "Worker."]);
+        assert_eq!(CHAT_HIDDEN_TOOL_PREFIXES, &["Worker."]);
         assert_eq!(
             CHAT_ACTIVITY_TOOL_NAMES,
             &[crate::agent_toolbox::WORKER_WAIT]
@@ -4562,7 +4562,7 @@ mod tests {
             first["tool_visibility"],
             json!({
                 "hidden_names": [crate::agent_title::TOOL_NAME],
-                "hidden_prefixes": ["WorkMap.", "Worker."],
+                "hidden_prefixes": ["Worker."],
                 "activity_names": [crate::agent_toolbox::WORKER_WAIT],
             })
         );

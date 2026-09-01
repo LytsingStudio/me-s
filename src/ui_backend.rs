@@ -13,7 +13,7 @@ use crate::{
 };
 
 pub const CHAT_HIDDEN_TOOL_NAMES: &[&str] = &[crate::agent_title::TOOL_NAME];
-pub const CHAT_HIDDEN_TOOL_PREFIXES: &[&str] = &["WorkMap.", "Worker."];
+pub const CHAT_HIDDEN_TOOL_PREFIXES: &[&str] = &["Worker."];
 pub const CHAT_ACTIVITY_TOOL_NAMES: &[&str] = &[crate::agent_toolbox::WORKER_WAIT];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -538,10 +538,10 @@ mod tests {
     }
 
     #[test]
-    fn chat_tool_visibility_policy_hides_control_plane_tools() {
+    fn chat_tool_visibility_policy_classifies_special_tools() {
         assert!(!tool_is_chat_visible(crate::agent_title::TOOL_NAME));
-        assert!(!tool_is_chat_visible("WorkMap.Start"));
-        assert!(!tool_is_chat_visible("WorkMap.UpdatePlanState"));
+        assert!(tool_is_chat_visible("WorkMap.Start"));
+        assert!(tool_is_chat_visible("WorkMap.UpdatePlanState"));
         assert!(!tool_is_chat_visible("Worker.Ask"));
         assert!(!tool_is_chat_visible("Worker.Wait"));
         assert_eq!(

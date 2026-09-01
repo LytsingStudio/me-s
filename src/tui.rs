@@ -7791,7 +7791,7 @@ mod tests {
     }
 
     #[test]
-    fn control_plane_tool_lifecycles_are_hidden_from_chat_projection() {
+    fn workmap_tool_lifecycles_are_visible_and_worker_wait_is_specialized() {
         let mut edb = EventDataBase::new();
         let prompt_id = edb.append_user_prompt("investigate input latency").unwrap();
         let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
@@ -7853,12 +7853,17 @@ mod tests {
         .unwrap();
 
         let projection = ChatProjection::replay_events(edb.events()).unwrap();
-        assert_eq!(projection.messages.len(), 2);
+        assert_eq!(projection.messages.len(), 3);
         assert_eq!(projection.messages[0].kind, ChatBlockKind::User);
         assert_eq!(projection.messages[0].content, "investigate input latency");
-        assert_eq!(projection.messages[1].kind, ChatBlockKind::WorkerActivity);
+        assert_eq!(projection.messages[1].kind, ChatBlockKind::ToolCall);
+        let workmap_tool = projection.messages[1].tool.as_ref().unwrap();
+        assert_eq!(workmap_tool.id, workmap_call_id);
+        assert_eq!(workmap_tool.name, "WorkMap.Read");
+        assert_eq!(workmap_tool.output, "workmap output");
+        assert_eq!(projection.messages[2].kind, ChatBlockKind::WorkerActivity);
         assert_eq!(
-            projection.messages[1].tool.as_ref().unwrap().id,
+            projection.messages[2].tool.as_ref().unwrap().id,
             worker_call_id
         );
 
