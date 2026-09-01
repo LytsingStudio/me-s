@@ -32,6 +32,7 @@ const assets = [
   [resolve(vendorRoot, "xterm-addon-unicode11.js"), "xterm-addon-unicode11.js"],
   [resolve(clientRoot, "client-runtime.js"), "runtime.js"],
   [resolve(clientRoot, "client.css"), "client.css"],
+  [resolve(clientRoot, "app-icon.svg"), "app-icon.svg"],
 ];
 for (const [source, destination] of assets) {
   await copyFile(source, resolve(outputRoot, destination));

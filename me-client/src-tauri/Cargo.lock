@@ -1961,7 +1961,7 @@ dependencies = [
 
 [[package]]
 name = "me-client"
-version = "0.1.72"
+version = "0.1.73"
 dependencies = [
  "base64 0.22.1",
  "log",

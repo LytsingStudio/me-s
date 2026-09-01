@@ -38,7 +38,7 @@ function loadShowLogin(relative) {
     "state", "elements", "deactivateSessionTerminalView", "stopHttpPolling",
     "cancelBackgroundWorkspaceSync", "setConnectionPhase", "hideConnectionOverlay",
     "runtimeCapabilities", "frontendRuntime", "rememberedDevices", "setLoginView",
-    "renderLoginDevices",
+    "renderLoginDevices", "synchronizeWindowTitle", "markFrontendWindowReady",
     `${source.slice(start, end)}\nreturn showLogin;`,
   );
   const showLogin = factory(
@@ -52,6 +52,8 @@ function loadShowLogin(relative) {
     { targetConfiguration: false },
     { endpoint: "" },
     null,
+    () => {},
+    () => {},
     () => {},
     () => {},
   );

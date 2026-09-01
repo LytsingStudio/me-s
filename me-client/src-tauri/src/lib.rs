@@ -6,9 +6,12 @@ use std::{collections::BTreeMap, env, io, path::PathBuf};
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
+#[cfg(target_os = "windows")]
+use std::ffi::c_void;
+
 #[cfg(target_os = "macos")]
 use objc2::{
-    MainThreadMarker, ffi,
+    MainThreadMarker, ffi, msg_send,
     rc::Retained,
     runtime::{AnyClass, AnyObject, Imp, Sel},
     sel,
@@ -24,7 +27,7 @@ use gateway::{
     discover_local_device, normalize_endpoint, online_remembered_devices,
 };
 use serde::Serialize;
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
 const DEVICE_PREFERENCE_KEYS: [&str; 3] = ["me-theme", "me-color-mode", "me-send-shortcut"];
@@ -68,6 +71,137 @@ impl RememberedDeviceStatus {
 #[derive(Serialize)]
 struct ConfiguredTarget {
     endpoint: String,
+}
+
+fn normalized_window_title(value: Option<String>) -> String {
+    let value = value.unwrap_or_default();
+    let value = value.trim();
+    if value.is_empty() {
+        "ME Client".into()
+    } else {
+        value.chars().take(256).collect()
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn apply_platform_window_shape(
+    window: &WebviewWindow,
+    state: &ClientWindowState,
+) -> Result<(), String> {
+    let ns_window = window.ns_window().map_err(|error| error.to_string())? as *mut AnyObject;
+    if ns_window.is_null() {
+        return Err("macOS window is unavailable".into());
+    }
+    let corner_radius = if state.maximized || state.fullscreen {
+        0.0
+    } else {
+        12.0
+    };
+    unsafe {
+        let content_view: *mut AnyObject = msg_send![ns_window, contentView];
+        if content_view.is_null() {
+            return Err("macOS content view is unavailable".into());
+        }
+        let _: () = msg_send![content_view, setWantsLayer: true];
+        let layer: *mut AnyObject = msg_send![content_view, layer];
+        if layer.is_null() {
+            return Err("macOS content layer is unavailable".into());
+        }
+        let curve = NSString::from_str("continuous");
+        let _: () = msg_send![layer, setCornerCurve: &*curve];
+        let _: () = msg_send![layer, setCornerRadius: corner_radius];
+        let _: () = msg_send![layer, setMasksToBounds: true];
+        let _: () = msg_send![ns_window, setHasShadow: true];
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "dwmapi")]
+unsafe extern "system" {
+    fn DwmSetWindowAttribute(
+        hwnd: *mut c_void,
+        attribute: u32,
+        value: *const c_void,
+        value_size: u32,
+    ) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn apply_platform_window_shape(
+    window: &WebviewWindow,
+    state: &ClientWindowState,
+) -> Result<(), String> {
+    const DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33;
+    const DWMWCP_DONOTROUND: u32 = 1;
+    const DWMWCP_ROUND: u32 = 2;
+    let preference = if state.maximized || state.fullscreen {
+        DWMWCP_DONOTROUND
+    } else {
+        DWMWCP_ROUND
+    };
+    let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd.0,
+            DWMWA_WINDOW_CORNER_PREFERENCE,
+            (&preference as *const u32).cast(),
+            std::mem::size_of::<u32>() as u32,
+        );
+    }
+    Ok(())
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn apply_platform_window_shape(
+    _window: &WebviewWindow,
+    _state: &ClientWindowState,
+) -> Result<(), String> {
+    Ok(())
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientWindowState {
+    maximized: bool,
+    fullscreen: bool,
+}
+
+fn client_window_state(window: &WebviewWindow) -> Result<ClientWindowState, String> {
+    let state = ClientWindowState {
+        maximized: window.is_maximized().map_err(|error| error.to_string())?,
+        fullscreen: window.is_fullscreen().map_err(|error| error.to_string())?,
+    };
+    apply_platform_window_shape(window, &state)?;
+    Ok(state)
+}
+
+#[tauri::command]
+fn client_window_action(
+    action: String,
+    value: Option<String>,
+    window: WebviewWindow,
+) -> Result<ClientWindowState, String> {
+    match action.as_str() {
+        "minimize" => window.minimize(),
+        "toggle_maximize" => {
+            if window.is_maximized().map_err(|error| error.to_string())? {
+                window.unmaximize()
+            } else {
+                window.maximize()
+            }
+        }
+        "close" => window.close(),
+        "state" => Ok(()),
+        "set_title" => {
+            let title = normalized_window_title(value);
+            window.set_title(&title)
+        }
+        "show" => window.show(),
+        _ => return Err(format!("unknown client window action: {action}")),
+    }
+    .map_err(|error| error.to_string())?;
+    client_window_state(&window)
 }
 
 fn valid_device_preference(key: &str, value: &str) -> bool {
@@ -389,6 +523,9 @@ pub fn run() {
             app.manage(app_state(app)?);
             #[cfg(target_os = "macos")]
             install_macos_dock_menu()?;
+            if let Some(window) = app.get_webview_window("main") {
+                client_window_state(&window).map_err(io::Error::other)?;
+            }
             if cfg!(debug_assertions) {
                 app.handle().plugin(
                     tauri_plugin_log::Builder::default()
@@ -399,6 +536,7 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            client_window_action,
             client_bootstrap,
             configure_target,
             set_device_preference,

@@ -8,6 +8,12 @@
   const browserSendBeacon = globalThis.navigator?.sendBeacon?.bind(globalThis.navigator) || null;
   let endpoint = "";
   let activeEdbCache = null;
+  let windowReadyPromise = null;
+  let titleBarTitleElement = null;
+  let maximizeControl = null;
+  let currentWindowTitle = "";
+  let windowStateRequest = null;
+  let windowStateFrame = null;
 
   const NATIVE_BROWSER_SHORTCUT_KEYS = new Set([
     "r", "p", "s", "u", "f", "o", "l", "i", "j", "+", "=", "-", "0",
@@ -336,12 +342,167 @@
     }
   }
 
+  function clientPlatform() {
+    const identity = `${globalThis.navigator?.platform || ""} ${globalThis.navigator?.userAgent || ""}`;
+    if (/Mac|iPhone|iPad|iPod/i.test(identity)) return "macos";
+    if (/Win/i.test(identity)) return "windows";
+    return "linux";
+  }
+
+  function markDragRegion(element) {
+    element?.setAttribute?.("data-tauri-drag-region", "");
+    return element;
+  }
+
+  function createWindowControl(action, label, kind) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = `client-window-control client-window-${kind}`;
+    button.dataset.windowAction = action;
+    button.title = label;
+    button.setAttribute("aria-label", label);
+    button.innerHTML = '<span aria-hidden="true"></span>';
+    button.addEventListener("click", () => { void performWindowAction(action); });
+    return button;
+  }
+
+  function windowControls(platform) {
+    const controls = document.createElement("div");
+    controls.className = "client-window-controls";
+    controls.setAttribute("role", "group");
+    controls.setAttribute("aria-label", "窗口控制");
+    if (platform === "macos") {
+      controls.append(
+        createWindowControl("close", "关闭", "close"),
+        createWindowControl("minimize", "最小化", "minimize"),
+        createWindowControl("toggle_maximize", "缩放窗口", "maximize"),
+      );
+    } else {
+      controls.append(
+        createWindowControl("minimize", "最小化", "minimize"),
+        createWindowControl("toggle_maximize", "最大化", "maximize"),
+        createWindowControl("close", "关闭", "close"),
+      );
+    }
+    maximizeControl = controls.querySelector?.(".client-window-maximize") || null;
+    return controls;
+  }
+
+  function installClientTitleBar() {
+    if (titleBarTitleElement || !document.body || typeof document.createElement !== "function") return;
+    const platform = clientPlatform();
+    document.documentElement?.classList?.add?.(`me-client-platform-${platform}`);
+    const titleBar = markDragRegion(document.createElement("header"));
+    titleBar.id = "client-titlebar";
+    titleBar.className = "client-titlebar";
+    const title = markDragRegion(document.createElement("div"));
+    title.className = "client-titlebar-title";
+    const logo = markDragRegion(document.createElement("img"));
+    logo.className = "client-titlebar-logo";
+    logo.src = "/app-icon.svg";
+    logo.alt = "";
+    logo.draggable = false;
+    const text = markDragRegion(document.createElement("span"));
+    text.className = "client-titlebar-text";
+    text.textContent = currentWindowTitle || "ME Client";
+    title.append(logo, text);
+    titleBarTitleElement = text;
+    const controls = windowControls(platform);
+    if (platform === "macos") {
+      const spacer = markDragRegion(document.createElement("div"));
+      spacer.className = "client-titlebar-spacer";
+      titleBar.append(controls, title, spacer);
+    } else {
+      titleBar.append(title, controls);
+    }
+    document.body.prepend(titleBar);
+    globalThis.addEventListener?.("resize", scheduleWindowStateRefresh);
+    void refreshWindowState();
+  }
+
+  function applyWindowState(value) {
+    const maximized = Boolean(value?.maximized);
+    const fullscreen = Boolean(value?.fullscreen);
+    document.documentElement?.classList?.toggle?.("me-client-window-maximized", maximized);
+    document.documentElement?.classList?.toggle?.("me-client-window-fullscreen", fullscreen);
+    maximizeControl?.classList?.toggle?.("restore", maximized);
+    if (maximizeControl) {
+      const label = maximized ? "还原" : "最大化";
+      maximizeControl.title = clientPlatform() === "macos" ? "缩放窗口" : label;
+      maximizeControl.setAttribute("aria-label", maximizeControl.title);
+    }
+    return value;
+  }
+
+  function performWindowAction(action) {
+    return invoke("client_window_action", { action })
+      .then(applyWindowState)
+      .catch((error) => {
+        if (action !== "close") console.error(`Unable to ${action} client window`, error);
+      });
+  }
+
+  function refreshWindowState() {
+    if (!windowStateRequest) {
+      windowStateRequest = invoke("client_window_action", { action: "state" })
+        .then(applyWindowState)
+        .catch((error) => console.error("Unable to read client window state", error))
+        .finally(() => { windowStateRequest = null; });
+    }
+    return windowStateRequest;
+  }
+
+  function scheduleWindowStateRefresh() {
+    if (windowStateFrame != null) return;
+    const run = () => {
+      windowStateFrame = null;
+      void refreshWindowState();
+    };
+    if (typeof globalThis.requestAnimationFrame === "function") {
+      windowStateFrame = globalThis.requestAnimationFrame(run);
+    } else {
+      run();
+    }
+  }
+
+  function setWindowTitle(value) {
+    const title = String(value || "").trim() || "ME Client";
+    if (titleBarTitleElement) titleBarTitleElement.textContent = title;
+    if (title === currentWindowTitle) return Promise.resolve();
+    currentWindowTitle = title;
+    return invoke("client_window_action", { action: "set_title", value: title })
+      .then(applyWindowState)
+      .catch((error) => {
+        if (currentWindowTitle === title) currentWindowTitle = "";
+        throw error;
+      });
+  }
+
+  function waitForFirstPaint() {
+    if (typeof globalThis.requestAnimationFrame !== "function") return Promise.resolve();
+    return new Promise((resolve) => {
+      globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(resolve));
+    });
+  }
+
+  function windowReady() {
+    installClientTitleBar();
+    if (!windowReadyPromise) {
+      windowReadyPromise = waitForFirstPaint()
+        .then(() => refreshWindowState())
+        .then(() => invoke("client_window_action", { action: "show" }))
+        .then(applyWindowState);
+    }
+    return windowReadyPromise;
+  }
+
   const runtime = {
     capabilities: Object.freeze({
       multipleWorkspaces: true,
       gatewaySettings: true,
       targetConfiguration: true,
       nativeDownload: true,
+      dynamicWindowTitle: true,
       pageTitle: "ME Client",
       brandTitle: "ME Client",
       cacheStorageLabel: "ME Client",
@@ -353,6 +514,7 @@
     rememberedDevices,
     async initialize() {
       document.documentElement.classList.add("me-client");
+      installClientTitleBar();
       const bootstrap = await invoke("client_bootstrap");
       loadDevicePreferences(bootstrap.devicePreferences);
       loadRememberedDevices(bootstrap.rememberedDevices);
@@ -364,6 +526,8 @@
         },
       };
     },
+    windowReady,
+    setWindowTitle,
     async configureTarget(value) {
       const configured = await invoke("configure_target", { endpoint: String(value || "") });
       endpoint = String(configured.endpoint || "");

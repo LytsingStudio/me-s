@@ -41,8 +41,8 @@ const devicePreferences = frontendRuntime.devicePreferences || null;
 const rememberedDevices = frontendRuntime.rememberedDevices || null;
 const runtimeCapabilities = Object.freeze({
   multipleWorkspaces: false, gatewaySettings: false, targetConfiguration: false,
-  nativeDownload: false, pageTitle: "ME", brandTitle: "ME", cacheStorageLabel: "当前浏览器",
-  sessionSectionTitle: "聊天", newSessionLabel: "新建聊天",
+  nativeDownload: false, dynamicWindowTitle: false, pageTitle: "ME", brandTitle: "ME",
+  cacheStorageLabel: "当前浏览器", sessionSectionTitle: "聊天", newSessionLabel: "新建聊天",
   ...(frontendRuntime.capabilities || {}),
 });
 const edbCache = frontendRuntime.createEdbCache();
@@ -514,6 +514,15 @@ function pruneWorkspaceDisclosure(validWorkspaceIds, disclosure = state.workspac
 
 function agentMeta() {
   return state.snapshot.agents.find((agent) => agent.id === state.selectedAgent) || null;
+}
+
+function synchronizeWindowTitle(meta = agentMeta()) {
+  if (!runtimeCapabilities.dynamicWindowTitle) return;
+  const sessionTitle = String(meta?.title || meta?.id || "").trim();
+  const title = sessionTitle ? `${sessionTitle} - ${runtimeCapabilities.pageTitle}` : runtimeCapabilities.pageTitle;
+  document.title = title;
+  const update = frontendRuntime.setWindowTitle?.(title);
+  update?.catch?.((error) => console.error("Unable to update frontend window title", error));
 }
 
 function isWorkerAgent(meta = agentMeta()) {
@@ -1348,6 +1357,11 @@ function setLoginBusy(busy) {
   renderLoginDevices();
 }
 
+function markFrontendWindowReady() {
+  const readiness = frontendRuntime.windowReady?.();
+  readiness?.catch?.((error) => console.error("Unable to reveal frontend window", error));
+}
+
 function showLogin(message = "") {
   const alreadyVisible = !state.authenticated
     && !elements.loginScreen.classList.contains("hidden");
@@ -1355,7 +1369,11 @@ function showLogin(message = "") {
   else setLoginView("form");
   elements.loginError.textContent = message;
   renderLoginDevices();
-  if (alreadyVisible) return;
+  synchronizeWindowTitle(null);
+  if (alreadyVisible) {
+    markFrontendWindowReady();
+    return;
+  }
 
   deactivateSessionTerminalView();
   stopHttpPolling();
@@ -1372,6 +1390,7 @@ function showLogin(message = "") {
     : (runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint
       ? elements.loginEndpoint : elements.loginPassword);
   target?.focus();
+  markFrontendWindowReady();
 }
 
 function showLoginPreservingView(message) {
@@ -1386,6 +1405,8 @@ function showApplication() {
   elements.app.classList.remove("hidden");
   elements.loginError.textContent = "";
   elements.addAgent.disabled = true;
+  synchronizeWindowTitle(null);
+  markFrontendWindowReady();
 }
 
 async function initializeAuthentication() {
@@ -2965,6 +2986,7 @@ function renderAll() {
   renderComposer();
   renderStatus();
   transcriptBottomFollower.layoutChanged();
+  synchronizeWindowTitle();
   if (state.view.kind === "terminal") void renderTerminal();
 }
 
@@ -3003,6 +3025,7 @@ function renderIncremental(request) {
     transcriptVirtualizer?.layoutChanged();
     transcriptBottomFollower.layoutChanged();
   }
+  synchronizeWindowTitle();
   if (state.view.kind === "terminal") void renderTerminal();
 }
 
