@@ -211,7 +211,7 @@ describe("ME Client native adapter", () => {
     expect(config).toContain('"transparent": true');
     expect(config).toContain('"shadow": true');
     expect(windowsConfig).toContain('"transparent": false');
-    expect(windowsConfig).toContain('"shadow": true');
+    expect(windowsConfig).toContain('"shadow": false');
   });
 
 
@@ -222,6 +222,7 @@ describe("ME Client native adapter", () => {
     const windowsConfig = readFileSync(join(import.meta.dir, "../me-client/src-tauri/tauri.windows.conf.json"), "utf8");
     const capability = readFileSync(join(import.meta.dir, "../me-client/src-tauri/capabilities/default.json"), "utf8");
     const shared = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const sharedCss = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     expect(runtime).toContain('setAttribute?.("data-tauri-drag-region", "")');
     expect(runtime).toContain('"#login-screen, .sidebar-heading, .view-tabs"');
     expect(runtime).toContain('if (/Mac|iPhone|iPad|iPod/i.test(identity)) return "macos"');
@@ -232,13 +233,16 @@ describe("ME Client native adapter", () => {
     expect(capability).toContain('"core:window:allow-start-dragging"');
     expect(css).toContain("--client-window-radius: 18px");
     expect(css).toContain("--client-window-radius: 8px");
-    expect(css).toContain("--client-window-outline: color-mix");
+    expect(css).toContain("--client-window-outline: color-mix(in srgb, var(--text) 10%, var(--bg))");
+    expect(css).not.toContain("var(--accent) 42%");
     expect(css).toContain("html.me-client body::after");
     expect(css).toContain("border: 1px solid var(--client-window-outline)");
     expect(css).toContain("html.me-client-platform-macos body,");
     expect(css).toContain("html.me-client-window-maximized body::after");
     expect(css).toContain(".client-window-drag-handle");
-    expect(css).toContain(".me-client-platform-macos .sidebar-scroll > .sidebar-section:first-child > .sidebar-heading");
+    expect(css).toContain(".me-client-platform-macos .sidebar {");
+    expect(css).toContain("padding-top: var(--client-chrome-height)");
+    expect(css).not.toContain(".sidebar-scroll > .sidebar-section:first-child > .sidebar-heading");
     expect(css).toContain(".me-client-platform-windows .view-tabs");
     expect(css).toContain("pointer-events: none;");
     expect(css).toContain("inset: 0;");
@@ -246,13 +250,21 @@ describe("ME Client native adapter", () => {
     expect(native).toContain('setCornerCurve: &*curve');
     expect(native).toContain("setHasShadow: floating");
     expect(native).toContain("invalidateShadow");
+    expect(native).toContain("DwmExtendFrameIntoClientArea");
+    expect(native).toContain("let frame_margin = i32::from(floating)");
+    expect(native).toContain("if frame_result < 0");
     expect(native).toContain("DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33");
     expect(native).toContain("DWMWA_BORDER_COLOR: u32 = 34");
     expect(native).toContain("DWMWA_COLOR_NONE: u32 = 0xffff_fffe");
     expect(native).not.toContain("CreateRoundRectRgn");
     expect(native).not.toContain("SetWindowRgn");
     expect(windowsConfig).toContain('"transparent": false');
-    expect(windowsConfig).toContain('"shadow": true');
+    expect(windowsConfig).toContain('"shadow": false');
+    expect(sharedCss).toContain("inset: 46px 0 0");
+    expect(sharedCss).toContain("min-height: 46px");
+    expect(sharedCss).toContain("height: 45px");
+    expect(sharedCss).toContain("calc(51px + env(safe-area-inset-top))");
+    expect(sharedCss).toContain("height: 50px");
     expect(shared).toContain("dynamicWindowTitle: false");
     expect(shared).toContain('`${sessionTitle} - ${runtimeCapabilities.pageTitle}`');
   });

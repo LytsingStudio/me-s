@@ -121,8 +121,18 @@ fn apply_platform_window_shape(
 }
 
 #[cfg(target_os = "windows")]
+#[repr(C)]
+struct DwmMargins {
+    cx_left_width: i32,
+    cx_right_width: i32,
+    cy_top_height: i32,
+    cy_bottom_height: i32,
+}
+
+#[cfg(target_os = "windows")]
 #[link(name = "dwmapi")]
 unsafe extern "system" {
+    fn DwmExtendFrameIntoClientArea(hwnd: *mut c_void, margins: *const DwmMargins) -> i32;
     fn DwmSetWindowAttribute(
         hwnd: *mut c_void,
         attribute: u32,
@@ -141,13 +151,29 @@ fn apply_platform_window_shape(
     const DWMWA_COLOR_NONE: u32 = 0xffff_fffe;
     const DWMWCP_DONOTROUND: u32 = 1;
     const DWMWCP_ROUND: u32 = 2;
-    let preference = if state.maximized || state.fullscreen {
-        DWMWCP_DONOTROUND
-    } else {
+    let floating = !state.maximized && !state.fullscreen;
+    let preference = if floating {
         DWMWCP_ROUND
+    } else {
+        DWMWCP_DONOTROUND
+    };
+    let frame_margin = i32::from(floating);
+    let margins = DwmMargins {
+        cx_left_width: frame_margin,
+        cx_right_width: frame_margin,
+        cy_top_height: frame_margin,
+        cy_bottom_height: frame_margin,
     };
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
     unsafe {
+        let frame_result = DwmExtendFrameIntoClientArea(hwnd.0, &margins);
+        if frame_result < 0 {
+            return Err(format!(
+                "DwmExtendFrameIntoClientArea failed: HRESULT 0x{:08x}",
+                frame_result as u32
+            ));
+        }
+        // Border color and corner preference are optional Windows 11 attributes.
         let _ = DwmSetWindowAttribute(
             hwnd.0,
             DWMWA_BORDER_COLOR,

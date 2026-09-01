@@ -14,7 +14,7 @@
         "visible": false,
         "decorations": false,
         "transparent": false,
-        "shadow": true,
+        "shadow": false,
         "devtools": false
       }
     ]
