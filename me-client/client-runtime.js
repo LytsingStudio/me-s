@@ -15,6 +15,10 @@
   let windowStateRequest = null;
   let windowStateFrame = null;
 
+  const initialDocumentRoot = document.documentElement;
+  initialDocumentRoot?.setAttribute?.("data-me-client-startup", "pending");
+  if (initialDocumentRoot?.style) initialDocumentRoot.style.visibility = "hidden";
+
   const NATIVE_BROWSER_SHORTCUT_KEYS = new Set([
     "r", "p", "s", "u", "f", "o", "l", "i", "j", "+", "=", "-", "0",
   ]);
@@ -392,30 +396,21 @@
     if (titleBarTitleElement || !document.body || typeof document.createElement !== "function") return;
     const platform = clientPlatform();
     document.documentElement?.classList?.add?.(`me-client-platform-${platform}`);
-    const titleBar = markDragRegion(document.createElement("header"));
+    const titleBar = document.createElement("div");
     titleBar.id = "client-titlebar";
     titleBar.className = "client-titlebar";
-    const title = markDragRegion(document.createElement("div"));
-    title.className = "client-titlebar-title";
-    const logo = markDragRegion(document.createElement("img"));
-    logo.className = "client-titlebar-logo";
-    logo.src = "/app-icon.svg";
-    logo.alt = "";
-    logo.draggable = false;
-    const text = markDragRegion(document.createElement("span"));
-    text.className = "client-titlebar-text";
+    const dragHandle = markDragRegion(document.createElement("div"));
+    dragHandle.className = "client-window-drag-handle";
+    dragHandle.setAttribute("aria-hidden", "true");
+    const text = document.createElement("span");
+    text.className = "client-titlebar-title";
     text.textContent = currentWindowTitle || "ME Client";
-    title.append(logo, text);
     titleBarTitleElement = text;
-    const controls = windowControls(platform);
-    if (platform === "macos") {
-      const spacer = markDragRegion(document.createElement("div"));
-      spacer.className = "client-titlebar-spacer";
-      titleBar.append(controls, title, spacer);
-    } else {
-      titleBar.append(title, controls);
-    }
+    titleBar.append(dragHandle, text, windowControls(platform));
     document.body.prepend(titleBar);
+    for (const element of document.querySelectorAll?.("#login-screen, .sidebar-heading, .view-tabs") || []) {
+      markDragRegion(element);
+    }
     globalThis.addEventListener?.("resize", scheduleWindowStateRefresh);
     void refreshWindowState();
   }
@@ -488,6 +483,8 @@
   function windowReady() {
     installClientTitleBar();
     if (!windowReadyPromise) {
+      initialDocumentRoot?.removeAttribute?.("data-me-client-startup");
+      if (initialDocumentRoot?.style) initialDocumentRoot.style.visibility = "";
       windowReadyPromise = waitForFirstPaint()
         .then(() => refreshWindowState())
         .then(() => invoke("client_window_action", { action: "show" }))

@@ -96,7 +96,13 @@ function loadClientRuntime() {
   const documentValue = {
     addEventListener(type, listener) { nativeDocumentListeners.set(type, listener); },
     baseURI: "http://tauri.localhost/",
-    documentElement: { classList: { add() {} } },
+    documentElement: {
+      attributes: {},
+      style: { visibility: "" },
+      classList: { add() {} },
+      setAttribute(name, value) { this.attributes[name] = String(value); },
+      removeAttribute(name) { delete this.attributes[name]; },
+    },
   };
   const factory = new Function(
     "globalThis", "document", "URL", "Headers", "Request", "Response", "Blob",
@@ -108,7 +114,7 @@ function loadClientRuntime() {
     DOMException, TextEncoder, atob, btoa,
   );
   return {
-    runtime, sandbox, calls, browserBeacons, edbId, cachedEvents,
+    runtime, sandbox, calls, browserBeacons, edbId, cachedEvents, documentValue,
     nativeWindowListeners, nativeDocumentListeners,
   };
 }
@@ -130,13 +136,18 @@ describe("ME Client native adapter", () => {
   });
 
 
-  test("reveals the hidden native window exactly once after bootstrap", async () => {
-    const { runtime, calls } = loadClientRuntime();
+  test("keeps both document and native window hidden until the one-shot readiness boundary", async () => {
+    const { runtime, calls, documentValue } = loadClientRuntime();
+    expect(documentValue.documentElement.style.visibility).toBe("hidden");
+    expect(documentValue.documentElement.attributes["data-me-client-startup"]).toBe("pending");
     await runtime.initialize();
+    expect(documentValue.documentElement.style.visibility).toBe("hidden");
     expect(calls.some((call) => call.command === "client_window_action")).toBe(false);
     const first = runtime.windowReady();
     const second = runtime.windowReady();
     expect(first).toBe(second);
+    expect(documentValue.documentElement.style.visibility).toBe("");
+    expect(documentValue.documentElement.attributes["data-me-client-startup"]).toBeUndefined();
     await Promise.all([first, second]);
     const actions = calls.filter((call) => call.command === "client_window_action");
     expect(actions.map((call) => call.payload.action)).toEqual(["state", "show"]);
@@ -195,29 +206,33 @@ describe("ME Client native adapter", () => {
   });
 
 
-  test("defines client-only platform chrome and outer window shaping", () => {
+  test("defines integrated client chrome and real platform window shaping", () => {
     const runtime = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
     const css = readFileSync(join(import.meta.dir, "../me-client/client.css"), "utf8");
     const native = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
     const capability = readFileSync(join(import.meta.dir, "../me-client/src-tauri/capabilities/default.json"), "utf8");
-    const build = readFileSync(join(import.meta.dir, "../me-client/build-frontend.js"), "utf8");
     const shared = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(runtime).toContain('setAttribute?.("data-tauri-drag-region", "")');
+    expect(runtime).toContain('"#login-screen, .sidebar-heading, .view-tabs"');
     expect(runtime).toContain('if (/Mac|iPhone|iPad|iPod/i.test(identity)) return "macos"');
     expect(runtime).toContain('if (/Win/i.test(identity)) return "windows"');
     expect(runtime).toContain('return "linux"');
     expect(runtime).toContain('createWindowControl("toggle_maximize"');
     expect(runtime).toContain('dynamicWindowTitle: true');
     expect(capability).toContain('"core:window:allow-start-dragging"');
-    expect(build).toContain('[resolve(clientRoot, "app-icon.svg"), "app-icon.svg"]');
-    expect(css).toContain(".me-client-platform-macos .client-window-controls");
-    expect(css).toContain(".me-client-platform-windows .client-window-control");
-    expect(css).toContain(".me-client-platform-linux .client-window-control");
-    expect(css).toContain("--client-window-radius: 12px");
+    expect(css).toContain("--client-window-radius: 18px");
+    expect(css).toContain(".client-window-drag-handle");
+    expect(css).toContain(".me-client-platform-macos .sidebar-scroll > .sidebar-section:first-child > .sidebar-heading");
+    expect(css).toContain(".me-client-platform-windows .view-tabs");
+    expect(css).toContain("pointer-events: none;");
+    expect(css).toContain("inset: 0;");
     expect(css).toContain("html.me-client-window-maximized body");
+    expect(css).not.toContain("backdrop-filter");
     expect(native).toContain('setCornerCurve: &*curve');
     expect(native).toContain("DWMWA_WINDOW_CORNER_PREFERENCE: u32 = 33");
-    expect(native).toContain("DWMWCP_DONOTROUND");
+    expect(native).toContain("CreateRoundRectRgn");
+    expect(native).toContain("SetWindowRgn");
+    expect(native).toContain("ptr::null_mut()");
     expect(shared).toContain("dynamicWindowTitle: false");
     expect(shared).toContain('`${sessionTitle} - ${runtimeCapabilities.pageTitle}`');
   });
@@ -328,6 +343,13 @@ describe("ME Client native adapter", () => {
     expect(nativeRuntime).toContain("sel!(applicationDockMenu:)");
     expect(nativeRuntime).toContain("install_macos_dock_menu()?");
     expect(newWindowAction).toContain("spawn_client_instance()");
+    const restoreStart = nativeRuntime.indexOf("fn restore_client_window");
+    const restoreEnd = nativeRuntime.indexOf("fn spawn_client_instance", restoreStart);
+    const restoreAction = nativeRuntime.slice(restoreStart, restoreEnd);
+    expect(restoreAction.indexOf("window_revealed")).toBeGreaterThan(-1);
+    expect(restoreAction.indexOf("window_revealed")).toBeLessThan(restoreAction.indexOf("app.show()?"));
+    expect(nativeRuntime).toContain("state.window_revealed.store(true, Ordering::Release)");
+    expect(nativeRuntime).toContain("window.hide()?");
     expect(nativeRuntime).toContain("app.show()?");
     expect(nativeRuntime).toContain("window.unminimize()?");
     expect(nativeRuntime).toContain("window.show()?");

@@ -1,13 +1,18 @@
 mod cache;
 mod gateway;
 
-use std::{collections::BTreeMap, env, io, path::PathBuf};
+use std::{
+    collections::BTreeMap,
+    env, io,
+    path::PathBuf,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 #[cfg(target_os = "macos")]
 use std::process::{Command, Stdio};
 
 #[cfg(target_os = "windows")]
-use std::ffi::c_void;
+use std::{ffi::c_void, ptr};
 
 #[cfg(target_os = "macos")]
 use objc2::{
@@ -37,6 +42,7 @@ const MAX_REMEMBERED_PASSWORD_BYTES: usize = 4096;
 struct AppState {
     cache: CacheDatabase,
     gateway: GatewayTransport,
+    window_revealed: AtomicBool,
 }
 
 #[derive(Serialize)]
@@ -95,7 +101,7 @@ fn apply_platform_window_shape(
     let corner_radius = if state.maximized || state.fullscreen {
         0.0
     } else {
-        12.0
+        18.0
     };
     unsafe {
         let content_view: *mut AnyObject = msg_send![ns_window, contentView];
@@ -128,6 +134,78 @@ unsafe extern "system" {
 }
 
 #[cfg(target_os = "windows")]
+#[link(name = "gdi32")]
+unsafe extern "system" {
+    fn CreateRoundRectRgn(
+        left: i32,
+        top: i32,
+        right: i32,
+        bottom: i32,
+        ellipse_width: i32,
+        ellipse_height: i32,
+    ) -> *mut c_void;
+    fn DeleteObject(object: *mut c_void) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+#[link(name = "user32")]
+unsafe extern "system" {
+    fn SetWindowRgn(hwnd: *mut c_void, region: *mut c_void, redraw: i32) -> i32;
+}
+
+#[cfg(target_os = "windows")]
+fn apply_windows_window_region(
+    window: &WebviewWindow,
+    state: &ClientWindowState,
+    hwnd: *mut c_void,
+) -> Result<(), String> {
+    if state.maximized || state.fullscreen {
+        let changed = unsafe { SetWindowRgn(hwnd, ptr::null_mut(), 1) };
+        if changed == 0 {
+            return Err(format!(
+                "unable to clear the Windows window region: {}",
+                io::Error::last_os_error()
+            ));
+        }
+        return Ok(());
+    }
+
+    let size = window.outer_size().map_err(|error| error.to_string())?;
+    let scale = window.scale_factor().map_err(|error| error.to_string())?;
+    let width = i32::try_from(size.width).map_err(|_| "Windows window width is too large")?;
+    let height = i32::try_from(size.height).map_err(|_| "Windows window height is too large")?;
+    let radius = (18.0 * scale).round().max(1.0) as i32;
+    let diameter = radius.saturating_mul(2);
+    let region = unsafe {
+        CreateRoundRectRgn(
+            0,
+            0,
+            width.saturating_add(1),
+            height.saturating_add(1),
+            diameter,
+            diameter,
+        )
+    };
+    if region.is_null() {
+        return Err(format!(
+            "unable to create the Windows rounded window region: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    let changed = unsafe { SetWindowRgn(hwnd, region, 1) };
+    if changed == 0 {
+        unsafe {
+            let _ = DeleteObject(region);
+        }
+        return Err(format!(
+            "unable to apply the Windows rounded window region: {}",
+            io::Error::last_os_error()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(target_os = "windows")]
 fn apply_platform_window_shape(
     window: &WebviewWindow,
     state: &ClientWindowState,
@@ -141,6 +219,7 @@ fn apply_platform_window_shape(
         DWMWCP_ROUND
     };
     let hwnd = window.hwnd().map_err(|error| error.to_string())?;
+    apply_windows_window_region(window, state, hwnd.0)?;
     unsafe {
         let _ = DwmSetWindowAttribute(
             hwnd.0,
@@ -181,8 +260,9 @@ fn client_window_action(
     action: String,
     value: Option<String>,
     window: WebviewWindow,
+    state: State<'_, AppState>,
 ) -> Result<ClientWindowState, String> {
-    match action.as_str() {
+    let result = match action.as_str() {
         "minimize" => window.minimize(),
         "toggle_maximize" => {
             if window.is_maximized().map_err(|error| error.to_string())? {
@@ -199,8 +279,11 @@ fn client_window_action(
         }
         "show" => window.show(),
         _ => return Err(format!("unknown client window action: {action}")),
+    };
+    result.map_err(|error| error.to_string())?;
+    if action == "show" {
+        state.window_revealed.store(true, Ordering::Release);
     }
-    .map_err(|error| error.to_string())?;
     client_window_state(&window)
 }
 
@@ -396,7 +479,11 @@ fn app_state(app: &tauri::App) -> Result<AppState, io::Error> {
     let cache = CacheDatabase::new(database_path(data_directory)).map_err(io::Error::other)?;
     let endpoint = cache.setting(ENDPOINT_SETTING).map_err(io::Error::other)?;
     let gateway = GatewayTransport::new(endpoint).map_err(io::Error::other)?;
-    Ok(AppState { cache, gateway })
+    Ok(AppState {
+        cache,
+        gateway,
+        window_revealed: AtomicBool::new(false),
+    })
 }
 
 fn database_path(data_directory: PathBuf) -> PathBuf {
@@ -493,6 +580,13 @@ fn install_macos_dock_menu() -> Result<(), io::Error> {
 
 #[cfg(target_os = "macos")]
 fn restore_client_window(app: &AppHandle) -> tauri::Result<()> {
+    if !app
+        .state::<AppState>()
+        .window_revealed
+        .load(Ordering::Acquire)
+    {
+        return Ok(());
+    }
     app.show()?;
     if let Some(window) = app.get_webview_window("main") {
         window.unminimize()?;
@@ -524,6 +618,7 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             install_macos_dock_menu()?;
             if let Some(window) = app.get_webview_window("main") {
+                window.hide()?;
                 client_window_state(&window).map_err(io::Error::other)?;
             }
             if cfg!(debug_assertions) {

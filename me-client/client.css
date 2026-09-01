@@ -45,8 +45,8 @@ html.me-client :is(
 }
 
 html.me-client {
-  --client-titlebar-height: 38px;
-  --client-window-radius: 12px;
+  --client-chrome-height: 38px;
+  --client-window-radius: 18px;
   background: transparent;
 }
 
@@ -63,78 +63,49 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client #login-screen,
- .me-client #app {
+.me-client #app {
   position: absolute;
-  inset: var(--client-titlebar-height) 0 0;
+  inset: 0;
   width: 100%;
-  height: calc(100dvh - var(--client-titlebar-height));
+  height: 100dvh;
 }
 
 .me-client .client-titlebar {
   position: absolute;
   z-index: 1000;
   inset: 0 0 auto;
-  display: grid;
-  height: var(--client-titlebar-height);
-  align-items: center;
-  overflow: hidden;
-  border-bottom: 1px solid var(--border);
-  background: color-mix(in srgb, var(--panel) 94%, transparent);
+  height: var(--client-chrome-height);
   color: var(--text);
-  backdrop-filter: blur(18px) saturate(130%);
+  pointer-events: none;
 }
 
-.me-client-platform-macos .client-titlebar {
-  grid-template-columns: 92px minmax(0, 1fr) 92px;
-}
-
-.me-client-platform-windows .client-titlebar,
- .me-client-platform-linux .client-titlebar {
-  grid-template-columns: minmax(0, 1fr) auto;
+.client-window-drag-handle {
+  position: absolute;
+  top: 0;
+  left: 50%;
+  width: min(180px, 20vw);
+  height: 10px;
+  transform: translateX(-50%);
+  pointer-events: auto;
 }
 
 .client-titlebar-title {
-  display: flex;
-  min-width: 0;
-  height: 100%;
-  align-items: center;
-  justify-content: center;
-  gap: 7px;
-  padding: 0 12px;
-}
-
-.me-client-platform-windows .client-titlebar-title,
- .me-client-platform-linux .client-titlebar-title {
-  justify-content: flex-start;
-}
-
-.client-titlebar-logo {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  border-radius: 5px;
-  pointer-events: none;
-  -webkit-user-drag: none;
-}
-
-.client-titlebar-text {
-  min-width: 0;
+  position: fixed;
+  width: 1px;
+  height: 1px;
   overflow: hidden;
-  color: color-mix(in srgb, var(--text) 88%, var(--muted));
-  font-size: 12px;
-  font-weight: 650;
-  line-height: 1;
-  text-overflow: ellipsis;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
   white-space: nowrap;
-  pointer-events: none;
 }
-
-.client-titlebar-spacer { height: 100%; }
 
 .client-window-controls {
+  position: absolute;
+  top: 0;
   display: flex;
-  height: 100%;
+  height: var(--client-chrome-height);
   align-items: center;
+  pointer-events: auto;
 }
 
 .client-window-control {
@@ -155,8 +126,14 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-macos .client-window-controls {
+  left: 0;
   gap: 8px;
   padding-left: 13px;
+}
+
+.me-client-platform-macos .sidebar-scroll > .sidebar-section:first-child > .sidebar-heading {
+  min-height: var(--client-chrome-height);
+  padding-left: 88px;
 }
 
 .me-client-platform-macos .client-window-control {
@@ -168,8 +145,8 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-macos .client-window-close { background: #ff5f57; }
- .me-client-platform-macos .client-window-minimize { background: #febc2e; }
- .me-client-platform-macos .client-window-maximize { background: #28c840; }
+.me-client-platform-macos .client-window-minimize { background: #febc2e; }
+.me-client-platform-macos .client-window-maximize { background: #28c840; }
 
 .me-client-platform-macos .client-window-control span::before {
   display: grid;
@@ -182,29 +159,39 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-macos .client-window-controls:hover .client-window-control span::before,
- .me-client-platform-macos .client-window-control:focus-visible span::before { opacity: 1; }
- .me-client-platform-macos .client-window-close span::before { content: "×"; }
- .me-client-platform-macos .client-window-minimize span::before { content: "−"; }
- .me-client-platform-macos .client-window-maximize span::before { content: "+"; font-size: 8px; }
+.me-client-platform-macos .client-window-control:focus-visible span::before { opacity: 1; }
+.me-client-platform-macos .client-window-close span::before { content: "×"; }
+.me-client-platform-macos .client-window-minimize span::before { content: "−"; }
+.me-client-platform-macos .client-window-maximize span::before { content: "+"; font-size: 8px; }
+
+.me-client-platform-windows .client-window-controls,
+.me-client-platform-linux .client-window-controls {
+  right: 0;
+}
+
+.me-client-platform-windows .view-tabs,
+.me-client-platform-linux .view-tabs {
+  padding-right: 150px;
+}
 
 .me-client-platform-windows .client-window-control,
- .me-client-platform-linux .client-window-control {
+.me-client-platform-linux .client-window-control {
   width: 46px;
-  height: var(--client-titlebar-height);
+  height: var(--client-chrome-height);
   transition: background 80ms linear, color 80ms linear;
 }
 
 .me-client-platform-windows .client-window-control:hover,
- .me-client-platform-linux .client-window-control:hover { background: color-mix(in srgb, var(--text) 11%, transparent); }
- .me-client-platform-windows .client-window-control:active,
- .me-client-platform-linux .client-window-control:active { background: color-mix(in srgb, var(--text) 18%, transparent); }
- .me-client-platform-windows .client-window-close:hover,
- .me-client-platform-linux .client-window-close:hover { background: #c42b1c; color: white; }
- .me-client-platform-windows .client-window-close:active,
- .me-client-platform-linux .client-window-close:active { background: #a82216; color: white; }
+.me-client-platform-linux .client-window-control:hover { background: color-mix(in srgb, var(--text) 11%, transparent); }
+.me-client-platform-windows .client-window-control:active,
+.me-client-platform-linux .client-window-control:active { background: color-mix(in srgb, var(--text) 18%, transparent); }
+.me-client-platform-windows .client-window-close:hover,
+.me-client-platform-linux .client-window-close:hover { background: #c42b1c; color: white; }
+.me-client-platform-windows .client-window-close:active,
+.me-client-platform-linux .client-window-close:active { background: #a82216; color: white; }
 
 .me-client-platform-windows .client-window-control span,
- .me-client-platform-linux .client-window-control span {
+.me-client-platform-linux .client-window-control span {
   position: relative;
   display: block;
   width: 11px;
@@ -212,7 +199,7 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-windows .client-window-minimize span::before,
- .me-client-platform-linux .client-window-minimize span::before {
+.me-client-platform-linux .client-window-minimize span::before {
   position: absolute;
   inset: 5px 0 auto;
   height: 1px;
@@ -221,7 +208,7 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-windows .client-window-maximize span::before,
- .me-client-platform-linux .client-window-maximize span::before {
+.me-client-platform-linux .client-window-maximize span::before {
   position: absolute;
   inset: 1px;
   border: 1px solid currentColor;
@@ -229,15 +216,15 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-windows .client-window-maximize.restore span::before,
- .me-client-platform-linux .client-window-maximize.restore span::before {
+.me-client-platform-linux .client-window-maximize.restore span::before {
   inset: 3px 0 0 3px;
   box-shadow: -3px -3px 0 -1px var(--panel), -3px -3px 0 0 currentColor;
 }
 
 .me-client-platform-windows .client-window-close span::before,
- .me-client-platform-windows .client-window-close span::after,
- .me-client-platform-linux .client-window-close span::before,
- .me-client-platform-linux .client-window-close span::after {
+.me-client-platform-windows .client-window-close span::after,
+.me-client-platform-linux .client-window-close span::before,
+.me-client-platform-linux .client-window-close span::after {
   position: absolute;
   top: 5px;
   left: 0;
@@ -249,4 +236,4 @@ html.me-client-window-fullscreen body {
 }
 
 .me-client-platform-windows .client-window-close span::after,
- .me-client-platform-linux .client-window-close span::after { transform: rotate(-45deg); }
+.me-client-platform-linux .client-window-close span::after { transform: rotate(-45deg); }
