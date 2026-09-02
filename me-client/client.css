@@ -64,6 +64,25 @@ html.me-client-platform-macos body {
   border-radius: 0;
 }
 
+html.me-client-platform-windows .connection-overlay,
+html.me-client-platform-windows .modal-backdrop,
+html.me-client-platform-windows .drawer-backdrop,
+html.me-client-platform-windows .mobile-sidebar-backdrop {
+  overflow: hidden;
+  border-radius: var(--client-window-radius);
+}
+
+html.me-client-platform-windows .session-sync-overlay {
+  overflow: hidden;
+  border-radius: 0 0 var(--client-window-radius) 0;
+}
+
+@media (orientation: portrait) {
+  html.me-client-platform-windows .session-sync-overlay {
+    border-bottom-left-radius: var(--client-window-radius);
+  }
+}
+
 html.me-client body::after {
   position: fixed;
   z-index: 2147483647;

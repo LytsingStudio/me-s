@@ -266,6 +266,33 @@ describe("ME Client native adapter", () => {
     expect(css).toContain("pointer-events: none;");
     expect(css).toContain("inset: 0;");
     expect(css).not.toContain("backdrop-filter");
+    expect(css).toContain(
+      "html.me-client-platform-windows .connection-overlay,\n"
+      + "html.me-client-platform-windows .modal-backdrop,\n"
+      + "html.me-client-platform-windows .drawer-backdrop,\n"
+      + "html.me-client-platform-windows .mobile-sidebar-backdrop {\n"
+      + "  overflow: hidden;\n"
+      + "  border-radius: var(--client-window-radius);\n"
+      + "}",
+    );
+    expect(css).toContain(
+      "html.me-client-platform-windows .session-sync-overlay {\n"
+      + "  overflow: hidden;\n"
+      + "  border-radius: 0 0 var(--client-window-radius) 0;\n"
+      + "}",
+    );
+    expect(css).toContain(
+      "@media (orientation: portrait) {\n"
+      + "  html.me-client-platform-windows .session-sync-overlay {\n"
+      + "    border-bottom-left-radius: var(--client-window-radius);\n"
+      + "  }\n"
+      + "}",
+    );
+    expect(css).not.toContain(".me-client-platform-windows .user-message-menu");
+    expect(css).not.toContain(".me-client-platform-windows .agent-menu");
+    expect(css).not.toContain(".me-client-platform-windows .toast-region");
+    expect(sharedCss).not.toContain("--client-window-radius");
+    expect(sharedCss).not.toContain("me-client-platform-windows");
     expect(native).toContain('setCornerRadius: corner_radius');
     expect(native).toContain("let corner_radius = if floating { 18.0 } else { 0.0 }");
     expect(native).toContain("setHasShadow: floating");

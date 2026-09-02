@@ -90,12 +90,12 @@ fn initialize_global_at(
     if config_file.exists() {
         write!(
             output,
-            "全局配置已存在，是否完全重置 me？这将删除所有全局模型配置和凭据。[y/N] "
+            "全局配置已存在。重新初始化会永久删除全部全局模型配置和凭据。请输入 YES 确认完全重置："
         )?;
         output.flush()?;
         let mut answer = String::new();
         input.read_line(&mut answer)?;
-        if !answer.trim().eq_ignore_ascii_case("y") {
+        if answer.trim() != "YES" {
             writeln!(output, "未重置全局配置。")?;
             return Ok(InitResult {
                 config_file,
@@ -532,15 +532,33 @@ mod tests {
         write_private_atomic(&auth, br#"{"tokens":{"access_token":"secret"}}"#).unwrap();
         write_private_atomic(&credential, b"comet-secret").unwrap();
 
-        let declined =
-            initialize_global_at(&home, &mut Cursor::new(b"n\n".to_vec()), &mut Vec::new())
-                .unwrap();
-        assert!(declined.cancelled);
-        assert!(auth.exists());
-        assert!(credential.exists());
-
-        let reset = initialize_global_at(&home, &mut Cursor::new(b"y\n".to_vec()), &mut Vec::new())
+        for answer in [
+            b"\n".as_slice(),
+            b"y\n".as_slice(),
+            b"yes\n".as_slice(),
+            b"Yes\n".as_slice(),
+            b"NO\n".as_slice(),
+        ] {
+            let mut declined_output = Vec::new();
+            let declined = initialize_global_at(
+                &home,
+                &mut Cursor::new(answer.to_vec()),
+                &mut declined_output,
+            )
             .unwrap();
+            assert!(declined.cancelled);
+            assert!(auth.exists());
+            assert!(credential.exists());
+            assert!(
+                String::from_utf8(declined_output)
+                    .unwrap()
+                    .contains("请输入 YES 确认完全重置")
+            );
+        }
+
+        let reset =
+            initialize_global_at(&home, &mut Cursor::new(b"YES\n".to_vec()), &mut Vec::new())
+                .unwrap();
         assert!(reset.reset);
         assert!(!reset.cancelled);
         assert!(!auth.exists());
