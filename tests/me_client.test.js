@@ -595,6 +595,10 @@ describe("ME Client native adapter", () => {
     expect(build).toContain("scripts/build-manifest.cjs create");
     expect(build).toContain("scripts/verify-release-artifacts.sh");
     expect(build).toContain("dependencies-$HOST_DEPENDENCY_FINGERPRINT.ready");
+    expect(build).toContain("normalized_cargo_lock");
+    expect(build).toContain("normalized_package_json");
+    expect(build).toContain("<product-version>");
+    expect(build).not.toContain("cat Cargo.lock me-client/src-tauri/Cargo.lock me-client/package.json");
     expect(build).toContain("BUILD_OFFLINE=1");
     expect(build).toContain("--offline|--online");
     expect(build).toContain('export ME_BUILD_OFFLINE="$BUILD_OFFLINE"');

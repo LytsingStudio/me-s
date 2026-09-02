@@ -129,9 +129,35 @@ node scripts/product-version.cjs --print >/dev/null
 sh -n install.sh
 remove_transient_linux_containers
 
+normalized_cargo_lock() {
+    local package_name=$1
+    local path=$2
+    awk -v package_name="$package_name" '
+        $0 == "name = \"" package_name "\"" { product_package = 1 }
+        product_package && /^version = / {
+            print "version = \"<product-version>\""
+            product_package = 0
+            next
+        }
+        { print }
+    ' "$path"
+}
+
+normalized_package_json() {
+    awk '
+        /^[[:space:]]*"version"[[:space:]]*:/ {
+            sub(/"version"[[:space:]]*:[[:space:]]*"[^"]*"/, "\"version\": \"<product-version>\"")
+        }
+        { print }
+    ' "$1"
+}
+
 HOST_DEPENDENCY_FINGERPRINT="$(
-    cat Cargo.lock me-client/src-tauri/Cargo.lock me-client/package.json |
-        shasum -a 256 | awk '{print $1}'
+    {
+        normalized_cargo_lock me-s Cargo.lock
+        normalized_cargo_lock me-client me-client/src-tauri/Cargo.lock
+        normalized_package_json me-client/package.json
+    } | shasum -a 256 | awk '{print $1}'
 )"
 HOST_DEPENDENCY_MARKER="$CACHE_DIR/host/dependencies-$HOST_DEPENDENCY_FINGERPRINT.ready"
 HOST_OFFLINE=$BUILD_OFFLINE
