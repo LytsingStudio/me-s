@@ -33,6 +33,7 @@ const assets = [
   [resolve(clientRoot, "client-runtime.js"), "runtime.js"],
   [resolve(clientRoot, "client.css"), "client.css"],
   [resolve(clientRoot, "app-icon.svg"), "app-icon.svg"],
+  [resolve(clientRoot, "window-shadow.html"), "window-shadow.html"],
 ];
 for (const [source, destination] of assets) {
   await copyFile(source, resolve(outputRoot, destination));

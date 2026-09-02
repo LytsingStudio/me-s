@@ -1,6 +1,6 @@
 [package]
 name = "me-client"
-version = "0.1.77"
+version = "0.1.78"
 description = "Native client for ME Gateway"
 authors = ["Lytsing Studio"]
 license = "MIT"
@@ -30,3 +30,6 @@ tokio = { version = "1.53", features = ["fs", "io-util", "rt-multi-thread", "syn
 objc2 = "0.6.4"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSMenu", "NSMenuItem", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
+
+[patch.crates-io]
+tauri-runtime-wry = { path = "../../vendor/tauri-runtime-wry" }

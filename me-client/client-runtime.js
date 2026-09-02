@@ -414,6 +414,15 @@
         sidebar.prepend(sidebarDragRegion);
       }
     }
+    if (platform === "windows") {
+      const workspaceHeading = document.querySelector?.(".workspace-heading");
+      if (workspaceHeading) {
+        markDragRegion(workspaceHeading);
+        const workspaceTitle = Array.from(workspaceHeading.children || [])
+          .find((element) => !element.classList?.contains?.("heading-actions"));
+        markDragRegion(workspaceTitle);
+      }
+    }
     for (const element of document.querySelectorAll?.("#login-screen, .view-tabs") || []) {
       markDragRegion(element);
     }

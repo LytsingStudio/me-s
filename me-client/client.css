@@ -51,10 +51,6 @@ html.me-client {
   background: transparent;
 }
 
-html.me-client-platform-windows {
-  --client-window-radius: 8px;
-  background: transparent;
-}
 
 html.me-client body {
   overflow: hidden;
