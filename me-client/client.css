@@ -48,14 +48,16 @@ html.me-client {
   --client-chrome-height: 38px;
   --client-window-radius: 18px;
   --client-window-outline: color-mix(in srgb, var(--text) 10%, var(--bg));
-  background: transparent;
 }
 
+html.me-client,
+html.me-client body {
+  background: transparent;
+}
 
 html.me-client body {
   overflow: hidden;
   border-radius: var(--client-window-radius);
-  background: var(--bg);
 }
 
 html.me-client-platform-macos body {
@@ -89,6 +91,10 @@ html.me-client-window-fullscreen body::after {
   inset: 0;
   width: 100%;
   height: 100dvh;
+}
+
+.me-client #app {
+  background: var(--bg);
 }
 
 .me-client .client-titlebar {

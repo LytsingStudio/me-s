@@ -176,6 +176,8 @@ const HTTRANSPARENT: isize = -1;
 #[cfg(target_os = "windows")]
 const GWL_EXSTYLE: i32 = -20;
 #[cfg(target_os = "windows")]
+const WS_EX_LAYERED: isize = 0x0008_0000;
+#[cfg(target_os = "windows")]
 const WS_EX_TRANSPARENT: isize = 0x0000_0020;
 #[cfg(target_os = "windows")]
 const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
@@ -353,7 +355,7 @@ fn verify_windows_no_redirection(hwnd: WindowsHwnd, name: &str) -> Result<(), St
 
 #[cfg(target_os = "windows")]
 fn configure_windows_shadow(hwnd: WindowsHwnd) -> Result<(), String> {
-    let required = WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT;
+    let required = WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT;
     let style = unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) };
     unsafe {
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, style | required);

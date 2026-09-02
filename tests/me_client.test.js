@@ -248,6 +248,11 @@ describe("ME Client native adapter", () => {
     expect(css.match(/--client-window-radius: 18px/g)).toHaveLength(1);
     expect(css).not.toContain("--client-window-radius: 8px");
     expect(css).not.toContain("html.me-client-platform-windows {");
+    expect(css).toContain("html.me-client,\nhtml.me-client body {\n  background: transparent;\n}");
+    expect(css).toContain(".me-client #app {\n  background: var(--bg);\n}");
+    expect(css).not.toMatch(/\.me-client\s+#login-screen(?:\s*,[^{}]*)?\s*\{[^}]*background\s*:/s);
+    expect(sharedCss).toContain(".login-screen {");
+    expect(sharedCss).toContain("radial-gradient(");
     expect(css).toContain("--client-window-outline: color-mix(in srgb, var(--text) 10%, var(--bg))");
     expect(css).toContain("html.me-client body::after");
     expect(css).toContain("border: 1px solid var(--client-window-outline)");
@@ -278,12 +283,15 @@ describe("ME Client native adapter", () => {
     expect(native).toContain("WS_EX_NOREDIRECTIONBITMAP");
     expect(native).toContain("verify_windows_no_redirection(hwnd, \"main window\")");
     expect(native).toContain("WINDOWS_SHADOW_LABEL");
-    expect(native).toContain("WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT");
+    expect(native).toContain("WS_EX_LAYERED | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_TRANSPARENT");
     expect(native).toContain("HTTRANSPARENT");
     expect(native).toContain("SWP_NOACTIVATE | SWP_SHOWWINDOW");
     expect(native).toContain("ShowWindow(shadow_hwnd, SW_HIDE)");
     expect(native).toContain("!state.maximized");
     expect(native).toContain("!state.fullscreen");
+    expect(native).not.toContain("SetLayeredWindowAttributes");
+    expect(native).not.toContain("UpdateLayeredWindow");
+    expect(native).not.toContain("LWA_COLORKEY");
     expect(native).not.toContain("DwmExtendFrameIntoClientArea");
     expect(native).not.toContain("DwmSetWindowAttribute");
     expect(native).not.toContain("CreateRoundRectRgn");
