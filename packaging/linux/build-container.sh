@@ -120,9 +120,26 @@ COPYFILE_DISABLE=1 tar -cf "$WORK/source.tar" \
     .
 mkdir -p "$WORK/output"
 
+normalized_cargo_lock() {
+    local package_name=$1
+    local path=$2
+    awk -v package_name="$package_name" '
+        $0 == "name = \"" package_name "\"" { product_package = 1 }
+        product_package && /^version = / {
+            print "version = \"<product-version>\""
+            product_package = 0
+            next
+        }
+        { print }
+    ' "$path"
+}
+
 DEPENDENCY_FINGERPRINT="$(
-    cat "$ROOT_DIR/Cargo.lock" "$ROOT_DIR/me-client/src-tauri/Cargo.lock" "$ROOT_DIR/build.rs" |
-        shasum -a 256 | awk '{print $1}'
+    {
+        normalized_cargo_lock me-s "$ROOT_DIR/Cargo.lock"
+        normalized_cargo_lock me-client "$ROOT_DIR/me-client/src-tauri/Cargo.lock"
+        cat "$ROOT_DIR/build.rs"
+    } | shasum -a 256 | awk '{print $1}'
 )"
 DEPENDENCY_MARKER="$CACHE_DIR/linux/$TARGETARCH/dependencies-$DEPENDENCY_FINGERPRINT.ready"
 OFFLINE=${ME_BUILD_OFFLINE:-1}

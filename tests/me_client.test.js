@@ -612,6 +612,8 @@ describe("ME Client native adapter", () => {
     expect(linuxBuilder).toContain("docker image inspect");
     expect(linuxBuilder).toContain("docker commit");
     expect(linuxBuilder).toContain("docker volume create");
+    expect(linuxBuilder).toContain("normalized_cargo_lock");
+    expect(linuxBuilder).toContain("<product-version>");
     expect(linuxBuilder).toContain("--network=none");
     expect(linuxBuilder).toContain("OFFLINE=${ME_BUILD_OFFLINE:-1}");
     expect(linuxBuilder).toContain("if [[ $OFFLINE == 1 ]]");
