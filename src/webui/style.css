@@ -81,6 +81,27 @@ button { color: inherit; }
   box-shadow: 0 28px 90px rgb(0 0 0 / 38%), inset 0 1px rgb(255 255 255 / 5%);
   backdrop-filter: blur(20px) saturate(125%);
 }
+.login-settings {
+  position: absolute;
+  z-index: 2;
+  top: 18px;
+  right: 18px;
+  display: grid;
+  width: 36px;
+  height: 36px;
+  place-items: center;
+  padding: 0;
+  border: 1px solid color-mix(in srgb, var(--border-bright) 76%, transparent);
+  border-radius: 10px;
+  outline: 0;
+  background: color-mix(in srgb, var(--panel-2) 82%, transparent);
+  color: var(--muted);
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, color .16s ease, transform .16s ease;
+}
+.login-settings:hover, .login-settings:focus-visible { border-color: var(--accent); background: var(--panel-2); color: var(--text); transform: translateY(-1px); }
+.login-settings:focus-visible { box-shadow: 0 0 0 3px var(--accent-ring); }
+.login-settings svg { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 1.65; stroke-linecap: round; stroke-linejoin: round; }
 .login-header { margin-bottom: 24px; }
 .login-brand { display: flex; align-items: center; gap: 12px; margin-bottom: 28px; }
 .login-brand strong { display: block; letter-spacing: .04em; }
@@ -883,6 +904,23 @@ button { color: inherit; }
 .settings-default-model { display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(220px, 42%); align-items: center; gap: 16px !important; padding: 12px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
 .settings-default-copy { min-width: 0; }
 .settings-default-copy strong { display: block; color: var(--text); font-size: 12px; }
+.settings-preference-list { display: grid; border-top: 1px solid var(--border); }
+.settings-preference-row { display: grid !important; min-height: 64px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px !important; padding: 11px 0; border-bottom: 1px solid var(--border); color: inherit !important; cursor: pointer; }
+.settings-preference-row.busy { opacity: .72; }
+.settings-preference-copy { min-width: 0; }
+.settings-preference-copy strong, .settings-preference-copy small { display: block; }
+.settings-preference-copy strong { color: var(--text); font-size: 12px; }
+.settings-preference-copy small { margin-top: 4px; color: var(--dim); font-size: 11px; line-height: 1.45; }
+.settings-preference-select { cursor: default; }
+.settings-preference-row > select { width: 136px; }
+.settings-switch { position: relative; display: inline-flex; flex: 0 0 auto; }
+.settings-editor .settings-switch input { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
+.settings-switch-track { position: relative; display: block; width: 42px; height: 24px; border: 1px solid var(--border-bright); border-radius: 999px; background: var(--panel-3); transition: border-color .16s ease, background .16s ease, opacity .16s ease; }
+.settings-switch-track::after { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); box-shadow: 0 1px 3px rgb(0 0 0 / 28%); content: ""; transition: transform .16s ease, background .16s ease; }
+.settings-switch input:checked + .settings-switch-track { border-color: var(--accent); background: var(--accent); }
+.settings-switch input:checked + .settings-switch-track::after { background: var(--bg); transform: translateX(18px); }
+.settings-switch input:focus-visible + .settings-switch-track { box-shadow: 0 0 0 3px var(--accent-ring); }
+.settings-switch input:disabled + .settings-switch-track { opacity: .58; cursor: wait; }
 .settings-subsection-header { display: flex; align-items: end; justify-content: space-between; gap: 14px; padding-top: 4px; }
 .settings-subsection-header h4 { margin: 0; color: var(--text); font-size: 13px; }
 .settings-subsection-header p { margin: 4px 0 0; color: var(--dim); font-size: 11px; line-height: 1.45; }
@@ -924,6 +962,8 @@ button { color: inherit; }
   .settings-editor .settings-section-header { padding-bottom: 10px; }
   .settings-section-content { gap: 12px; }
   .settings-default-model { grid-template-columns: 1fr; gap: 9px !important; }
+  .settings-preference-row { gap: 12px !important; }
+  .settings-preference-row > select { width: 118px; }
   .settings-subsection-header { align-items: center; }
   .settings-model summary { min-height: 50px; padding: 9px 10px; }
   .settings-model-provider { max-width: 110px; }

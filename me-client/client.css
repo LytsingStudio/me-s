@@ -50,6 +50,10 @@ html.me-client {
   --client-window-outline: color-mix(in srgb, var(--text) 10%, var(--bg));
 }
 
+html.me-client[data-window-border-style="theme"] {
+  --client-window-outline: var(--accent);
+}
+
 html.me-client,
 html.me-client body {
   background: transparent;
@@ -62,6 +66,46 @@ html.me-client body {
 
 html.me-client-platform-macos body {
   border-radius: 0;
+}
+
+html.me-client-platform-ios {
+  --client-ios-bottom-inset: max(0px, calc(env(safe-area-inset-bottom) - 6px));
+  --client-window-radius: 0px;
+}
+
+html.me-client-platform-ios body {
+  border-radius: 0;
+}
+
+html.me-client-platform-ios,
+html.me-client-platform-ios body {
+  height: calc(100% + env(safe-area-inset-top) + env(safe-area-inset-bottom));
+  touch-action: pan-x pan-y;
+}
+
+html.me-client-platform-ios :is(
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="hidden"]),
+  select,
+  textarea,
+  [contenteditable="true"],
+  [contenteditable="plaintext-only"]
+) {
+  font-size: 16px;
+}
+
+html.me-client-platform-ios body::after {
+  display: none;
+}
+
+@media (max-width: 700px), (max-height: 520px) {
+  html.me-client-platform-ios .statusbar {
+    min-height: calc(38px + var(--client-ios-bottom-inset));
+    padding-bottom: var(--client-ios-bottom-inset);
+  }
+
+  html.me-client-platform-ios .status-selector {
+    min-height: 36px;
+  }
 }
 
 html.me-client-platform-windows .connection-overlay,

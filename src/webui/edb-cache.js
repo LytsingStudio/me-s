@@ -224,8 +224,35 @@
       return this._loadEntries(String(scope || ""), true);
     }
 
+    loadScopeMetadata(scope) {
+      return this._loadEntries(String(scope || ""), false);
+    }
+
+    async loadSession(key) {
+      if (!this.available || !key) return null;
+      await this.flush();
+      try {
+        const database = await this._database();
+        const transaction = database.transaction(SESSION_STORE, "readonly");
+        const metadata = await requestResult(transaction.objectStore(SESSION_STORE).get(String(key)));
+        if (!metadata || this.suppressed.has(metadata.key)) return null;
+        const records = await this._sessionEvents(database, metadata.key);
+        const valid = records.length === metadata.eventCount
+          && records.every((record, index) => record.order === index)
+          && (metadata.eventCount === 0 || typeof metadata.lastEventHash === "string");
+        if (!valid) {
+          await this.discardSession(metadata.key);
+          return null;
+        }
+        return { ...metadata, events: records.map((record) => record.event) };
+      } catch (error) {
+        console.warn("Unable to read EDB cache session", error);
+        return null;
+      }
+    }
+
     listSessions() {
-      return this._loadEntries(null, true);
+      return this._loadEntries(null, false);
     }
 
     saveSession(session) {
@@ -233,32 +260,68 @@
       const scope = String(session.scope || "");
       const agentId = String(session.agentId || "");
       const key = sessionKey(scope, agentId);
-      const events = Array.isArray(session.events) ? session.events : [];
       if (!scope || !agentId || this.suppressed.has(key)) return;
-      if (events.length > 0 && typeof session.lastEventHash !== "string") return;
-      this.pendingWrites.set(key, {
-        key,
-        scope,
-        agentId,
+      const common = {
+        key, scope, agentId,
         mutationRevision: Math.max(0, Number(session.mutationRevision) || 0),
-        lastEventHash: events.length ? session.lastEventHash : null,
-        events,
-        replace: Boolean(session.replace),
-      });
-      if (!this.writeDrain) {
-        this.writeDrain = Promise.resolve().then(() => this._drainWrites());
+        lastEventHash: session.lastEventHash ?? null,
+        gatewayLabel: String(session.gatewayLabel || ""),
+        workspaceLabel: String(session.workspaceLabel || ""),
+        sessionLabel: String(session.sessionLabel || ""),
+      };
+      if (session.deltaOnly && session.delta) {
+        const delta = session.delta;
+        const events = [...(delta.events || [])];
+        const startOrder = Math.max(0, Number(delta.startOrder) || 0);
+        const eventCount = Math.max(0, Number(delta.eventCount) || 0);
+        if (startOrder + events.length > eventCount) return;
+        this._queueWrite({
+          ...common, kind: "delta", events, startOrder, eventCount,
+          expectedEventCount: Math.max(0, Number(delta.expectedEventCount) || 0),
+          expectedMutationRevision: Math.max(0, Number(delta.expectedMutationRevision) || 0),
+          reset: Boolean(delta.reset),
+        });
+      } else {
+        const events = Array.isArray(session.events) ? session.events : [];
+        if (events.length > 0 && typeof session.lastEventHash !== "string") return;
+        this.pendingWrites.set(key, [{
+          ...common, kind: "full", events, replace: Boolean(session.replace),
+        }]);
       }
+      if (!this.writeDrain) this.writeDrain = Promise.resolve().then(() => this._drainWrites());
+    }
+
+    _queueWrite(write) {
+      const queue = this.pendingWrites.get(write.key) || [];
+      const previous = queue[queue.length - 1];
+      if (previous?.kind === "delta"
+          && previous.mutationRevision === write.mutationRevision
+          && previous.startOrder + previous.events.length === write.startOrder
+          && previous.startOrder + previous.events.length === write.expectedEventCount
+          && !write.reset) {
+        previous.events.push(...write.events);
+        previous.eventCount = write.eventCount;
+        previous.lastEventHash = write.lastEventHash;
+        previous.gatewayLabel = write.gatewayLabel;
+        previous.workspaceLabel = write.workspaceLabel;
+        previous.sessionLabel = write.sessionLabel;
+      } else {
+        queue.push(write);
+      }
+      this.pendingWrites.set(write.key, queue);
     }
 
     async _drainWrites() {
       try {
         while (this.pendingWrites.size) {
-          const writes = [...this.pendingWrites.values()];
+          const queues = [...this.pendingWrites.values()];
           this.pendingWrites.clear();
-          for (const write of writes) {
-            if (this.suppressed.has(write.key)) continue;
-            try { await this._saveNow(write); }
-            catch (error) { console.warn("Unable to persist EDB cache", error); }
+          for (const queue of queues) {
+            for (const write of queue) {
+              if (this.suppressed.has(write.key)) continue;
+              try { await this._saveNow(write); }
+              catch (error) { console.warn("Unable to persist EDB cache", error); }
+            }
           }
         }
       } finally {
@@ -272,6 +335,11 @@
     }
 
     async _saveNow(write) {
+      if (write.kind === "delta") return this._saveDelta(write);
+      return this._saveFull(write);
+    }
+
+    async _saveFull(write) {
       if (!this.available || this.suppressed.has(write.key)) return;
       const database = await this._database();
       const transaction = database.transaction([SESSION_STORE, EVENT_STORE], "readwrite");
@@ -308,14 +376,56 @@
         eventsStore.put({ sessionKey: write.key, order, event, bytes });
       }
       sessions.put({
-        key: write.key,
-        scope: write.scope,
-        agentId: write.agentId,
+        key: write.key, scope: write.scope, agentId: write.agentId,
+        mutationRevision: write.mutationRevision, lastEventHash: write.lastEventHash,
+        eventCount: write.events.length, byteSize, updatedAt: Date.now(),
+        gatewayLabel: write.gatewayLabel, workspaceLabel: write.workspaceLabel,
+        sessionLabel: write.sessionLabel,
+      });
+      await done;
+    }
+
+    async _saveDelta(write) {
+      if (!this.available || this.suppressed.has(write.key)) return;
+      const endOrder = write.startOrder + write.events.length;
+      const database = await this._database();
+      const transaction = database.transaction([SESSION_STORE, EVENT_STORE], "readwrite");
+      const done = transactionDone(transaction);
+      const sessions = transaction.objectStore(SESSION_STORE);
+      const eventsStore = transaction.objectStore(EVENT_STORE);
+      const existing = await requestResult(sessions.get(write.key));
+      const existingCount = Math.max(0, Number(existing?.eventCount) || 0);
+      const existingMutation = Math.max(0, Number(existing?.mutationRevision) || 0);
+      if (this.suppressed.has(write.key)
+          || (!write.reset && existingMutation === write.mutationRevision && existingCount >= endOrder)
+          || existingMutation > write.mutationRevision) {
+        transaction.abort();
+        await done.catch(() => {});
+        return;
+      }
+      const expected = existingCount === write.expectedEventCount
+        && (!existing || existingMutation === write.expectedMutationRevision);
+      if (!expected || (write.reset ? write.startOrder !== 0
+        : write.startOrder !== existingCount || (existing && existingMutation !== write.mutationRevision))) {
+        transaction.abort();
+        await done.catch(() => {});
+        throw new Error("EDB cache rejected a stale or discontinuous event batch");
+      }
+      if (write.reset) eventsStore.delete(eventRange(write.key, this.keyRange));
+      let byteSize = write.reset ? 0 : Math.max(0, Number(existing?.byteSize) || 0);
+      for (let index = 0; index < write.events.length; index += 1) {
+        const event = write.events[index];
+        const bytes = eventByteSize(event, this.Encoder);
+        byteSize += bytes;
+        eventsStore.put({ sessionKey: write.key, order: write.startOrder + index, event, bytes });
+      }
+      sessions.put({
+        key: write.key, scope: write.scope, agentId: write.agentId,
         mutationRevision: write.mutationRevision,
-        lastEventHash: write.lastEventHash,
-        eventCount: write.events.length,
-        byteSize,
-        updatedAt: Date.now(),
+        lastEventHash: endOrder ? write.lastEventHash : null,
+        eventCount: endOrder, byteSize, updatedAt: Date.now(),
+        gatewayLabel: write.gatewayLabel, workspaceLabel: write.workspaceLabel,
+        sessionLabel: write.sessionLabel,
       });
       await done;
     }
@@ -374,10 +484,10 @@
         const identity = documentValue.createElement("div");
         identity.className = "edb-cache-identity";
         const session = documentValue.createElement("strong");
-        session.textContent = resolved.title
+        session.textContent = resolved.title || entry.sessionLabel
           || cachedSessionTitle(entry.events, entry.agentId === "main" ? "主会话" : entry.agentId);
         const workspace = documentValue.createElement("span");
-        workspace.textContent = resolved.workspace || workspaceName(entry.scope);
+        workspace.textContent = resolved.workspace || entry.workspaceLabel || workspaceName(entry.scope);
         identity.append(session, workspace);
         const meta = documentValue.createElement("div");
         meta.className = "edb-cache-meta";

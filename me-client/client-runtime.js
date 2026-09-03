@@ -15,9 +15,16 @@
   let windowStateRequest = null;
   let windowStateFrame = null;
 
+  let clientChromeInstalled = false;
   const initialDocumentRoot = document.documentElement;
   initialDocumentRoot?.setAttribute?.("data-me-client-startup", "pending");
   if (initialDocumentRoot?.style) initialDocumentRoot.style.visibility = "hidden";
+
+  if (clientPlatform() === "ios") {
+    const viewport = document.querySelector?.('meta[name="viewport"]');
+    const content = String(viewport?.getAttribute?.("content") || "");
+    viewport?.setAttribute?.("content", `${content},maximum-scale=1,user-scalable=no`);
+  }
 
   const NATIVE_BROWSER_SHORTCUT_KEYS = new Set([
     "r", "p", "s", "u", "f", "o", "l", "i", "j", "+", "=", "-", "0",
@@ -55,7 +62,9 @@
     if (!targetWithin(event.target, NATIVE_TEXT_EDITOR_SELECTOR)) stopNativeBrowserAction(event);
   }, true);
 
-  const DEVICE_PREFERENCE_KEYS = new Set(["me-theme", "me-color-mode", "me-send-shortcut"]);
+  const DEVICE_PREFERENCE_KEYS = new Set([
+    "me-theme", "me-color-mode", "me-send-shortcut", "me-partial-loading", "me-window-border-style",
+  ]);
   const devicePreferenceValues = new Map();
   let devicePreferencesReady = false;
   let devicePreferenceWrites = Promise.resolve();
@@ -348,7 +357,8 @@
 
   function clientPlatform() {
     const identity = `${globalThis.navigator?.platform || ""} ${globalThis.navigator?.userAgent || ""}`;
-    if (/Mac|iPhone|iPad|iPod/i.test(identity)) return "macos";
+    if (/iPhone|iPad|iPod/i.test(identity)) return "ios";
+    if (/Mac/i.test(identity)) return "macos";
     if (/Win/i.test(identity)) return "windows";
     return "linux";
   }
@@ -393,9 +403,11 @@
   }
 
   function installClientTitleBar() {
-    if (titleBarTitleElement || !document.body || typeof document.createElement !== "function") return;
+    if (clientChromeInstalled || !document.body || typeof document.createElement !== "function") return;
+    clientChromeInstalled = true;
     const platform = clientPlatform();
     document.documentElement?.classList?.add?.(`me-client-platform-${platform}`);
+    if (platform === "ios") return;
     const titleBar = document.createElement("div");
     titleBar.id = "client-titlebar";
     titleBar.className = "client-titlebar";
@@ -480,6 +492,7 @@
     if (titleBarTitleElement) titleBarTitleElement.textContent = title;
     if (title === currentWindowTitle) return Promise.resolve();
     currentWindowTitle = title;
+    if (clientPlatform() === "ios") return Promise.resolve();
     return invoke("client_window_action", { action: "set_title", value: title })
       .then(applyWindowState)
       .catch((error) => {
@@ -500,12 +513,28 @@
     if (!windowReadyPromise) {
       initialDocumentRoot?.removeAttribute?.("data-me-client-startup");
       if (initialDocumentRoot?.style) initialDocumentRoot.style.visibility = "";
-      windowReadyPromise = refreshWindowState()
-        .then(() => invoke("client_window_action", { action: "show" }))
+      const reveal = clientPlatform() === "ios"
+        ? Promise.resolve({ maximized: false, fullscreen: false })
+        : refreshWindowState().then(() => invoke("client_window_action", { action: "show" }));
+      windowReadyPromise = reveal
         .then(applyWindowState)
         .then((state) => waitForFirstPaint().then(() => state));
     }
     return windowReadyPromise;
+  }
+
+  function nativeCacheAgents(snapshot, scope) {
+    return new Map((snapshot.agents || [])
+      .filter((agent) => agent.edb_id)
+      .map((agent) => [String(agent.edb_id), { agent, scope }]));
+  }
+
+  function mapNativeCacheEntries(entries, snapshot, scope) {
+    const agents = nativeCacheAgents(snapshot, scope);
+    return entries.flatMap((entry) => {
+      const match = agents.get(String(entry.edbId || ""));
+      return match ? [{ ...entry, key: entry.edbId, scope: match.scope, agentId: match.agent.id }] : [];
+    });
   }
 
   const runtime = {
@@ -515,6 +544,7 @@
       targetConfiguration: true,
       nativeDownload: true,
       dynamicWindowTitle: true,
+      windowBorderStyle: clientPlatform() !== "ios",
       pageTitle: "ME Client",
       brandTitle: "ME Client",
       cacheStorageLabel: "ME Client",
@@ -561,14 +591,20 @@
       return activeEdbCache;
     },
     async loadCachedSessions(cache, snapshot, scope) {
-      const agentsByEdbId = new Map((snapshot.agents || [])
-        .filter((agent) => agent.edb_id)
-        .map((agent) => [String(agent.edb_id), agent]));
-      const entries = await cache.loadSessions([...agentsByEdbId.keys()]);
-      return entries.flatMap((entry) => {
-        const agent = agentsByEdbId.get(String(entry.edbId || ""));
-        return agent ? [{ ...entry, key: entry.edbId, scope, agentId: agent.id }] : [];
-      });
+      const entries = await cache.loadSessions([...nativeCacheAgents(snapshot, scope).keys()]);
+      return mapNativeCacheEntries(entries, snapshot, scope);
+    },
+    async loadCachedSessionMetadata(cache, snapshot, scope) {
+      const entries = await cache.loadMetadata([...nativeCacheAgents(snapshot, scope).keys()]);
+      return mapNativeCacheEntries(entries, snapshot, scope);
+    },
+    async loadCachedSession(cache, snapshot, scope, agentId) {
+      const meta = (snapshot.agents || []).find((agent) => agent.id === agentId);
+      if (!meta?.edb_id) return null;
+      const metadata = (await cache.loadMetadata([String(meta.edb_id)]))[0];
+      if (!metadata) return null;
+      const entry = await cache.loadSession(metadata);
+      return entry ? { ...entry, key: entry.edbId, scope, agentId } : null;
     },
     cacheKey(_scope, _agentId, edbId) {
       return String(edbId || "");

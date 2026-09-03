@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use tokio::{fs::OpenOptions, io::AsyncWriteExt, sync::RwLock};
 
 const LOCAL_GATEWAY_FIRST_PORT: u16 = 38200;
+#[cfg(not(target_os = "ios"))]
 const LOCAL_GATEWAY_LAST_PORT: u16 = 38231;
+#[cfg(not(target_os = "ios"))]
 const LOCAL_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(350);
 const REMEMBERED_GATEWAY_PROBE_TIMEOUT: Duration = Duration::from_millis(1200);
 
@@ -64,6 +66,7 @@ pub struct LocalDevice {
 #[derive(Deserialize)]
 struct LocalAuthStatus {
     ok: bool,
+    #[cfg_attr(target_os = "ios", allow(dead_code))]
     required: bool,
     #[serde(rename = "authenticated")]
     _authenticated: bool,
@@ -209,10 +212,21 @@ impl GatewayTransport {
     }
 }
 
+#[cfg(not(target_os = "ios"))]
 pub async fn discover_local_device() -> LocalDevice {
     discover_local_device_from_ports(LOCAL_GATEWAY_FIRST_PORT..=LOCAL_GATEWAY_LAST_PORT).await
 }
 
+#[cfg(target_os = "ios")]
+pub async fn discover_local_device() -> LocalDevice {
+    LocalDevice {
+        endpoint: format!("http://127.0.0.1:{LOCAL_GATEWAY_FIRST_PORT}"),
+        online: false,
+        requires_password: false,
+    }
+}
+
+#[cfg(not(target_os = "ios"))]
 async fn discover_local_device_from_ports(ports: impl IntoIterator<Item = u16>) -> LocalDevice {
     let offline = LocalDevice {
         endpoint: format!("http://127.0.0.1:{LOCAL_GATEWAY_FIRST_PORT}"),
@@ -250,6 +264,7 @@ async fn discover_local_device_from_ports(ports: impl IntoIterator<Item = u16>) 
     discovered.unwrap_or(offline)
 }
 
+#[cfg(not(target_os = "ios"))]
 async fn probe_local_gateway_port(client: &Client, port: u16) -> Option<LocalDevice> {
     let endpoint = format!("http://127.0.0.1:{port}");
     let status = probe_gateway_status(client, &endpoint).await?;

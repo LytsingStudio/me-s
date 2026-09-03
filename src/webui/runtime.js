@@ -47,6 +47,12 @@
     loadCachedSessions(cache, _snapshot, scope) {
       return cache.loadScope(scope);
     },
+    loadCachedSessionMetadata(cache, _snapshot, scope) {
+      return cache.loadScopeMetadata(scope);
+    },
+    loadCachedSession(cache, _snapshot, scope, agentId) {
+      return cache.loadSession(globalThis.MeEdbCache.sessionKey(scope, agentId));
+    },
     cacheKey(scope, agentId) {
       return globalThis.MeEdbCache.sessionKey(scope, agentId);
     },

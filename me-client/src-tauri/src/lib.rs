@@ -26,6 +26,9 @@ use objc2_app_kit::{NSApplication, NSMenu, NSMenuItem};
 #[cfg(target_os = "macos")]
 use objc2_foundation::NSString;
 
+#[cfg(target_os = "ios")]
+use objc2_ui_kit::{UIView, UIViewAutoresizing};
+
 use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest, RememberedDevice};
 use gateway::{
     DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport, LocalDevice,
@@ -35,7 +38,13 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
-const DEVICE_PREFERENCE_KEYS: [&str; 3] = ["me-theme", "me-color-mode", "me-send-shortcut"];
+const DEVICE_PREFERENCE_KEYS: [&str; 5] = [
+    "me-theme",
+    "me-color-mode",
+    "me-send-shortcut",
+    "me-partial-loading",
+    "me-window-border-style",
+];
 
 const MAX_REMEMBERED_PASSWORD_BYTES: usize = 4096;
 
@@ -79,6 +88,7 @@ struct ConfiguredTarget {
     endpoint: String,
 }
 
+#[cfg(not(target_os = "ios"))]
 fn normalized_window_title(value: Option<String>) -> String {
     let value = value.unwrap_or_default();
     let value = value.trim();
@@ -480,7 +490,10 @@ fn apply_platform_window_shape(
     sync_windows_shadow(window, state)
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(
+    not(target_os = "ios"),
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 fn apply_platform_window_shape(
     _window: &WebviewWindow,
     _state: &ClientWindowState,
@@ -495,6 +508,7 @@ struct ClientWindowState {
     fullscreen: bool,
 }
 
+#[cfg(not(target_os = "ios"))]
 fn client_window_state(window: &WebviewWindow) -> Result<ClientWindowState, String> {
     let state = ClientWindowState {
         maximized: window.is_maximized().map_err(|error| error.to_string())?,
@@ -502,6 +516,14 @@ fn client_window_state(window: &WebviewWindow) -> Result<ClientWindowState, Stri
     };
     apply_platform_window_shape(window, &state)?;
     Ok(state)
+}
+
+#[cfg(target_os = "ios")]
+fn client_window_state(_window: &WebviewWindow) -> Result<ClientWindowState, String> {
+    Ok(ClientWindowState {
+        maximized: false,
+        fullscreen: false,
+    })
 }
 
 #[cfg(target_os = "macos")]
@@ -517,11 +539,15 @@ fn close_client_window(window: &WebviewWindow) -> tauri::Result<()> {
     window.close()
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(all(
+    not(target_os = "ios"),
+    not(any(target_os = "macos", target_os = "windows"))
+))]
 fn close_client_window(window: &WebviewWindow) -> tauri::Result<()> {
     window.close()
 }
 
+#[cfg(not(target_os = "ios"))]
 #[tauri::command]
 fn client_window_action(
     action: String,
@@ -554,6 +580,26 @@ fn client_window_action(
     client_window_state(&window)
 }
 
+#[cfg(target_os = "ios")]
+#[tauri::command]
+fn client_window_action(
+    action: String,
+    _value: Option<String>,
+    window: WebviewWindow,
+    state: State<'_, AppState>,
+) -> Result<ClientWindowState, String> {
+    match action.as_str() {
+        "state" | "set_title" => {}
+        "show" => state.window_revealed.store(true, Ordering::Release),
+        _ => {
+            return Err(format!(
+                "iOS does not support client window action: {action}"
+            ));
+        }
+    }
+    client_window_state(&window)
+}
+
 fn valid_device_preference(key: &str, value: &str) -> bool {
     match key {
         "me-theme" => matches!(
@@ -570,6 +616,8 @@ fn valid_device_preference(key: &str, value: &str) -> bool {
         ),
         "me-color-mode" => matches!(value, "light" | "dark"),
         "me-send-shortcut" => matches!(value, "enter" | "modified-enter"),
+        "me-partial-loading" => matches!(value, "enabled" | "disabled"),
+        "me-window-border-style" => matches!(value, "default" | "theme"),
         _ => false,
     }
 }
@@ -716,6 +764,22 @@ async fn cache_remove(edb_id: String, state: State<'_, AppState>) -> Result<(), 
     run_blocking(move || cache.remove(&edb_id)).await
 }
 
+fn client_download_directory(app: &AppHandle) -> Result<PathBuf, String> {
+    #[cfg(target_os = "ios")]
+    {
+        return app
+            .path()
+            .document_dir()
+            .map_err(|error| format!("无法确定下载目录：{error}"));
+    }
+    #[cfg(not(target_os = "ios"))]
+    {
+        app.path()
+            .download_dir()
+            .map_err(|error| format!("无法确定下载目录：{error}"))
+    }
+}
+
 #[tauri::command]
 async fn download_file(
     path: String,
@@ -723,10 +787,7 @@ async fn download_file(
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DownloadResult, String> {
-    let directory = app
-        .path()
-        .download_dir()
-        .map_err(|error| format!("无法确定下载目录：{error}"))?;
+    let directory = client_download_directory(&app)?;
     state.gateway.download(&path, &filename, &directory).await
 }
 
@@ -906,6 +967,25 @@ fn handle_windows_run_event(app: &AppHandle, run_event: &tauri::RunEvent) {
     }
 }
 
+#[cfg(target_os = "ios")]
+fn initialize_ios_webview(window: &WebviewWindow) -> Result<(), String> {
+    window
+        .with_webview(|platform_webview| {
+            let webview = unsafe { &*platform_webview.inner().cast::<UIView>() };
+            let Some(root_view) = webview.superview() else {
+                return;
+            };
+            if let Some(ui_window) = root_view.window() {
+                root_view.setFrame(ui_window.bounds());
+            }
+            webview.setFrame(root_view.bounds());
+            webview.setAutoresizingMask(
+                UIViewAutoresizing::FlexibleWidth | UIViewAutoresizing::FlexibleHeight,
+            );
+        })
+        .map_err(|error| error.to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let app = tauri::Builder::default()
@@ -913,19 +993,23 @@ pub fn run() {
             app.manage(app_state(app)?);
             #[cfg(target_os = "macos")]
             install_macos_dock_menu()?;
+            #[cfg(target_os = "ios")]
+            if let Some(window) = app.get_webview_window("main") {
+                initialize_ios_webview(&window).map_err(io::Error::other)?;
+            }
+            #[cfg(not(mobile))]
             if let Some(window) = app.get_webview_window("main") {
                 window.hide()?;
                 #[cfg(target_os = "windows")]
                 initialize_windows_window(app, &window).map_err(io::Error::other)?;
                 client_window_state(&window).map_err(io::Error::other)?;
             }
-            if cfg!(debug_assertions) {
-                app.handle().plugin(
-                    tauri_plugin_log::Builder::default()
-                        .level(log::LevelFilter::Info)
-                        .build(),
-                )?;
-            }
+            #[cfg(all(debug_assertions, not(mobile)))]
+            app.handle().plugin(
+                tauri_plugin_log::Builder::default()
+                    .level(log::LevelFilter::Info)
+                    .build(),
+            )?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -975,7 +1059,16 @@ mod tests {
             "me-send-shortcut",
             "modified-enter"
         ));
+        assert!(valid_device_preference("me-partial-loading", "enabled"));
+        assert!(valid_device_preference("me-partial-loading", "disabled"));
+        assert!(valid_device_preference("me-window-border-style", "default"));
+        assert!(valid_device_preference("me-window-border-style", "theme"));
         assert!(!valid_device_preference("me-theme", "unknown"));
+        assert!(!valid_device_preference("me-partial-loading", "unknown"));
+        assert!(!valid_device_preference(
+            "me-window-border-style",
+            "accent"
+        ));
         assert!(!valid_device_preference(
             "gateway.endpoint",
             "https://example.com"
