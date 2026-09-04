@@ -63,7 +63,7 @@
   }, true);
 
   const DEVICE_PREFERENCE_KEYS = new Set([
-    "me-theme", "me-color-mode", "me-send-shortcut", "me-partial-loading", "me-window-border-style",
+    "me-theme", "me-color-mode", "me-send-shortcut", "me-window-border-style",
   ]);
   const devicePreferenceValues = new Map();
   let devicePreferencesReady = false;
@@ -593,18 +593,6 @@
     async loadCachedSessions(cache, snapshot, scope) {
       const entries = await cache.loadSessions([...nativeCacheAgents(snapshot, scope).keys()]);
       return mapNativeCacheEntries(entries, snapshot, scope);
-    },
-    async loadCachedSessionMetadata(cache, snapshot, scope) {
-      const entries = await cache.loadMetadata([...nativeCacheAgents(snapshot, scope).keys()]);
-      return mapNativeCacheEntries(entries, snapshot, scope);
-    },
-    async loadCachedSession(cache, snapshot, scope, agentId) {
-      const meta = (snapshot.agents || []).find((agent) => agent.id === agentId);
-      if (!meta?.edb_id) return null;
-      const metadata = (await cache.loadMetadata([String(meta.edb_id)]))[0];
-      if (!metadata) return null;
-      const entry = await cache.loadSession(metadata);
-      return entry ? { ...entry, key: entry.edbId, scope, agentId } : null;
     },
     cacheKey(_scope, _agentId, edbId) {
       return String(edbId || "");

@@ -37,7 +37,6 @@ function loadClientRuntime({ platform = "", userAgent = "" } = {}) {
               "me-theme": "ocean",
               "me-color-mode": "light",
               "me-send-shortcut": "enter",
-              "me-partial-loading": "enabled",
               "me-window-border-style": "theme",
             },
             rememberedDevices: [
@@ -428,28 +427,24 @@ describe("ME Client native adapter", () => {
     expect(runtime.devicePreferences.getItem("me-theme")).toBe("ocean");
     expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("light");
     expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("enter");
-    expect(runtime.devicePreferences.getItem("me-partial-loading")).toBe("enabled");
     expect(runtime.devicePreferences.getItem("me-window-border-style")).toBe("theme");
     expect(runtime.capabilities.windowBorderStyle).toBe(true);
 
     await runtime.devicePreferences.setItem("me-theme", "obsidian");
     await runtime.devicePreferences.setItem("me-color-mode", "dark");
     await runtime.devicePreferences.setItem("me-send-shortcut", "modified-enter");
-    await runtime.devicePreferences.setItem("me-partial-loading", "disabled");
     await runtime.devicePreferences.setItem("me-window-border-style", "default");
     await runtime.devicePreferences.setItem("gateway.endpoint", "must-not-persist");
     await runtime.configureTarget("https://other-gateway.example");
     expect(runtime.devicePreferences.getItem("me-theme")).toBe("obsidian");
     expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("dark");
     expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("modified-enter");
-    expect(runtime.devicePreferences.getItem("me-partial-loading")).toBe("disabled");
     expect(runtime.devicePreferences.getItem("me-window-border-style")).toBe("default");
     expect(calls.filter((call) => call.command === "set_device_preference").map((call) => call.payload))
       .toEqual([
         { key: "me-theme", value: "obsidian" },
         { key: "me-color-mode", value: "dark" },
         { key: "me-send-shortcut", value: "modified-enter" },
-        { key: "me-partial-loading", value: "disabled" },
         { key: "me-window-border-style", value: "default" },
       ]);
 
@@ -459,8 +454,8 @@ describe("ME Client native adapter", () => {
     const clientRuntime = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
     const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
     expect(clientRuntime).not.toMatch(/document\.cookie|localStorage|globalThis\.indexedDB/);
-    expect(clientRuntime).toContain('"me-partial-loading", "me-window-border-style"');
-    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 5]');
+    expect(clientRuntime).toContain('"me-theme", "me-color-mode", "me-send-shortcut", "me-window-border-style"');
+    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 4]');
     expect(nativeRuntime).toContain('run_blocking(move || cache.set_setting(&key, &value)).await');
     expect(nativeRuntime).toContain('device_preferences: BTreeMap<String, String>');
   });
@@ -589,32 +584,21 @@ describe("ME Client native adapter", () => {
     expect(calls.find((call) => call.command === "cache_remove").payload.edbId).toBe(edbId);
   });
 
-  test("loads native cache metadata, one requested Session, or the full legacy set", async () => {
+  test("loads every native cached Session and lists metadata without raw Events", async () => {
     const { runtime, calls, edbId, cachedEvents } = loadClientRuntime();
     const cache = runtime.createEdbCache();
     const snapshot = { agents: [{ id: "main", edb_id: edbId }] };
-
-    const metadata = await runtime.loadCachedSessionMetadata(cache, snapshot, "/workspace");
-    expect(metadata).toHaveLength(1);
-    expect(metadata[0]).toMatchObject({ key: edbId, agentId: "main", scope: "/workspace", eventCount: 2 });
-    expect(metadata[0].events).toBeUndefined();
-    expect(calls.filter((call) => call.command === "cache_load_chunk")).toHaveLength(0);
-
-    const single = await runtime.loadCachedSession(cache, snapshot, "/workspace", "main");
-    expect(single).toMatchObject({ key: edbId, agentId: "main", scope: "/workspace" });
-    expect(single.events).toEqual(cachedEvents);
-    let chunks = calls.filter((call) => call.command === "cache_load_chunk");
-    expect(chunks).toHaveLength(2);
-    expect(chunks.map((call) => call.payload.startOrder)).toEqual([0, 1]);
-    expect(chunks.every((call) => call.payload.byteLimit === 1024 * 1024)).toBe(true);
 
     const entries = await runtime.loadCachedSessions(cache, snapshot, "/workspace");
     expect(entries).toHaveLength(1);
     expect(entries[0]).toMatchObject({ key: edbId, agentId: "main", scope: "/workspace" });
     expect(entries[0].events).toEqual(cachedEvents);
     expect(calls.filter((call) => call.command === "cache_load_metadata").at(-1).payload.edbIds).toEqual([edbId]);
-    chunks = calls.filter((call) => call.command === "cache_load_chunk");
-    expect(chunks).toHaveLength(4);
+    const chunks = calls.filter((call) => call.command === "cache_load_chunk");
+    expect(chunks).toHaveLength(2);
+    expect(chunks.map((call) => call.payload.startOrder)).toEqual([0, 1]);
+    expect(chunks.every((call) => call.payload.byteLimit === 1024 * 1024)).toBe(true);
+
     const listed = await cache.listSessions();
     expect(listed[0].events).toBeUndefined();
   });

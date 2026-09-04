@@ -906,21 +906,12 @@ button { color: inherit; }
 .settings-default-copy strong { display: block; color: var(--text); font-size: 12px; }
 .settings-preference-list { display: grid; border-top: 1px solid var(--border); }
 .settings-preference-row { display: grid !important; min-height: 64px; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 18px !important; padding: 11px 0; border-bottom: 1px solid var(--border); color: inherit !important; cursor: pointer; }
-.settings-preference-row.busy { opacity: .72; }
 .settings-preference-copy { min-width: 0; }
 .settings-preference-copy strong, .settings-preference-copy small { display: block; }
 .settings-preference-copy strong { color: var(--text); font-size: 12px; }
 .settings-preference-copy small { margin-top: 4px; color: var(--dim); font-size: 11px; line-height: 1.45; }
 .settings-preference-select { cursor: default; }
 .settings-preference-row > select { width: 136px; }
-.settings-switch { position: relative; display: inline-flex; flex: 0 0 auto; }
-.settings-editor .settings-switch input { position: absolute; width: 1px; height: 1px; padding: 0; border: 0; opacity: 0; pointer-events: none; }
-.settings-switch-track { position: relative; display: block; width: 42px; height: 24px; border: 1px solid var(--border-bright); border-radius: 999px; background: var(--panel-3); transition: border-color .16s ease, background .16s ease, opacity .16s ease; }
-.settings-switch-track::after { position: absolute; top: 3px; left: 3px; width: 16px; height: 16px; border-radius: 50%; background: var(--muted); box-shadow: 0 1px 3px rgb(0 0 0 / 28%); content: ""; transition: transform .16s ease, background .16s ease; }
-.settings-switch input:checked + .settings-switch-track { border-color: var(--accent); background: var(--accent); }
-.settings-switch input:checked + .settings-switch-track::after { background: var(--bg); transform: translateX(18px); }
-.settings-switch input:focus-visible + .settings-switch-track { box-shadow: 0 0 0 3px var(--accent-ring); }
-.settings-switch input:disabled + .settings-switch-track { opacity: .58; cursor: wait; }
 .settings-subsection-header { display: flex; align-items: end; justify-content: space-between; gap: 14px; padding-top: 4px; }
 .settings-subsection-header h4 { margin: 0; color: var(--text); font-size: 13px; }
 .settings-subsection-header p { margin: 4px 0 0; color: var(--dim); font-size: 11px; line-height: 1.45; }

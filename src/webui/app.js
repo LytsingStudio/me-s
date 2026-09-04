@@ -30,7 +30,6 @@ const SEND_SHORTCUT_COOKIE = portScopedCookieName("me_send_shortcut");
 const SEND_SHORTCUT_PREFERENCE = "me-send-shortcut";
 const SEND_SHORTCUT_ENTER = "enter";
 const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
-const PARTIAL_LOADING_PREFERENCE = "me-partial-loading";
 const WINDOW_BORDER_STYLE_PREFERENCE = "me-window-border-style";
 const WINDOW_BORDER_DEFAULT = "default";
 const WINDOW_BORDER_THEME = "theme";
@@ -118,9 +117,7 @@ const state = {
   lastInputAt: Number.NEGATIVE_INFINITY,
   composing: false,
   sendShortcut: readSendShortcutPreference(),
-  partialLoading: readPartialLoadingPreference(),
   windowBorderStyle: readWindowBorderStylePreference(),
-  preferenceChange: Promise.resolve(),
   userMenu: null,
   agentMenu: null,
   modal: null,
@@ -415,9 +412,6 @@ function persistLocalPreference(key, value) {
   }
 }
 
-function readPartialLoadingPreference() {
-  return readLocalPreference(PARTIAL_LOADING_PREFERENCE) !== "disabled";
-}
 
 function normalizeWindowBorderStyle(value) {
   return value === WINDOW_BORDER_THEME ? WINDOW_BORDER_THEME : WINDOW_BORDER_DEFAULT;
@@ -467,9 +461,9 @@ function persistDevicePreference(key, value) {
 
 function restoreRuntimeDevicePreferences() {
   state.sendShortcut = readSendShortcutPreference();
-  state.partialLoading = readPartialLoadingPreference();
   state.windowBorderStyle = readWindowBorderStylePreference();
   applyWindowBorderStyle();
+  elements.loginSettings?.classList.toggle("hidden", !runtimeCapabilities.windowBorderStyle);
   const activeTheme = globalThis.MeTheme.apply(
     globalThis,
     globalThis.MeTheme.readStored(globalThis),
@@ -613,37 +607,10 @@ function cacheEntryValid(cached, meta) {
       || cached.lastEventHash === (meta.last_event_hash ?? null));
 }
 
-async function loadEdbCacheEntries(snapshot, metadataOnly = false) {
+async function loadEdbCacheEntries(snapshot) {
   const scope = edbCacheScope(snapshot);
   if (!scope) return [];
-  if (metadataOnly && frontendRuntime.loadCachedSessionMetadata) {
-    return frontendRuntime.loadCachedSessionMetadata(edbCache, snapshot, scope);
-  }
   return frontendRuntime.loadCachedSessions(edbCache, snapshot, scope);
-}
-
-async function loadEdbCacheEntry(snapshot, agentId) {
-  const scope = edbCacheScope(snapshot);
-  if (!scope) return null;
-  if (frontendRuntime.loadCachedSession) {
-    return frontendRuntime.loadCachedSession(edbCache, snapshot, scope, agentId);
-  }
-  return (await frontendRuntime.loadCachedSessions(edbCache, snapshot, scope))
-    .find((entry) => entry.agentId === agentId) || null;
-}
-
-function agentFamilyIds(snapshot, agentId) {
-  const ids = new Set(agentId ? [agentId] : []);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const meta of snapshot?.agents || []) {
-      if (meta.orchestrator !== "worker-agent" || !ids.has(meta.parent_agent_id) || ids.has(meta.id)) continue;
-      ids.add(meta.id);
-      changed = true;
-    }
-  }
-  return ids;
 }
 
 function discardStoredAgentEdb(snapshot, agentId, store = null) {
@@ -691,10 +658,9 @@ function settleAgentLoadProgress(store) {
   }
 }
 
-function createAgentStore(meta, cached = null, snapshot = state.snapshot, options = {}) {
-  const materialized = options.materialized ?? (!state.partialLoading || Array.isArray(cached?.events));
-  const events = materialized && Array.isArray(cached?.events) ? cached.events : [];
-  const eventCount = cached ? cacheEntryEventCount(cached) : 0;
+function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
+  const events = Array.isArray(cached?.events) ? cached.events : [];
+  const eventCount = events.length;
   const scope = edbCacheScope(snapshot);
   const edbId = String(meta.edb_id || "");
   const mutationRevision = cached ? Number(cached.mutationRevision) || 0 : Number(meta.mutation_revision) || 0;
@@ -711,14 +677,10 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot, option
     projection: emptyProjection(),
     workmap: emptyWorkMap(),
     turnHistory: null,
-    summary: materialized ? projectAgentSummary(events) : { turnState: null },
+    summary: projectAgentSummary(events),
     projectedOrder: 0,
-    needsReplay: materialized,
+    needsReplay: true,
     needsTurnHistory: false,
-    materialized,
-    materializing: false,
-    materializationToken: null,
-    selectionMaterialization: null,
     loadProgress: createAgentLoadProgress(meta, eventCount, mutationRevision),
   };
 }
@@ -729,7 +691,7 @@ async function hydrateEdbCache(snapshot) {
   state.snapshotInitialized = true;
   reconcileAgents();
   renderAgents();
-  const entries = await loadEdbCacheEntries(snapshot, state.partialLoading);
+  const entries = await loadEdbCacheEntries(snapshot);
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
   for (const entry of entries) {
     if (entry.agentId && !agentIds.has(entry.agentId) && entry.key) void edbCache.discardSession(entry.key);
@@ -741,28 +703,10 @@ async function hydrateEdbCache(snapshot) {
     cachedByAgent.delete(meta.id);
     if (cached.key) await edbCache.discardSession(cached.key);
   }
-  const family = agentFamilyIds(snapshot, state.selectedAgent);
-  if (state.partialLoading) {
-    for (const agentId of family) {
-      const cached = cachedByAgent.get(agentId);
-      if (!cached) continue;
-      const loaded = await loadEdbCacheEntry(snapshot, agentId);
-      const meta = snapshot.agents.find((agent) => agent.id === agentId);
-      if (loaded && meta && cacheEntryValid(loaded, meta)
-          && cacheEntryEventCount(loaded) === cacheEntryEventCount(cached)) {
-        cachedByAgent.set(agentId, loaded);
-      } else {
-        cachedByAgent.delete(agentId);
-        if (cached.key) await edbCache.discardSession(cached.key);
-      }
-    }
-  }
   state.stores.clear();
   for (const meta of snapshot.agents || []) {
     const cached = cachedByAgent.get(meta.id);
-    state.stores.set(meta.id, createAgentStore(meta, cached || null, snapshot, {
-      materialized: !state.partialLoading || family.has(meta.id),
-    }));
+    state.stores.set(meta.id, createAgentStore(meta, cached || null, snapshot));
     state.drafts.set(meta.id, String(meta.input_draft || ""));
   }
   state.edbCacheInitialized = true;
@@ -785,189 +729,12 @@ function persistWorkspaceAgentEdb(snapshot, meta, store, replace = false, batch 
     sessionLabel: meta.title || meta.id,
     events: store.events,
     replace,
-    deltaOnly: state.partialLoading && !store.materialized,
     delta: batch ? { ...batch, reset: replace } : null,
   });
 }
 
 function persistAgentEdb(meta, store, replace = false, batch = null) {
   persistWorkspaceAgentEdb(state.snapshot, meta, store, replace, batch);
-}
-
-function adoptMaterializedEvents(store, meta, entry) {
-  const events = Array.isArray(entry?.events) ? entry.events : [];
-  store.cacheKey = entry?.key || store.cacheKey;
-  store.events = events;
-  store.eventCount = events.length;
-  store.mutationRevision = Number(entry?.mutationRevision) || Number(meta.mutation_revision) || 0;
-  store.lastEventHash = entry?.lastEventHash ?? null;
-  store.summary = projectAgentSummary(events);
-  store.projection = emptyProjection();
-  store.workmap = emptyWorkMap();
-  store.projectedOrder = 0;
-  store.needsReplay = true;
-  store.needsTurnHistory = events.length > 0;
-  store.materialized = true;
-  store.loadProgress = createAgentLoadProgress(meta, events.length, store.mutationRevision);
-}
-
-function cancelStoreMaterialization(store) {
-  if (!store) return;
-  store.materializationToken = null;
-  store.selectionMaterialization = null;
-  store.materializing = false;
-}
-
-function releaseMaterializedStore(store) {
-  if (!store) return;
-  cancelStoreMaterialization(store);
-  store.events = [];
-  store.projection = emptyProjection();
-  store.workmap = emptyWorkMap();
-  store.turnHistory = null;
-  store.projectedOrder = 0;
-  store.needsReplay = false;
-  store.needsTurnHistory = false;
-  store.materialized = false;
-}
-
-function releaseInactiveMaterializedStores(workspaceId, agentId) {
-  if (!state.partialLoading) return;
-  const keep = agentFamilyIds(workspaceUiState(workspaceId).snapshot, agentId);
-  const seen = new Set();
-  const buckets = [[state.workspaceId, state], ...state.workspaceStates.entries()];
-  for (const [bucketWorkspaceId, bucket] of buckets) {
-    if (!bucket?.stores || seen.has(bucket.stores)) continue;
-    seen.add(bucket.stores);
-    for (const [id, store] of bucket.stores) {
-      if (bucketWorkspaceId === workspaceId && keep.has(id)) continue;
-      releaseMaterializedStore(store);
-      bucket.workerActivityIndexes?.delete(id);
-    }
-  }
-}
-
-async function materializeAgentStore(bucket, meta) {
-  const store = bucket.stores.get(meta.id);
-  if (!store || store.materialized) return true;
-  const token = {};
-  store.materializationToken = token;
-  const expectedCount = store.eventCount;
-  const expectedMutation = store.mutationRevision;
-  let entry = null;
-  try { entry = await loadEdbCacheEntry(bucket.snapshot, meta.id); }
-  catch (error) { console.warn("Unable to materialize cached session", error); }
-  if (store.materializationToken !== token) return false;
-  if (entry && cacheEntryValid(entry, meta)
-      && cacheEntryEventCount(entry) === expectedCount
-      && Number(entry.mutationRevision || 0) === Number(expectedMutation || 0)) {
-    adoptMaterializedEvents(store, meta, entry);
-    store.materializationToken = null;
-    return true;
-  }
-  if (store.cacheKey) {
-    await edbCache.discardSession(store.cacheKey)
-      .catch((error) => console.warn("Unable to discard invalid cached session", error));
-  }
-  if (store.materializationToken !== token) return false;
-  store.events = [];
-  store.eventCount = 0;
-  store.mutationRevision = Number(meta.mutation_revision) || 0;
-  store.lastEventHash = null;
-  store.summary = { turnState: null };
-  store.projection = emptyProjection();
-  store.workmap = emptyWorkMap();
-  store.projectedOrder = 0;
-  store.needsReplay = true;
-  store.needsTurnHistory = false;
-  store.materialized = true;
-  store.loadProgress = createAgentLoadProgress(meta, 0, store.mutationRevision);
-  store.materializationToken = null;
-  return true;
-}
-
-async function materializeAgentFamily(bucket, agentId) {
-  const ids = agentFamilyIds(bucket.snapshot, agentId);
-  for (const meta of bucket.snapshot.agents || []) {
-    if (ids.has(meta.id)) await materializeAgentStore(bucket, meta);
-  }
-}
-function startSelectedAgentMaterialization(workspaceId, agentId, beginPolling = true) {
-  if (!state.partialLoading || !workspaceId || !agentId) return false;
-  const bucket = workspaceUiState(workspaceId);
-  const family = agentFamilyIds(bucket.snapshot, agentId);
-  releaseInactiveMaterializedStores(workspaceId, agentId);
-  const needsMaterialization = [...family].some((id) => !bucket.stores.get(id)?.materialized);
-  if (!needsMaterialization) return false;
-  const selectedStore = bucket.stores.get(agentId);
-  if (!selectedStore) return false;
-  cancelBackgroundWorkspaceSync();
-  stopHttpPolling();
-  const selectionToken = {};
-  selectedStore.materializing = true;
-  selectedStore.selectionMaterialization = selectionToken;
-  void materializeAgentFamily(bucket, agentId)
-    .catch((error) => console.warn("Unable to load selected session", error))
-    .finally(() => {
-      if (selectedStore.selectionMaterialization !== selectionToken) return;
-      selectedStore.selectionMaterialization = null;
-      selectedStore.materializing = false;
-      if (state.workspaceId !== workspaceId || state.selectedAgent !== agentId) return;
-      const meta = state.snapshot.agents.find((agent) => agent.id === agentId);
-      prepareSelectedEventRecovery(meta, null, true);
-      renderAll();
-      if (beginPolling) startHttpPolling();
-      scheduleBackgroundWorkspaceSync(0);
-    });
-  return true;
-}
-
-function workspaceStoreBuckets() {
-  const buckets = [state, ...state.workspaceStates.values()];
-  const seen = new Set();
-  return buckets.filter((bucket) => {
-    if (!bucket?.stores || seen.has(bucket.stores)) return false;
-    seen.add(bucket.stores);
-    return true;
-  });
-}
-
-async function setPartialLoading(enabled) {
-  const next = Boolean(enabled);
-  persistLocalPreference(PARTIAL_LOADING_PREFERENCE, next ? "enabled" : "disabled");
-  state.preferenceChange = state.preferenceChange.then(async () => {
-    if (state.partialLoading === next) return;
-    const running = state.snapshotInitialized && (!state.authRequired || state.authenticated);
-    if (running) {
-      cancelBackgroundWorkspaceSync();
-      stopHttpPolling();
-    }
-    const buckets = workspaceStoreBuckets();
-    for (const bucket of buckets) {
-      for (const store of bucket.stores.values()) cancelStoreMaterialization(store);
-    }
-    state.partialLoading = next;
-    try {
-      if (next) {
-        releaseInactiveMaterializedStores(state.workspaceId, state.selectedAgent);
-      } else {
-        for (const bucket of buckets) {
-          for (const meta of bucket.snapshot?.agents || []) await materializeAgentStore(bucket, meta);
-        }
-      }
-    } finally {
-      renderAgents();
-      renderSessionSyncOverlay();
-      if (running) {
-        startHttpPolling();
-        scheduleBackgroundWorkspaceSync(0);
-      }
-    }
-  }).catch((error) => {
-    console.warn("Unable to apply partial loading preference", error);
-    toast("无法应用局部加载设置", true);
-  });
-  return state.preferenceChange;
 }
 
 function setWindowBorderStyle(value) {
@@ -1119,7 +886,6 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   state.snapshotInitialized = workspace.snapshotInitialized;
   state.edbCacheInitialized = workspace.edbCacheInitialized;
   state.activeCatchUpPending = !workspace.edbCacheInitialized || workspace.catchUpPending;
-  const materializing = startSelectedAgentMaterialization(workspaceId, state.selectedAgent, beginPolling);
   const selectedMeta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
   prepareSelectedEventRecovery(selectedMeta, null, true);
   resetConnectionForInitialSync();
@@ -1141,7 +907,7 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   const meta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
   prepareSelectedEventRecovery(meta, null, true);
   renderAll();
-  if (beginPolling && !materializing) startHttpPolling();
+  if (beginPolling) startHttpPolling();
   scheduleBackgroundWorkspaceSync(0);
 }
 
@@ -1298,7 +1064,7 @@ async function hydrateBackgroundEdbCache(operation, snapshot) {
   workspace.snapshot = snapshot;
   reconcileBackgroundAgents(workspace, snapshot);
   renderAgents();
-  const entries = await loadEdbCacheEntries(snapshot, state.partialLoading);
+  const entries = await loadEdbCacheEntries(snapshot);
   if (!backgroundSyncOperationCurrent(operation)) return false;
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
   for (const entry of entries) {
@@ -1312,9 +1078,7 @@ async function hydrateBackgroundEdbCache(operation, snapshot) {
     const cached = cachedByAgent.get(meta.id);
     const valid = cacheEntryValid(cached, meta);
     if (cached && !valid && cached.key) await edbCache.discardSession(cached.key);
-    workspace.stores.set(meta.id, createAgentStore(meta, valid ? cached : null, snapshot, {
-      materialized: !state.partialLoading,
-    }));
+    workspace.stores.set(meta.id, createAgentStore(meta, valid ? cached : null, snapshot));
     workspace.drafts.set(meta.id, String(meta.input_draft || ""));
   }
   workspace.edbCacheInitialized = true;
@@ -1355,16 +1119,15 @@ function syncBackgroundAgentEvents(workspace, meta, payload) {
   }
   const previousSummary = JSON.stringify(store.summary);
   const events = Array.isArray(payload.events) ? payload.events : [];
-  const keepEvents = !state.partialLoading || store.materialized;
   if (payload.reset) {
-    store.events = keepEvents ? events : [];
+    store.events = events;
     store.eventCount = events.length;
     store.summary = projectAgentSummary(events);
     store.projectedOrder = 0;
-    store.needsReplay = keepEvents;
+    store.needsReplay = true;
     workspace.workerActivityIndexes.delete(meta.id);
   } else {
-    if (keepEvents) store.events.push(...events);
+    store.events.push(...events);
     store.eventCount = previousEventCount + events.length;
     updateAgentSummary(store.summary, events);
   }
@@ -2090,7 +1853,7 @@ function httpSyncProgressSignature() {
 }
 
 async function requestHttpSync() {
-  if (state.syncInFlight || state.pageClosing || currentStore()?.materializing) return;
+  if (state.syncInFlight || state.pageClosing) return;
   const generation = state.syncGeneration;
   const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
     ? `${state.selectedAgent}:${state.view.sessionId}` : null;
@@ -2417,9 +2180,7 @@ function syncAgentEvents(meta, payload) {
   const loadingBefore = loadProgressSignature(store);
   let changed = false;
   if (!store) {
-    store = createAgentStore(meta, null, state.snapshot, {
-      materialized: !state.partialLoading || agentFamilyIds(state.snapshot, state.selectedAgent).has(meta.id),
-    });
+    store = createAgentStore(meta, null, state.snapshot);
     state.stores.set(meta.id, store);
     const initialDraft = String(meta.input_draft || "");
     state.drafts.set(meta.id, initialDraft);
@@ -2452,16 +2213,15 @@ function syncAgentEvents(meta, payload) {
   }
   const previousSummary = JSON.stringify(store.summary);
   const events = Array.isArray(payload.events) ? payload.events : [];
-  const keepEvents = !state.partialLoading || store.materialized;
   if (payload.reset) {
-    store.events = keepEvents ? events : [];
+    store.events = events;
     store.eventCount = events.length;
     store.summary = projectAgentSummary(events);
     store.projectedOrder = 0;
-    store.needsReplay = keepEvents;
+    store.needsReplay = true;
     state.workerActivityIndexes.delete(meta.id);
   } else {
-    if (keepEvents) store.events.push(...events);
+    store.events.push(...events);
     store.eventCount = previousEventCount + events.length;
     updateAgentSummary(store.summary, events);
   }
@@ -2477,7 +2237,7 @@ function syncAgentEvents(meta, payload) {
       events,
     });
   }
-  if (payload.turn_history_updated && store.materialized) {
+  if (payload.turn_history_updated) {
     store.turnHistory = payload.turn_history ?? null;
     store.needsTurnHistory = false;
   }
@@ -3328,7 +3088,6 @@ function advanceCurrentProjection() {
   if (bulkEventRecoveryActive()) return emptyProjectionChanges();
   const store = currentStore();
   if (!store) return emptyProjectionChanges();
-  if (!store.materialized || store.materializing) return emptyProjectionChanges();
   if (store.needsReplay) {
     store.projection = projectChat(store.events);
     store.workmap = projectWorkMap(store.events);
@@ -3411,7 +3170,6 @@ function agentLoadingState(workspaceId, agentId) {
   if (!meta) return { loading: false, percent: null };
   const store = bucket.stores.get(agentId);
   if (!bucket.edbCacheInitialized || !store) return { loading: true, percent: null };
-  if (store.materializing) return { loading: true, percent: null };
   if (!store.loadProgress) return { loading: false, percent: null };
   return {
     loading: true,
@@ -3642,12 +3400,11 @@ function finishAgentSelection(id) {
   delete elements.terminalScreen.dataset.terminalKey;
   delete elements.terminalScreen.dataset.revision;
   restoreDraft();
-  const materializing = startSelectedAgentMaterialization(state.workspaceId, id, true);
   const meta = state.snapshot.agents.find((agent) => agent.id === id);
   prepareSelectedEventRecovery(meta, null, true);
   renderAll();
   persistGatewaySelection(state.workspaceId, id);
-  if (!materializing) requestHttpSyncNow();
+  requestHttpSyncNow();
 }
 
 function selectAgent(id) {
@@ -5525,48 +5282,24 @@ function resolveGatewayEdbCacheLabel(entry) {
 }
 
 function localPreferenceSettingsHtml() {
-  const borderSetting = runtimeCapabilities.windowBorderStyle ? `
-    <label class="settings-preference-row settings-preference-select">
-      <span class="settings-preference-copy"><strong>边框样式</strong><small>选择桌面窗口边缘使用的颜色。</small></span>
-      <select data-local-preference="window-border-style">
-        <option value="default" ${state.windowBorderStyle === WINDOW_BORDER_DEFAULT ? "selected" : ""}>默认</option>
-        <option value="theme" ${state.windowBorderStyle === WINDOW_BORDER_THEME ? "selected" : ""}>主题</option>
-      </select>
-    </label>` : "";
+  if (!runtimeCapabilities.windowBorderStyle) return "";
   return `<section class="settings-section settings-local-section">
     <header class="settings-section-header">
       <div class="settings-section-heading"><h3>本机偏好</h3><p>仅保存在当前设备，并会立即生效。</p></div>
     </header>
     <div class="settings-preference-list">
-      <label class="settings-preference-row">
-        <span class="settings-preference-copy"><strong>局部加载</strong><small>仅保留当前会话所需的内容，减少长记录占用的设备资源。</small></span>
-        <span class="settings-switch">
-          <input data-local-preference="partial-loading" type="checkbox" ${state.partialLoading ? "checked" : ""}>
-          <span class="settings-switch-track" aria-hidden="true"></span>
-        </span>
+      <label class="settings-preference-row settings-preference-select">
+        <span class="settings-preference-copy"><strong>边框样式</strong><small>选择桌面窗口边缘使用的颜色。</small></span>
+        <select data-local-preference="window-border-style">
+          <option value="default" ${state.windowBorderStyle === WINDOW_BORDER_DEFAULT ? "selected" : ""}>默认</option>
+          <option value="theme" ${state.windowBorderStyle === WINDOW_BORDER_THEME ? "selected" : ""}>主题</option>
+        </select>
       </label>
-      ${borderSetting}
     </div>
   </section>`;
 }
 
 function bindLocalPreferenceSettings(container = elements.modalContent) {
-  const partialLoading = container.querySelector('[data-local-preference="partial-loading"]');
-  partialLoading?.addEventListener("change", async () => {
-    const next = partialLoading.checked;
-    const row = partialLoading.closest(".settings-preference-row");
-    row?.classList.add("busy");
-    partialLoading.disabled = true;
-    try {
-      await setPartialLoading(next);
-    } finally {
-      if (partialLoading.isConnected) {
-        partialLoading.checked = state.partialLoading;
-        partialLoading.disabled = false;
-        row?.classList.remove("busy");
-      }
-    }
-  });
   const borderStyle = container.querySelector('[data-local-preference="window-border-style"]');
   borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));
 }

@@ -17,13 +17,11 @@ globalThis.MeFrontendRuntime = {
   },
   createEdbCache() {
     return {
-      loadScope: async () => [], loadScopeMetadata: async () => [], loadSession: async () => null,
+      loadScope: async () => [],
       discardSession: async () => {}, saveSession() {}, renderManager() {},
     };
   },
   loadCachedSessions(cache, _snapshot, scope) { return cache.loadScope(scope); },
-  loadCachedSessionMetadata(cache, _snapshot, scope) { return cache.loadScopeMetadata(scope); },
-  loadCachedSession(cache, _snapshot, scope, agentId) { return cache.loadSession(`${scope}::${agentId}`); },
   cacheKey(scope, agentId) { return `${scope}::${agentId}`; },
   persistSelection() { return Promise.resolve(); },
   loadGatewayState() { return Promise.resolve({ workspaces: [] }); },
@@ -56,8 +54,6 @@ function loadRuntime(relative) {
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
       createAgentStore: typeof createAgentStore === "function" ? createAgentStore : null,
-      releaseMaterializedStore: typeof releaseMaterializedStore === "function" ? releaseMaterializedStore : null,
-      readPartialLoadingPreference: typeof readPartialLoadingPreference === "function" ? readPartialLoadingPreference : null,
       normalizeWindowBorderStyle: typeof normalizeWindowBorderStyle === "function" ? normalizeWindowBorderStyle : null,
       localPreferenceSettingsHtml: typeof localPreferenceSettingsHtml === "function" ? localPreferenceSettingsHtml : null,
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
@@ -409,7 +405,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(runtime.eventRecoveryMatches(recovery, "main", 5)).toBe(false);
 
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(source).toContain("delete elements.terminalScreen.dataset.revision;\n  restoreDraft();\n  const materializing = startSelectedAgentMaterialization(state.workspaceId, id, true);\n  const meta =");
+      expect(source).toContain("restoreDraft();\n  const meta = state.snapshot.agents.find((agent) => agent.id === id);");
       expect(source).toContain('const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";');
       expect(source).toContain("startingRecoveryCycle || selectionChanged || Boolean(selectedUpdate?.reset)");
       expect(source).toContain("const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(");
@@ -653,7 +649,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(first.workerActivityIndexes).not.toBe(second.workerActivityIndexes);
   });
 
-  test("background-syncs every inactive Workspace while releasing partial-mode raw Events", () => {
+  test("background-syncs every inactive Workspace while retaining complete raw Events", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     gateway.state.connectionPhase = "connected";
     gateway.state.activeCatchUpPending = false;
@@ -699,9 +695,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     });
     expect(changed).toBe(true);
     const backgroundStore = workspace.stores.get("main");
-    expect(backgroundStore.events).toEqual([]);
+    expect(backgroundStore.events).toEqual([
+      event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" }),
+    ]);
     expect(backgroundStore.eventCount).toBe(1);
-    expect(backgroundStore.materialized).toBe(false);
     expect(backgroundStore.mutationRevision).toBe(0);
     expect(backgroundStore.lastEventHash).toBe("event-hash");
     expect(backgroundStore.summary).toEqual({ turnState: "Started" });
@@ -777,42 +774,32 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.agentLoadingState("w-one", "pending")).toEqual({ loading: true, percent: null });
   });
 
-  test("defaults to partial residency while preserving the selectable full-cache path", () => {
+  test("restores complete cached Events into resident Session stores", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     const edbId = "f".repeat(64);
     const snapshot = { environment: { workspace: "/workspace" }, agents: [] };
     gateway.state.snapshot = snapshot;
-    expect(gateway.state.partialLoading).toBe(true);
 
     const cachedEvents = [{ EdbIdGeneration: { edb_id: edbId } }, { UserPrompt: { content: "cached" } }];
-    const metadata = {
-      key: edbId, agentId: "retained", edbId, eventCount: cachedEvents.length,
-      mutationRevision: 2, lastEventHash: "hash-2",
+    const cached = {
+      key: edbId, agentId: "retained", edbId, events: cachedEvents,
+      eventCount: cachedEvents.length, mutationRevision: 2, lastEventHash: "hash-2",
     };
     const meta = {
-      id: "retained", edb_id: edbId, mutation_revision: 2,
+      id: "retained", edb_id: edbId, event_count: 2, mutation_revision: 2,
       prompt_submission_revision: 0, input_draft_revision: 0,
     };
-    const partial = gateway.createAgentStore(meta, metadata, snapshot);
-    expect(partial.events).toEqual([]);
-    expect(partial.eventCount).toBe(2);
-    expect(partial.cacheKey).toBe(edbId);
-    expect(partial.materialized).toBe(false);
-    expect(partial.projection.messages).toEqual([]);
-
-    gateway.state.partialLoading = false;
-    const full = gateway.createAgentStore(meta, { ...metadata, events: cachedEvents }, snapshot);
-    expect(full.events).toBe(cachedEvents);
-    expect(full.eventCount).toBe(2);
-    expect(full.materialized).toBe(true);
-    expect(full.needsReplay).toBe(true);
+    const store = gateway.createAgentStore(meta, cached, snapshot);
+    expect(store.events).toBe(cachedEvents);
+    expect(store.eventCount).toBe(2);
+    expect(store.cacheKey).toBe(edbId);
+    expect(store.summary).toEqual(gateway.projectAgentSummary(cachedEvents));
+    expect(store.needsReplay).toBe(true);
 
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    expect(source).toContain("function materializeAgentStore(bucket, meta)");
-    expect(source).toContain("function releaseMaterializedStore(store)");
-    expect(source).toContain("if (!state.partialLoading) return;");
-    expect(source).not.toContain("materializeClientAgentStore");
-    expect(source).not.toContain("releaseClientAgentStore");
+    expect(source).toContain("return frontendRuntime.loadCachedSessions(edbCache, snapshot, scope);");
+    expect(source).toContain("store.events = events;");
+    expect(source).toContain("store.events.push(...events);");
   });
 
   test("stores lightweight Gateway session metadata before raw EDB hydration", () => {
@@ -876,7 +863,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(transcriptContent.innerHTML).not.toContain("/chat");
   });
 
-  test("renders classic authenticated settings and independent login-page local preferences", () => {
+  test("renders classic authenticated settings and desktop-only local preferences", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     const model = {
       ...gateway.blankGatewayModel(), name: "model-a", provider: "openai-compatible", api_key: "visible-key",
@@ -891,13 +878,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(html).toContain('data-setting="api_key" type="text"');
     expect(html).toContain('value="visible-key"');
 
-    expect(gateway.state.partialLoading).toBe(true);
     expect(gateway.normalizeWindowBorderStyle("theme")).toBe("theme");
     expect(gateway.normalizeWindowBorderStyle("invalid")).toBe("default");
     const localHtml = gateway.localPreferenceSettingsHtml();
-    expect(localHtml).toContain("局部加载");
-    expect(localHtml).toContain('data-local-preference="partial-loading"');
-    expect(localHtml).not.toContain("边框样式");
+    expect(localHtml).toBe("");
 
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
@@ -906,17 +890,14 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain('class="settings-default-model"');
     expect(source).toContain('class="settings-subsection-header"');
     expect(source).not.toContain('class="settings-section-icon"');
-    expect(source).toContain('const PARTIAL_LOADING_PREFERENCE = "me-partial-loading";');
     expect(source).toContain('const WINDOW_BORDER_STYLE_PREFERENCE = "me-window-border-style";');
-    expect(source).toContain('return readLocalPreference(PARTIAL_LOADING_PREFERENCE) !== "disabled";');
-    expect(source).toContain("const borderSetting = runtimeCapabilities.windowBorderStyle ?");
+    expect(source).toContain('if (!runtimeCapabilities.windowBorderStyle) return "";');
     expect(source).toContain("<strong>边框样式</strong>");
     expect(source).toContain(">默认</option>");
     expect(source).toContain(">主题</option>");
-    expect(source).toContain('partialLoading?.addEventListener("change", async () => {');
     expect(source).toContain('borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));');
-    expect(source).toContain("persistLocalPreference(PARTIAL_LOADING_PREFERENCE");
     expect(source).toContain("persistLocalPreference(WINDOW_BORDER_STYLE_PREFERENCE");
+    expect(source).toContain('elements.loginSettings?.classList.toggle("hidden", !runtimeCapabilities.windowBorderStyle);');
     expect(source).toContain('elements.loginSettings?.addEventListener("click", openLocalSettings)');
     const loginStart = source.indexOf("function openLocalSettings()");
     const loginEnd = source.indexOf("\nfunction renderGatewayEdbCacheSettings", loginStart);

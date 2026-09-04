@@ -38,11 +38,10 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
-const DEVICE_PREFERENCE_KEYS: [&str; 5] = [
+const DEVICE_PREFERENCE_KEYS: [&str; 4] = [
     "me-theme",
     "me-color-mode",
     "me-send-shortcut",
-    "me-partial-loading",
     "me-window-border-style",
 ];
 
@@ -616,7 +615,6 @@ fn valid_device_preference(key: &str, value: &str) -> bool {
         ),
         "me-color-mode" => matches!(value, "light" | "dark"),
         "me-send-shortcut" => matches!(value, "enter" | "modified-enter"),
-        "me-partial-loading" => matches!(value, "enabled" | "disabled"),
         "me-window-border-style" => matches!(value, "default" | "theme"),
         _ => false,
     }
@@ -1059,16 +1057,10 @@ mod tests {
             "me-send-shortcut",
             "modified-enter"
         ));
-        assert!(valid_device_preference("me-partial-loading", "enabled"));
-        assert!(valid_device_preference("me-partial-loading", "disabled"));
         assert!(valid_device_preference("me-window-border-style", "default"));
         assert!(valid_device_preference("me-window-border-style", "theme"));
         assert!(!valid_device_preference("me-theme", "unknown"));
-        assert!(!valid_device_preference("me-partial-loading", "unknown"));
-        assert!(!valid_device_preference(
-            "me-window-border-style",
-            "accent"
-        ));
+        assert!(!valid_device_preference("me-window-border-style", "accent"));
         assert!(!valid_device_preference(
             "gateway.endpoint",
             "https://example.com"
