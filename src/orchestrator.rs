@@ -1495,6 +1495,16 @@ fn run_runtime_advance(
     });
     advancing.store(false, Ordering::Release);
     if let Err(error) = result {
+        let mut detail = error.to_string();
+        let cleanup = (|| -> Result<()> {
+            reconcile_api_states(edb)?;
+            reconcile_tool_calls(edb)?;
+            reconcile_compact_states(edb)
+        })();
+        if let Err(cleanup_error) = cleanup {
+            detail.push_str("; failed to close interrupted runtime lifecycles: ");
+            detail.push_str(&cleanup_error.to_string());
+        }
         if let Ok(Some(turn)) = latest_agent_turn(edb.events())
             && !turn.state.is_terminal()
         {
@@ -1502,13 +1512,13 @@ fn run_runtime_advance(
                 turn.turn_id,
                 turn.prompt_id,
                 AgentTurnState::Failed,
-                error.to_string(),
+                detail.clone(),
             );
-            if let Ok(mut snapshot) = edb_snapshot.lock() {
-                snapshot.refresh_from_edb(edb);
-            }
         }
-        let _ = errors.send(error.to_string());
+        if let Ok(mut snapshot) = edb_snapshot.lock() {
+            snapshot.refresh_from_edb(edb);
+        }
+        let _ = errors.send(detail);
     }
 }
 
@@ -2720,45 +2730,55 @@ impl MainAgent {
             }
             execution
         } else {
-            let execution_arguments = if call.name == "File.Edit" {
-                file_edit_execution_arguments(
-                    edb,
-                    self.toolboxes.catalog(),
-                    &self.workspace,
-                    &call.arguments,
-                    call.api_call_id,
-                )?
-            } else {
-                call.arguments.clone()
-            };
-            self.toolboxes.execute_cancellable(
-                &call.name,
-                &execution_arguments,
-                |update| match update {
-                    ToolboxUpdate::Terminal(update) => {
-                        append_terminal_update(edb, call.id, &update, on_event)
-                    }
-                    ToolboxUpdate::Text { stream, content } => {
-                        let stream = match stream.as_str() {
-                            "stdout" => ToolOutputStream::Stdout,
-                            "stderr" => ToolOutputStream::Stderr,
-                            other => {
-                                return Err(format!(
-                                    "toolbox update for {} uses unsupported stream {other:?}",
-                                    call.name
-                                )
-                                .into());
-                            }
-                        };
-                        for line in content.lines().filter(|line| !line.trim().is_empty()) {
-                            edb.append_tool_info(call.id, stream, line)?;
-                            on_event(edb)?;
+            let execution_arguments: std::result::Result<String, ToolboxExecutionError> =
+                if call.name == "File.Edit" {
+                    file_edit_execution_arguments(
+                        edb,
+                        self.toolboxes.catalog(),
+                        &self.workspace,
+                        &call.arguments,
+                        call.api_call_id,
+                    )
+                    .map_err(|error| ToolboxExecutionError::Tool {
+                        code: "invalid_arguments".into(),
+                        message: error.to_string(),
+                        retryable: false,
+                        tip: None,
+                    })
+                } else {
+                    Ok(call.arguments.clone())
+                };
+            match execution_arguments {
+                Ok(execution_arguments) => self.toolboxes.execute_cancellable(
+                    &call.name,
+                    &execution_arguments,
+                    |update| match update {
+                        ToolboxUpdate::Terminal(update) => {
+                            append_terminal_update(edb, call.id, &update, on_event)
                         }
-                        Ok(())
-                    }
-                },
-                || self.input_queue.abort_requested(call.prompt_id),
-            )
+                        ToolboxUpdate::Text { stream, content } => {
+                            let stream = match stream.as_str() {
+                                "stdout" => ToolOutputStream::Stdout,
+                                "stderr" => ToolOutputStream::Stderr,
+                                other => {
+                                    return Err(format!(
+                                        "toolbox update for {} uses unsupported stream {other:?}",
+                                        call.name
+                                    )
+                                    .into());
+                                }
+                            };
+                            for line in content.lines().filter(|line| !line.trim().is_empty()) {
+                                edb.append_tool_info(call.id, stream, line)?;
+                                on_event(edb)?;
+                            }
+                            Ok(())
+                        }
+                    },
+                    || self.input_queue.abort_requested(call.prompt_id),
+                ),
+                Err(error) => Err(error),
+            }
         };
         match execution {
             Ok(mut output) => {
@@ -5075,6 +5095,12 @@ fn tool_call_states(
                 {
                     return Err(format!("tool call {} has an empty required field", call.id));
                 }
+                if let Err(error) = serde_json::from_str::<Value>(&call.arguments) {
+                    return Err(format!(
+                        "tool call {} has invalid JSON arguments: {error}",
+                        call.id
+                    ));
+                }
                 if calls.values().any(|state| {
                     state.api_call_id == call.api_call_id && (state.has_output || state.finished)
                 }) {
@@ -6044,6 +6070,12 @@ impl MainResponseBuffer {
                 if tool.arguments.is_empty() {
                     return Err("model tool call has no arguments".into());
                 }
+                serde_json::from_str::<Value>(&tool.arguments).map_err(|error| {
+                    format!(
+                        "model tool call {} has invalid JSON arguments: {error}",
+                        tool.provider_call_id
+                    )
+                })?;
                 let name = disabled_tool_full_name(&tool.name)
                     .or_else(|| catalog.resolve_api_name(&tool.name))
                     .ok_or_else(|| format!("model called unavailable tool {}", tool.name))?;
@@ -9677,6 +9709,108 @@ mod tests {
     }
 
     #[test]
+    fn main_agent_retries_invalid_tool_json_without_persisting_tool_call() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut first, _) = listener.accept().unwrap();
+            let _ = read_http_json_request(&mut first);
+            let malformed = json!({
+                "choices": [{
+                    "delta": {
+                        "tool_calls": [{
+                            "index": 0,
+                            "id": "broken-call",
+                            "function": {
+                                "name": "Terminal_List",
+                                "arguments": "{"
+                            }
+                        }]
+                    }
+                }]
+            });
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\ndata: {malformed}\n\ndata: [DONE]\n\n"
+            );
+            first.write_all(response.as_bytes()).unwrap();
+            first.flush().unwrap();
+            drop(first);
+
+            let (mut second, _) = listener.accept().unwrap();
+            let retry = read_http_json_request(&mut second);
+            assert!(retry["messages"].as_array().unwrap().iter().all(|message| {
+                message.get("tool_calls").is_none() && message.get("tool_call_id").is_none()
+            }));
+            write_sse_content(&mut second, "recovered after invalid tool JSON");
+        });
+
+        let mut model = test_model_config("local", &["unset"]);
+        model.base_url = format!("http://{address}");
+        model.timeout_seconds = 2;
+        let mut models = ModelRuntime::new(vec![model], "local").unwrap();
+        let mut edb = EventDataBase::new();
+        let mut agent = MainAgent::new(None);
+        agent.initialize(&mut edb, &models).unwrap();
+        agent.restore(&edb, &mut models).unwrap();
+        let mut runtime = AgentRuntime::new(edb, Box::new(agent), models);
+
+        let started = Instant::now();
+        runtime
+            .submit_user_prompt("recover malformed tool response".into())
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            runtime.poll_edb().unwrap();
+            if runtime.edb_events().iter().any(|event| matches!(
+                event,
+                Event::AssistResponse(response)
+                    if response.finished && response.content == "recovered after invalid tool JSON"
+            )) {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "invalid tool JSON retry timed out"
+            );
+            thread::sleep(Duration::from_millis(1));
+        }
+        server.join().unwrap();
+
+        assert!(started.elapsed() >= API_RETRY_DELAYS[0]);
+        let events = runtime.edb_events();
+        assert!(
+            events
+                .iter()
+                .all(|event| !matches!(event, Event::ToolCall(_)))
+        );
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ApiStateUpdate(update) if update.state == ApiState::Requesting
+                ))
+                .count(),
+            2
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ApiStateUpdate(update)
+                if update.state == ApiState::Error
+                    && update.detail.contains("invalid JSON arguments")
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ApiStateUpdate(update)
+                if update.state == ApiState::Retrying && update.retry_count == 1
+        )));
+        assert!(events.iter().any(|event| matches!(
+            event,
+            Event::ApiStateUpdate(update) if update.state == ApiState::Completed
+        )));
+    }
+
+    #[test]
     fn main_agent_executes_multi_tool_batch_serially_and_continues_after_failure() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
@@ -12222,6 +12356,58 @@ for line in sys.stdin:
     }
 
     #[test]
+    fn file_edit_preparation_failure_persists_a_failed_tool_result() {
+        let mut agent = MainAgent::new(None);
+        let mut edb = EventDataBase::new();
+        initialize_main_for_test(&agent, &mut edb);
+        let prompt = edb.append_user_prompt("edit").unwrap();
+        let api = edb.append_api_requesting(prompt).unwrap();
+        edb.append_api_state(api, prompt, ApiState::Streaming, "")
+            .unwrap();
+        edb.append_assist_response(prompt, "", true).unwrap();
+        let tool_call_id = edb
+            .append_tool_call(api, prompt, "invalid-edit", "File.Edit", "[]")
+            .unwrap();
+        edb.append_api_state(api, prompt, ApiState::Completed, "")
+            .unwrap();
+        let Event::ToolCall(call) = edb.get(tool_call_id).cloned().unwrap() else {
+            unreachable!()
+        };
+        let models = ModelRuntime::from(unused_model_api());
+
+        let outcome = agent
+            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .unwrap();
+        assert!(matches!(outcome, ToolExecutionOutcome::Completed));
+
+        let result = edb.events().iter().find_map(|event| match event {
+            Event::ToolCallResult(result) if result.tool_call_id == tool_call_id => Some(result),
+            _ => None,
+        });
+        let result = result.expect("File.Edit preparation failure must persist a result");
+        assert_eq!(result.state, ToolResultState::Failed);
+        let detail: Value = serde_json::from_str(&result.detail).unwrap();
+        assert_eq!(detail["error"]["code"], "invalid_arguments");
+        assert_eq!(detail["error"]["retryable"], false);
+        assert!(
+            detail["error"]["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("must be a JSON object"))
+        );
+        assert_eq!(
+            edb.events()
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    Event::ToolCallResult(result) if result.tool_call_id == tool_call_id
+                ))
+                .count(),
+            1
+        );
+        agent.supports_edb(&edb).unwrap();
+    }
+
+    #[test]
     fn manager_can_execute_a_loaded_low_level_tool_as_fallback() {
         let nonce = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -13414,6 +13600,24 @@ for line in sys.stdin:
         assert_eq!(tools[0].provider_call_id, "call-1");
         assert_eq!(tools[0].name, terminal::LIST);
         assert_eq!(tools[0].arguments, "{}");
+    }
+
+    #[test]
+    fn main_response_rejects_incomplete_tool_arguments() {
+        let mut response = MainResponseBuffer::default();
+        response
+            .push(
+                r#"data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call-broken","function":{"name":"Terminal_Status","arguments":"{\"session_id\":\"pty-1"}}]}}]}"#,
+            )
+            .unwrap();
+        response.push("data: [DONE]").unwrap();
+
+        let error = response
+            .complete_tools(&ToolboxCatalog::default_terminal_for_test())
+            .err()
+            .expect("incomplete JSON arguments must reject the whole model response");
+        assert!(error.to_string().contains("invalid JSON arguments"));
+        assert!(error.to_string().contains("EOF while parsing a string"));
     }
 
     #[test]

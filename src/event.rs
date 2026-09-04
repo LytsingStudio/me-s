@@ -2718,7 +2718,7 @@ impl EventDataBase {
             .map(Event::id)
             .map_or(Ok(0), |id| id.checked_add(1).ok_or("EventId exhausted"))?;
         let next_event_id = persisted_next_event_id.max(next_after_events);
-        Ok(Self {
+        let mut edb = Self {
             events,
             file: Some(file),
             path: Some(path.to_owned()),
@@ -2726,7 +2726,82 @@ impl EventDataBase {
             next_event_id,
             mutation_revision: 0,
             last_mutation: None,
-        })
+        };
+        edb.repair_invalid_tool_call_tail()?;
+        Ok(edb)
+    }
+
+    fn repair_invalid_tool_call_tail(&mut self) -> Result<()> {
+        let Some((invalid_order, api_call_id, prompt_id, tool_call_id)) = self
+            .events
+            .iter()
+            .enumerate()
+            .find_map(|(order, event)| match event {
+                Event::ToolCall(call)
+                    if serde_json::from_str::<serde_json::Value>(&call.arguments).is_err() =>
+                {
+                    Some((order, call.api_call_id, call.prompt_id, call.id))
+                }
+                _ => None,
+            })
+        else {
+            return Ok(());
+        };
+        let prefix = &self.events[..invalid_order];
+        if !prefix.iter().any(|event| {
+            matches!(
+                event,
+                Event::ApiStateUpdate(update)
+                    if update.id == api_call_id
+                        && update.api_call_id == api_call_id
+                        && update.prompt_id == prompt_id
+                        && update.state == ApiState::Requesting
+            )
+        }) {
+            return Err(format!(
+                "cannot recover invalid JSON tool call {tool_call_id}: API call {api_call_id} is missing"
+            )
+            .into());
+        }
+        if prefix.iter().any(|event| {
+            matches!(
+                event,
+                Event::ApiStateUpdate(update)
+                    if update.api_call_id == api_call_id && update.state.is_terminal()
+            )
+        }) {
+            return Err(format!(
+                "cannot recover invalid JSON tool call {tool_call_id}: API call {api_call_id} already ended before the tool call"
+            )
+            .into());
+        }
+
+        let id = self.next_event_id;
+        let next_event_id = id.checked_add(1).ok_or("EventId exhausted")?;
+        let timestamp_ms = self.next_timestamp_ms()?;
+        let mut events = prefix.to_vec();
+        events.push(Event::ApiStateUpdate(ApiStateUpdateEvent {
+            id,
+            timestamp_ms,
+            api_call_id,
+            prompt_id,
+            state: ApiState::Interrupted,
+            retry_count: 0,
+            retry_limit: 0,
+            usage: None,
+            detail: "model response was incomplete; discarded its invalid tool call and all later events during startup recovery".into(),
+        }));
+        validate_event_ids(&events)?;
+        validate_edb_identity(&events)?;
+        let persisted_size_bytes = if let Some(path) = &self.path {
+            persist_replacement(path, &events, next_event_id, &mut self.file)?
+        } else {
+            0
+        };
+        self.events = events;
+        self.persisted_size_bytes = persisted_size_bytes;
+        self.next_event_id = next_event_id;
+        Ok(())
     }
 
     pub(crate) fn close_storage(&mut self) {
@@ -6834,6 +6909,110 @@ mod tests {
         ));
         drop(edb);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_repairs_invalid_json_tool_call_by_truncating_and_interrupting_its_api() {
+        let directory = temporary_path("invalid-tool-json-recovery");
+        let path = directory.join("main.edb");
+        let (bad_tool, later_prompt, damaged_next_event_id, api_call_id, prompt_id);
+        {
+            let mut edb = EventDataBase::open(&path).unwrap();
+            edb.append_agent_kind_def(AgentKind::Interactive, "chatbot", None, None)
+                .unwrap();
+            edb.append_initial_model("test").unwrap();
+            edb.append_initial_reasoning_effort("unset").unwrap();
+            prompt_id = edb.append_user_prompt("edit it").unwrap();
+            edb.append_agent_turn(prompt_id, prompt_id, AgentTurnState::Started, "")
+                .unwrap();
+            api_call_id = edb.append_api_requesting(prompt_id).unwrap();
+            edb.append_api_state(api_call_id, prompt_id, ApiState::Streaming, "")
+                .unwrap();
+            bad_tool = edb
+                .append_tool_call(
+                    api_call_id,
+                    prompt_id,
+                    "broken-edit",
+                    "File.Edit",
+                    r#"{"path":"renderer.js","edits":[{"operation":"replace""#,
+                )
+                .unwrap();
+            edb.append_api_state(api_call_id, prompt_id, ApiState::Completed, "")
+                .unwrap();
+            edb.append_agent_turn(
+                prompt_id,
+                prompt_id,
+                AgentTurnState::Failed,
+                "EOF while parsing a string",
+            )
+            .unwrap();
+            later_prompt = edb.append_user_prompt("continue").unwrap();
+            edb.append_agent_turn(later_prompt, later_prompt, AgentTurnState::Started, "")
+                .unwrap();
+            edb.append_api_requesting(later_prompt).unwrap();
+            damaged_next_event_id = edb.next_event_id();
+        }
+
+        let repaired = EventDataBase::open(&path).unwrap();
+        assert!(repaired.get(bad_tool).is_none());
+        assert!(repaired.get(later_prompt).is_none());
+        assert_eq!(repaired.next_event_id(), damaged_next_event_id + 1);
+        assert!(matches!(
+            repaired.events().last(),
+            Some(Event::ApiStateUpdate(update))
+                if update.id == damaged_next_event_id
+                    && update.api_call_id == api_call_id
+                    && update.prompt_id == prompt_id
+                    && update.state == ApiState::Interrupted
+                    && update.detail.contains("startup recovery")
+        ));
+        let repaired_events = repaired.events().to_vec();
+        drop(repaired);
+
+        let reopened = EventDataBase::open(&path).unwrap();
+        assert_eq!(reopened.events(), repaired_events.as_slice());
+        assert_eq!(reopened.next_event_id(), damaged_next_event_id + 1);
+        drop(reopened);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn opening_refuses_to_guess_invalid_tool_recovery_without_an_active_api_prefix() {
+        for (label, terminal_before_tool, expected) in [
+            ("missing-api", false, "API call 999 is missing"),
+            ("completed-api", true, "already ended before the tool call"),
+        ] {
+            let directory = temporary_path(label);
+            let path = directory.join("main.edb");
+            {
+                let mut edb = EventDataBase::open(&path).unwrap();
+                let prompt = edb.append_user_prompt("bad history").unwrap();
+                let api_call_id = if terminal_before_tool {
+                    let api = edb.append_api_requesting(prompt).unwrap();
+                    edb.append_api_state(api, prompt, ApiState::Completed, "")
+                        .unwrap();
+                    api
+                } else {
+                    999
+                };
+                edb.append_tool_call(
+                    api_call_id,
+                    prompt,
+                    "broken",
+                    "File.Edit",
+                    r#"{"path":"file","edits":["#,
+                )
+                .unwrap();
+            }
+            let original = fs::read(&path).unwrap();
+
+            let error = EventDataBase::open(&path)
+                .err()
+                .expect("unconfirmed recovery must fail");
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(fs::read(&path).unwrap(), original);
+            fs::remove_dir_all(directory).unwrap();
+        }
     }
 
     #[test]

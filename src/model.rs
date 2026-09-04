@@ -386,6 +386,13 @@ pub fn openai_stream_event(line: &str) -> Result<OpenAiStreamEvent> {
     if value.get("type").is_some() {
         return responses_stream_event(&value);
     }
+    if value
+        .pointer("/choices/0/finish_reason")
+        .and_then(Value::as_str)
+        == Some("length")
+    {
+        return Err("model response was truncated at the output token limit".into());
+    }
     let content = value
         .pointer("/choices/0/delta/content")
         .and_then(Value::as_str)
@@ -929,6 +936,13 @@ mod tests {
         assert_eq!(
             openai_stream_event("data: [DONE]").unwrap(),
             OpenAiStreamEvent::Done
+        );
+        let error =
+            openai_stream_event(r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#)
+                .unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "model response was truncated at the output token limit"
         );
     }
 
