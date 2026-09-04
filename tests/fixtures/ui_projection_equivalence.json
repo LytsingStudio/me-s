@@ -1,0 +1,902 @@
+{
+  "cases": [
+    {
+      "events": [
+        {
+          "EdbIdGeneration": {
+            "edb_id": "384565e929011c9b786a99afbcbeba8e22568264b01b53384f90bc4d3a1630e5",
+            "id": 0,
+            "timestamp_ms": 1788548743743
+          }
+        },
+        {
+          "AgentKindDef": {
+            "id": 1,
+            "kind": "Primary",
+            "orchestrator": "main-agent",
+            "parent_agent_id": null,
+            "system_prompt": null,
+            "timestamp_ms": 1788548743744
+          }
+        },
+        {
+          "ModelChanged": {
+            "cause": "Initial",
+            "id": 2,
+            "model": "model-a",
+            "timestamp_ms": 1788548743745
+          }
+        },
+        {
+          "ReasoningEffortChanged": {
+            "cause": "Initial",
+            "effort": "high",
+            "id": 3,
+            "timestamp_ms": 1788548743745
+          }
+        },
+        {
+          "UserPrompt": {
+            "content": "hello\nworld",
+            "id": 4,
+            "timestamp_ms": 1788548743745
+          }
+        },
+        {
+          "AgentTurn": {
+            "detail": "",
+            "id": 5,
+            "prompt_id": 4,
+            "state": "Started",
+            "timestamp_ms": 1788548743745,
+            "turn_id": 4
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 6,
+            "detail": "",
+            "id": 6,
+            "prompt_id": 4,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "state": "Requesting",
+            "timestamp_ms": 1788548743745,
+            "usage": null
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 6,
+            "detail": "",
+            "id": 7,
+            "prompt_id": 4,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "state": "Streaming",
+            "timestamp_ms": 1788548743745,
+            "usage": null
+          }
+        },
+        {
+          "AssistResponse": {
+            "content": "I will **check**.\n",
+            "finished": false,
+            "id": 8,
+            "prompt_id": 4,
+            "timestamp_ms": 1788548743745
+          }
+        },
+        {
+          "ToolCall": {
+            "api_call_id": 6,
+            "arguments": "{\"cwd\":\".\"}",
+            "id": 9,
+            "name": "Terminal.Create",
+            "prompt_id": 4,
+            "provider_call_id": "provider-tool",
+            "timestamp_ms": 1788548743745
+          }
+        },
+        {
+          "ToolInfoUpdate": {
+            "content": {
+              "kind": "terminal",
+              "value": {
+                "cursor": {
+                  "col": 5,
+                  "row": 0,
+                  "underlying": "",
+                  "visible": true
+                },
+                "exit_code": null,
+                "height": 1,
+                "rows": [
+                  {
+                    "row": 0,
+                    "runs": [
+                      {
+                        "col": 0,
+                        "style": 0,
+                        "text": "ready  ",
+                        "width": 7
+                      }
+                    ]
+                  }
+                ],
+                "sequence": 1,
+                "session_id": "pty-1",
+                "state": "running",
+                "style_count": 1,
+                "style_defs": [],
+                "truncated": false,
+                "viewport": [
+                  0,
+                  0
+                ],
+                "width": 80
+              }
+            },
+            "id": 10,
+            "stream": "Terminal",
+            "timestamp_ms": 1788548743745,
+            "tool_call_id": 9
+          }
+        },
+        {
+          "ToolCallResult": {
+            "detail": "{\"session_id\":\"pty-1\"}",
+            "exit_code": 0,
+            "id": 11,
+            "state": "Succeeded",
+            "timestamp_ms": 1788548743745,
+            "tool_call_id": 9
+          }
+        },
+        {
+          "AssistResponse": {
+            "content": "done $x^2$",
+            "finished": true,
+            "id": 12,
+            "prompt_id": 4,
+            "timestamp_ms": 1788548743745
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 6,
+            "detail": "",
+            "id": 13,
+            "prompt_id": 4,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "state": "Completed",
+            "timestamp_ms": 1788548743745,
+            "usage": {
+              "input_tokens": 100,
+              "output_tokens": 20,
+              "total_tokens": 120
+            }
+          }
+        },
+        {
+          "ContextUsageEstimate": {
+            "api_state_event_id": 13,
+            "id": 14,
+            "timestamp_ms": 1788548743745,
+            "values": {
+              "compact": 0,
+              "memory": 0,
+              "model": 50,
+              "system": 30,
+              "tool": 20,
+              "user": 20
+            }
+          }
+        },
+        {
+          "AgentTurn": {
+            "detail": "",
+            "id": 15,
+            "prompt_id": 4,
+            "state": "Completed",
+            "timestamp_ms": 1788548743745,
+            "turn_id": 4
+          }
+        }
+      ],
+      "name": "completed-tool-turn",
+      "projection": {
+        "apiState": "Completed",
+        "apiUsage": {
+          "input_tokens": 100,
+          "output_tokens": 20,
+          "total_tokens": 120
+        },
+        "context": {
+          "compact_analysis": null,
+          "compact_content": null,
+          "memory_content": null,
+          "total": 120,
+          "values": {
+            "compact": 0,
+            "memory": 0,
+            "model": 50,
+            "system": 30,
+            "tool": 20,
+            "user": 20
+          }
+        },
+        "effort": "high",
+        "messages": [
+          {
+            "content": "hello\nworld",
+            "eventId": 4,
+            "key": "user:4",
+            "kind": "user",
+            "revision": 4,
+            "rewindable": true,
+            "timestamp": 1788548743745
+          },
+          {
+            "content": "I will **check**.\ndone $x^2$",
+            "key": "assistant:4:8",
+            "kind": "assistant",
+            "revision": 12,
+            "timestamp": 1788548743745
+          },
+          {
+            "key": "tool:9",
+            "kind": "tool",
+            "revision": 9,
+            "timestamp": 1788548743745,
+            "tool": {
+              "apiCallId": 6,
+              "args": {
+                "cwd": "."
+              },
+              "arguments": "{\"cwd\":\".\"}",
+              "id": 9,
+              "name": "Terminal.Create",
+              "output": "000000: ready",
+              "queued": false,
+              "result": {
+                "detail": "{\"session_id\":\"pty-1\"}",
+                "exitCode": 0,
+                "finished": 1788548743745,
+                "state": "Succeeded"
+              },
+              "revision": 11,
+              "sessionId": "pty-1",
+              "started": 1788548743745,
+              "updates": [
+                {
+                  "kind": "terminal",
+                  "value": {
+                    "cursor": {
+                      "col": 5,
+                      "row": 0,
+                      "underlying": "",
+                      "visible": true
+                    },
+                    "exit_code": null,
+                    "height": 1,
+                    "rows": [
+                      {
+                        "row": 0,
+                        "runs": [
+                          {
+                            "col": 0,
+                            "style": 0,
+                            "text": "ready  ",
+                            "width": 7
+                          }
+                        ]
+                      }
+                    ],
+                    "sequence": 1,
+                    "session_id": "pty-1",
+                    "state": "running",
+                    "style_count": 1,
+                    "style_defs": [],
+                    "truncated": false,
+                    "viewport": [
+                      0,
+                      0
+                    ],
+                    "width": 80
+                  }
+                }
+              ]
+            }
+          }
+        ],
+        "model": "model-a",
+        "summary": {
+          "turn_state": "Completed"
+        },
+        "systemPrompt": {
+          "changes": [],
+          "content": null,
+          "event_id": null,
+          "mode": "Default"
+        },
+        "turnState": {
+          "prompt_id": 4,
+          "state": "completed"
+        },
+        "workmap": {
+          "current": null,
+          "history": [],
+          "memory": {
+            "agreements": [],
+            "facts": []
+          },
+          "recordCount": 0
+        }
+      }
+    },
+    {
+      "events": [
+        {
+          "EdbIdGeneration": {
+            "edb_id": "c999b86a806fa7233a6248d8e52d23f9308183a0933e7092e33a25c25e5da926",
+            "id": 0,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "AgentKindDef": {
+            "id": 1,
+            "kind": "Primary",
+            "orchestrator": "main-agent",
+            "parent_agent_id": null,
+            "system_prompt": null,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "UserPrompt": {
+            "content": "retry",
+            "id": 2,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "AgentTurn": {
+            "detail": "",
+            "id": 3,
+            "prompt_id": 2,
+            "state": "Started",
+            "timestamp_ms": 1788548743750,
+            "turn_id": 2
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 4,
+            "detail": "",
+            "id": 4,
+            "prompt_id": 2,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "state": "Requesting",
+            "timestamp_ms": 1788548743750,
+            "usage": null
+          }
+        },
+        {
+          "AssistResponse": {
+            "content": "discarded partial",
+            "finished": false,
+            "id": 5,
+            "prompt_id": 2,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 4,
+            "detail": "temporary",
+            "id": 6,
+            "prompt_id": 2,
+            "retry_count": 1,
+            "retry_limit": 3,
+            "state": "Retrying",
+            "timestamp_ms": 1788548743750,
+            "usage": null
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 4,
+            "detail": "boom",
+            "id": 7,
+            "prompt_id": 2,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "state": "Error",
+            "timestamp_ms": 1788548743750,
+            "usage": null
+          }
+        },
+        {
+          "AgentTurn": {
+            "detail": "boom",
+            "id": 8,
+            "prompt_id": 2,
+            "state": "Failed",
+            "timestamp_ms": 1788548743750,
+            "turn_id": 2
+          }
+        }
+      ],
+      "name": "failed-retry-turn",
+      "projection": {
+        "apiState": "Error",
+        "apiUsage": null,
+        "context": {
+          "compact_analysis": null,
+          "compact_content": null,
+          "memory_content": null,
+          "total": null,
+          "values": {
+            "compact": 0,
+            "memory": 0,
+            "model": 0,
+            "system": 0,
+            "tool": 0,
+            "user": 0
+          }
+        },
+        "effort": null,
+        "messages": [
+          {
+            "content": "retry",
+            "eventId": 2,
+            "key": "user:2",
+            "kind": "user",
+            "revision": 2,
+            "rewindable": true,
+            "timestamp": 1788548743750
+          },
+          {
+            "content": "API 正在重试 1/3",
+            "key": "notice:6",
+            "kind": "notice",
+            "revision": 6,
+            "timestamp": 1788548743750
+          },
+          {
+            "content": "API 错误：boom",
+            "key": "notice:7",
+            "kind": "notice",
+            "revision": 7,
+            "timestamp": 1788548743750
+          }
+        ],
+        "model": null,
+        "summary": {
+          "turn_state": "Failed"
+        },
+        "systemPrompt": {
+          "changes": [],
+          "content": null,
+          "event_id": null,
+          "mode": "Default"
+        },
+        "turnState": {
+          "prompt_id": 2,
+          "state": "completed"
+        },
+        "workmap": {
+          "current": null,
+          "history": [],
+          "memory": {
+            "agreements": [],
+            "facts": []
+          },
+          "recordCount": 0
+        }
+      }
+    },
+    {
+      "events": [
+        {
+          "EdbIdGeneration": {
+            "edb_id": "e535f92d943a9c6455950689e192b9ee8182ec55857b5771f69e41884c93c1cc",
+            "id": 0,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "AgentKindDef": {
+            "id": 1,
+            "kind": "Primary",
+            "orchestrator": "chatbot",
+            "parent_agent_id": null,
+            "system_prompt": null,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ModelChanged": {
+            "cause": "Initial",
+            "id": 2,
+            "model": "model-a",
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ReasoningEffortChanged": {
+            "cause": "Initial",
+            "effort": "low",
+            "id": 3,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "SystemStaticPromptChange": {
+            "content": "You are precise.\n回答准确。",
+            "id": 4,
+            "mode": "Custom",
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ModelChanged": {
+            "cause": "User",
+            "id": 5,
+            "model": "model-b",
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ReasoningEffortChanged": {
+            "cause": "User",
+            "effort": "high",
+            "id": 6,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "SystemStaticPromptChange": {
+            "content": null,
+            "id": 7,
+            "mode": "Default",
+            "timestamp_ms": 1788548743750
+          }
+        }
+      ],
+      "name": "settings-notices",
+      "projection": {
+        "apiState": null,
+        "apiUsage": null,
+        "context": {
+          "compact_analysis": null,
+          "compact_content": null,
+          "memory_content": null,
+          "total": null,
+          "values": {
+            "compact": 0,
+            "memory": 0,
+            "model": 0,
+            "system": 0,
+            "tool": 0,
+            "user": 0
+          }
+        },
+        "effort": "high",
+        "messages": [
+          {
+            "content": "系统提示词已更新\nYou are precise.\n回答准确。",
+            "key": "notice:4",
+            "kind": "notice",
+            "revision": 4,
+            "timestamp": 1788548743750
+          },
+          {
+            "content": "模型已变更为 model-b",
+            "key": "notice:5",
+            "kind": "notice",
+            "revision": 5,
+            "timestamp": 1788548743750
+          },
+          {
+            "content": "effort 已变更为 high",
+            "key": "notice:6",
+            "kind": "notice",
+            "revision": 6,
+            "timestamp": 1788548743750
+          },
+          {
+            "content": "系统提示词已恢复默认",
+            "key": "notice:7",
+            "kind": "notice",
+            "revision": 7,
+            "timestamp": 1788548743750
+          }
+        ],
+        "model": "model-b",
+        "summary": {
+          "turn_state": null
+        },
+        "systemPrompt": {
+          "changes": [
+            {
+              "content": "You are precise.\n回答准确。",
+              "id": 4,
+              "mode": "Custom"
+            },
+            {
+              "content": null,
+              "id": 7,
+              "mode": "Default"
+            }
+          ],
+          "content": null,
+          "event_id": 7,
+          "mode": "Default"
+        },
+        "turnState": null,
+        "workmap": {
+          "current": null,
+          "history": [],
+          "memory": {
+            "agreements": [],
+            "facts": []
+          },
+          "recordCount": 0
+        }
+      }
+    },
+    {
+      "events": [
+        {
+          "EdbIdGeneration": {
+            "edb_id": "b48931949aa72084db2b2696ef173a4ce196a71857fdb8b4752c62ec7a6b2f07",
+            "id": 0,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "AgentKindDef": {
+            "id": 1,
+            "kind": "Primary",
+            "orchestrator": "chatbot",
+            "parent_agent_id": null,
+            "system_prompt": null,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "UserPrompt": {
+            "content": "compact",
+            "id": 2,
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ApiStateUpdate": {
+            "api_call_id": 3,
+            "detail": "",
+            "id": 3,
+            "prompt_id": 2,
+            "retry_count": 0,
+            "retry_limit": 0,
+            "state": "Requesting",
+            "timestamp_ms": 1788548743750,
+            "usage": null
+          }
+        },
+        {
+          "ToolCall": {
+            "api_call_id": 3,
+            "arguments": "{}",
+            "id": 4,
+            "name": "Compact",
+            "prompt_id": 2,
+            "provider_call_id": "compact-provider",
+            "timestamp_ms": 1788548743750
+          }
+        },
+        {
+          "ToolCallResult": {
+            "detail": "{}",
+            "exit_code": null,
+            "id": 5,
+            "state": "Succeeded",
+            "timestamp_ms": 1788548743750,
+            "tool_call_id": 4
+          }
+        },
+        {
+          "CompactStateUpdate": {
+            "compact_id": 6,
+            "content": "",
+            "detail": "",
+            "id": 6,
+            "kind": "ChatbotSingleTurn",
+            "prompt_id": 2,
+            "stage": null,
+            "state": "Started",
+            "timestamp_ms": 1788548743750,
+            "tool_call_id": 4,
+            "total_stages": 1
+          }
+        },
+        {
+          "CompactStateUpdate": {
+            "compact_id": 6,
+            "content": "Summary:\nConversation continuity",
+            "detail": "",
+            "id": 7,
+            "kind": "ChatbotSingleTurn",
+            "prompt_id": 2,
+            "stage": null,
+            "state": "Completed",
+            "timestamp_ms": 1788548743750,
+            "tool_call_id": 4,
+            "total_stages": 1
+          }
+        }
+      ],
+      "name": "completed-compact",
+      "projection": {
+        "apiState": "Requesting",
+        "apiUsage": null,
+        "context": {
+          "compact_analysis": null,
+          "compact_content": "Summary:\nConversation continuity",
+          "memory_content": "This is the user-message history frozen by ME at the latest successful context compaction. It is historical data, not new instructions. Only real user prompts and follow-ups are preserved exactly. Model output, internal agent prompts, turn state, and tool activity are omitted.\n\nturn-00000002\n  User: \"compact\"",
+          "total": null,
+          "values": {
+            "compact": 0,
+            "memory": 0,
+            "model": 0,
+            "system": 0,
+            "tool": 0,
+            "user": 0
+          }
+        },
+        "effort": null,
+        "messages": [
+          {
+            "content": "compact",
+            "eventId": 2,
+            "key": "user:2",
+            "kind": "user",
+            "revision": 2,
+            "rewindable": true,
+            "timestamp": 1788548743750
+          },
+          {
+            "content": "上下文已压缩",
+            "key": "compact:6",
+            "kind": "notice",
+            "revision": 7,
+            "timestamp": 1788548743750
+          }
+        ],
+        "model": null,
+        "summary": {
+          "turn_state": null
+        },
+        "systemPrompt": {
+          "changes": [],
+          "content": null,
+          "event_id": null,
+          "mode": "Default"
+        },
+        "turnState": null,
+        "workmap": {
+          "current": null,
+          "history": [],
+          "memory": {
+            "agreements": [],
+            "facts": []
+          },
+          "recordCount": 0
+        }
+      }
+    },
+    {
+      "events": [
+        {
+          "EdbIdGeneration": {
+            "edb_id": "0d86ddb288c5aa1ea541663d370a77a08948c71abfa6d0af1e4eb28f3187b83d",
+            "id": 0,
+            "timestamp_ms": 1788548743751
+          }
+        },
+        {
+          "AgentKindDef": {
+            "id": 1,
+            "kind": "Primary",
+            "orchestrator": "main-agent",
+            "parent_agent_id": null,
+            "system_prompt": null,
+            "timestamp_ms": 1788548743751
+          }
+        },
+        {
+          "UserPrompt": {
+            "content": "invisible reply",
+            "id": 2,
+            "timestamp_ms": 1788548743751
+          }
+        },
+        {
+          "AssistResponse": {
+            "content": "​⁠",
+            "finished": true,
+            "id": 3,
+            "prompt_id": 2,
+            "timestamp_ms": 1788548743751
+          }
+        }
+      ],
+      "name": "default-ignorable",
+      "projection": {
+        "apiState": null,
+        "apiUsage": null,
+        "context": {
+          "compact_analysis": null,
+          "compact_content": null,
+          "memory_content": null,
+          "total": null,
+          "values": {
+            "compact": 0,
+            "memory": 0,
+            "model": 0,
+            "system": 0,
+            "tool": 0,
+            "user": 0
+          }
+        },
+        "effort": null,
+        "messages": [
+          {
+            "content": "invisible reply",
+            "eventId": 2,
+            "key": "user:2",
+            "kind": "user",
+            "revision": 2,
+            "rewindable": true,
+            "timestamp": 1788548743751
+          },
+          {
+            "content": "​⁠",
+            "key": "assistant:2:3",
+            "kind": "assistant",
+            "revision": 3,
+            "timestamp": 1788548743751
+          }
+        ],
+        "model": null,
+        "summary": {
+          "turn_state": null
+        },
+        "systemPrompt": {
+          "changes": [],
+          "content": null,
+          "event_id": null,
+          "mode": "Default"
+        },
+        "turnState": {
+          "prompt_id": 2,
+          "state": "completed"
+        },
+        "workmap": {
+          "current": null,
+          "history": [],
+          "memory": {
+            "agreements": [],
+            "facts": []
+          },
+          "recordCount": 0
+        }
+      }
+    }
+  ]
+}

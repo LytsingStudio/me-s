@@ -113,12 +113,12 @@ describe("browser-local raw EDB cache", () => {
     expect(cacheSource).not.toContain("projection:");
     expect(cacheSource).not.toContain("workmap:");
 
-    expect(sharedSource).toContain("cache_metadata_only: !state.edbCacheInitialized");
+    expect(sharedSource).toContain("cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized");
     expect(sharedSource).toContain('["initial", "reconnecting"].includes(state.connectionPhase)');
     expect(sharedSource).toContain("await hydrateEdbCache(message.snapshot)");
     expect(sharedSource).toContain("const entries = await loadEdbCacheEntries(snapshot)");
     expect(sharedSource).toContain("return frontendRuntime.loadCachedSessions(edbCache, snapshot, scope)");
-    expect(sharedSource).toContain("const events = Array.isArray(cached?.events) ? cached.events : [];");
+    expect(sharedSource).toContain("const events = raw && Array.isArray(cached?.events) ? cached.events : [];");
     expect(sharedSource).toContain("summary: projectAgentSummary(events)");
     expect(sharedSource).toContain("store.events = events;");
     expect(sharedSource).toContain("store.events.push(...events);");
@@ -126,7 +126,9 @@ describe("browser-local raw EDB cache", () => {
     expect(sharedSource).toContain("state.stores.clear()");
     expect(sharedSource).toContain("projection: emptyProjection()");
     expect(sharedSource).toContain("workmap: emptyWorkMap()");
-    expect(sharedSource).toContain("loadProgress: createAgentLoadProgress(meta, eventCount, mutationRevision)");
+    expect(sharedSource).toContain("loadProgress: raw ? createAgentLoadProgress(meta, eventCount, mutationRevision) : null");
+    expect(sharedSource).toContain("if (usesUiProjection()) return;");
+    expect(sharedSource).toContain("if (!usesUiProjection() && message.cache_metadata_only)");
     expect(sharedSource).not.toContain("startupPending: true");
 
     for (const runtimeSource of [directRuntime, gatewayRuntime]) {

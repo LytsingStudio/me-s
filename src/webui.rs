@@ -35,6 +35,7 @@ use crate::{
         CHAT_ACTIVITY_TOOL_NAMES, CHAT_HIDDEN_TOOL_NAMES, CHAT_HIDDEN_TOOL_PREFIXES, UiBackend,
         UiCommand, UiCommandGateway, UiCommandReceipt, UiModelOption, UiSnapshot,
     },
+    ui_projection::{UiProjectionCursor, UiProjectionQueryError},
     web_auth::WebSessionAuth,
     workspace::AgentId,
 };
@@ -373,15 +374,21 @@ struct SyncRequest {
     terminal_revision: Option<u64>,
     #[serde(default)]
     cache_metadata_only: bool,
+    #[serde(default)]
+    ui_projection: bool,
 }
 
 #[derive(Deserialize)]
 struct SyncAgentCursor {
     id: String,
+    #[serde(default)]
     event_count: usize,
+    #[serde(default)]
     mutation_revision: u64,
     #[serde(default)]
     cursor_event_hash: Option<String>,
+    #[serde(default)]
+    projection_revision: Option<String>,
 }
 
 fn cursor_event_hash_matches(cursor: &SyncAgentCursor, events: &[Event]) -> bool {
@@ -403,8 +410,20 @@ fn sync_state_payload(
     terminal_session: Option<String>,
     terminal_revision: Option<u64>,
     cache_metadata_only: bool,
+    ui_projection: bool,
 ) -> Result<serde_json::Value> {
-    let snapshot = backend.snapshot()?;
+    let projection_cursors = cursors
+        .iter()
+        .map(|cursor| UiProjectionCursor {
+            agent_id: cursor.id.clone(),
+            revision: cursor.projection_revision.clone(),
+        })
+        .collect::<Vec<_>>();
+    let (snapshot, projection_states) = if ui_projection {
+        backend.snapshot_with_ui_projection_states(&projection_cursors)?
+    } else {
+        (backend.snapshot()?, Vec::new())
+    };
     let snapshot_changed = snapshot_revision != Some(snapshot.revision);
     let selected_agent = selected_agent
         .map(AgentId::new)
@@ -417,7 +436,7 @@ fn sync_state_payload(
     let mut event_updates = Vec::new();
     let mut remaining_event_bytes = MAX_EVENT_BATCH_BYTES;
     let mut more_events = false;
-    if !cache_metadata_only {
+    if !ui_projection && !cache_metadata_only {
         let mut agent_indexes = (0..snapshot.agents.len()).collect::<Vec<_>>();
         agent_indexes.sort_by_key(|index| {
             usize::from(selected_agent.as_ref() != Some(&snapshot.agents[*index].id))
@@ -549,6 +568,8 @@ fn sync_state_payload(
         "type": "state",
         "snapshot": snapshot_payload,
         "event_updates": event_updates,
+        "ui_projection": ui_projection,
+        "projection_states": projection_states,
         "cache_metadata_only": cache_metadata_only,
         "more_events": more_events,
         "selected_agent": selected_agent_id,
@@ -669,6 +690,16 @@ fn route_managed(
         (&Method::Post, "/api/sync")
         | (&Method::Get, "/api/snapshot")
         | (&Method::Post, "/api/command") => operational_route(
+            request,
+            backend,
+            commands,
+            remote_control,
+            session_terminals,
+            host_files,
+            path,
+            query,
+        ),
+        (&Method::Get, path) if path.starts_with("/api/ui-projections/") => operational_route(
             request,
             backend,
             commands,
@@ -852,6 +883,9 @@ fn operational_route(
         )),
         (&Method::Post, "/api/sync") => sync_response(request, backend),
         (&Method::Get, "/api/snapshot") => snapshot_response(backend),
+        (&Method::Get, path) if path.starts_with("/api/ui-projections/") => {
+            ui_projection_response(request, backend, path, query)
+        }
         (&Method::Get, path) if path.starts_with("/api/api-activity/") => {
             let id = parse_agent_path(path, "/api/api-activity/")?;
             let activity = backend.api_activity(&id)?;
@@ -1554,7 +1588,7 @@ fn remote_frame_response(frame: crate::remote_control::RemoteFrame) -> HttpRespo
     data_response(StatusCode(200), frame.jpeg.as_ref().clone(), headers)
 }
 
-fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpResponse> {
+fn request_accepts_gzip(request: &Request) -> bool {
     let accepts_gzip = request
         .headers()
         .iter()
@@ -1562,7 +1596,11 @@ fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpR
         .map(|header| header.value.as_str())
         .collect::<Vec<_>>()
         .join(",");
-    let accepts_gzip = accept_encoding_allows_gzip(&accepts_gzip);
+    accept_encoding_allows_gzip(&accepts_gzip)
+}
+
+fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpResponse> {
+    let accepts_gzip = request_accepts_gzip(request);
     let content_type = request
         .headers()
         .iter()
@@ -1609,6 +1647,7 @@ fn sync_response(request: &mut Request, backend: &dyn UiBackend) -> Result<HttpR
         sync.terminal_session,
         sync.terminal_revision,
         sync.cache_metadata_only,
+        sync.ui_projection,
     )?;
     Ok(sync_json_response(StatusCode(200), &payload, accepts_gzip))
 }
@@ -1732,6 +1771,145 @@ fn model_metadata(model: &UiModelOption) -> ModelMetadata {
         reasoning_efforts: model.reasoning_efforts.clone(),
         output_token_reservations: model.output_token_reservations.clone(),
     }
+}
+
+fn ui_projection_response(
+    request: &Request,
+    backend: &dyn UiBackend,
+    path: &str,
+    query: Option<&str>,
+) -> Result<HttpResponse> {
+    let Some(suffix) = path.strip_prefix("/api/ui-projections/") else {
+        return Ok(not_found_response());
+    };
+    let Some((agent_id, operation)) = suffix.rsplit_once('/') else {
+        return Ok(not_found_response());
+    };
+    if agent_id.is_empty() || agent_id.contains('/') {
+        return Ok(json_response(
+            StatusCode(400),
+            &json!({"ok": false, "code": "invalid_agent", "error": "invalid Agent ID"}),
+        ));
+    }
+    let agent_id = match AgentId::new(agent_id) {
+        Ok(agent_id) => agent_id,
+        Err(error) => {
+            return Ok(json_response(
+                StatusCode(400),
+                &json!({"ok": false, "code": "invalid_agent", "error": error.to_string()}),
+            ));
+        }
+    };
+    let accepts_gzip = request_accepts_gzip(request);
+    match operation {
+        "state" => {
+            let known_revision = query_value(query, "revision").map(str::to_owned);
+            let states = backend.ui_projection_states(&[UiProjectionCursor {
+                agent_id: agent_id.to_string(),
+                revision: known_revision,
+            }]);
+            match states {
+                Ok(states) => match states
+                    .into_iter()
+                    .find(|state| state.agent_id == agent_id.as_str())
+                {
+                    Some(state) => Ok(sync_json_response(
+                        StatusCode(200),
+                        &json!({"ok": true, "state": state}),
+                        accepts_gzip,
+                    )),
+                    None => Ok(ui_projection_error_response(
+                        UiProjectionQueryError::AgentNotFound(agent_id.to_string()).into(),
+                    )),
+                },
+                Err(error) => Ok(ui_projection_error_response(error)),
+            }
+        }
+        "range" | "hash" => {
+            let parsed = (|| -> std::result::Result<(usize, usize, &str), &'static str> {
+                let start = query_value(query, "start")
+                    .ok_or("missing start")?
+                    .parse::<usize>()
+                    .map_err(|_| "invalid start")?;
+                let end = query_value(query, "end")
+                    .ok_or("missing end")?
+                    .parse::<usize>()
+                    .map_err(|_| "invalid end")?;
+                let revision = query_value(query, "revision")
+                    .filter(|revision| !revision.is_empty())
+                    .ok_or("missing revision")?;
+                Ok((start, end, revision))
+            })();
+            let (start, end, revision) = match parsed {
+                Ok(parsed) => parsed,
+                Err(error) => {
+                    return Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok": false, "code": "invalid_query", "error": error}),
+                    ));
+                }
+            };
+            if operation == "range" {
+                match backend.ui_projection_range(&agent_id, start, end, revision) {
+                    Ok(range) => Ok(sync_json_response(
+                        StatusCode(200),
+                        &json!({"ok": true, "range": range}),
+                        accepts_gzip,
+                    )),
+                    Err(error) => Ok(ui_projection_error_response(error)),
+                }
+            } else {
+                match backend.ui_projection_hash(&agent_id, start, end, revision) {
+                    Ok(hash) => Ok(sync_json_response(
+                        StatusCode(200),
+                        &json!({"ok": true, "hash": hash}),
+                        accepts_gzip,
+                    )),
+                    Err(error) => Ok(ui_projection_error_response(error)),
+                }
+            }
+        }
+        _ => Ok(not_found_response()),
+    }
+}
+
+fn ui_projection_error_response(error: Box<dyn std::error::Error + Send + Sync>) -> HttpResponse {
+    let Some(error) = error.downcast_ref::<UiProjectionQueryError>() else {
+        return json_response(
+            StatusCode(500),
+            &json!({"ok": false, "code": "projection_failed", "error": error.to_string()}),
+        );
+    };
+    match error {
+        UiProjectionQueryError::AgentNotFound(_) => json_response(
+            StatusCode(404),
+            &json!({"ok": false, "code": "agent_not_found", "error": error.to_string()}),
+        ),
+        UiProjectionQueryError::StaleRevision { current, .. } => json_response(
+            StatusCode(409),
+            &json!({
+                "ok": false,
+                "code": "stale_revision",
+                "current_revision": current,
+                "error": error.to_string(),
+            }),
+        ),
+        UiProjectionQueryError::InvalidRange { start, end, count } => json_response(
+            StatusCode(400),
+            &json!({
+                "ok": false,
+                "code": "invalid_range",
+                "start": start,
+                "end": end,
+                "count": count,
+                "error": error.to_string(),
+            }),
+        ),
+    }
+}
+
+fn not_found_response() -> HttpResponse {
+    json_response(StatusCode(404), &json!({"ok": false, "error": "not found"}))
 }
 
 #[derive(Serialize)]
@@ -2607,7 +2785,7 @@ mod tests {
     }
 
     #[test]
-    fn http_sync_protocol_requires_agent_revisions() {
+    fn http_sync_protocol_accepts_raw_and_projection_cursors() {
         let parsed: SyncRequest = serde_json::from_value(json!({
             "snapshot_revision": 4,
             "agents": [{"id": "main", "event_count": 9, "mutation_revision": 2}],
@@ -2618,19 +2796,81 @@ mod tests {
         .unwrap();
         assert_eq!(parsed.snapshot_revision, Some(4));
         assert!(!parsed.cache_metadata_only);
+        assert!(!parsed.ui_projection);
         assert_eq!(parsed.agents[0].cursor_event_hash, None);
-        assert!(
-            serde_json::from_value::<SyncRequest>(json!({
-                "snapshot_revision": null,
-                "agents": [{"id": "main", "event_count": 9}],
-                "selected_agent": null,
-                "terminal_session": null,
-                "terminal_revision": null,
-            }))
-            .is_err()
+
+        let projection: SyncRequest = serde_json::from_value(json!({
+            "snapshot_revision": null,
+            "ui_projection": true,
+            "agents": [{"id": "main", "projection_revision": "abc"}],
+            "selected_agent": null,
+            "terminal_session": null,
+            "terminal_revision": null,
+        }))
+        .unwrap();
+        assert!(projection.ui_projection);
+        assert_eq!(projection.agents[0].event_count, 0);
+        assert_eq!(projection.agents[0].mutation_revision, 0);
+        assert_eq!(
+            projection.agents[0].projection_revision.as_deref(),
+            Some("abc")
         );
     }
 
+    #[test]
+    fn http_sync_projection_mode_returns_only_revision_bound_public_state() {
+        let backend = sync_test_backend(sync_test_events(2), 0);
+        let initial = sync_state_payload(
+            &backend,
+            None,
+            vec![SyncAgentCursor {
+                id: "main".into(),
+                event_count: 0,
+                mutation_revision: 0,
+                cursor_event_hash: None,
+                projection_revision: None,
+            }],
+            Some("main".into()),
+            None,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(initial["ui_projection"], true);
+        assert_eq!(initial["event_updates"], json!([]));
+        assert_eq!(initial["more_events"], false);
+        assert_eq!(initial["projection_states"].as_array().unwrap().len(), 1);
+        assert_eq!(initial["projection_states"][0]["agent_id"], "main");
+        assert_eq!(initial["projection_states"][0]["changed_from"], 0);
+        let revision = initial["projection_states"][0]["revision"]
+            .as_str()
+            .unwrap()
+            .to_owned();
+
+        let current = sync_state_payload(
+            &backend,
+            Some(7),
+            vec![SyncAgentCursor {
+                id: "main".into(),
+                event_count: 0,
+                mutation_revision: 0,
+                cursor_event_hash: None,
+                projection_revision: Some(revision),
+            }],
+            Some("main".into()),
+            None,
+            None,
+            false,
+            true,
+        )
+        .unwrap();
+        assert_eq!(current["event_updates"], json!([]));
+        assert_eq!(
+            current["projection_states"][0]["changed_from"],
+            serde_json::Value::Null
+        );
+    }
     #[test]
     fn http_sync_metadata_only_returns_authoritative_cache_metadata_without_events() {
         let events = sync_test_events(3);
@@ -2644,6 +2884,7 @@ mod tests {
             None,
             None,
             true,
+            false,
         )
         .unwrap();
 
@@ -2702,6 +2943,7 @@ mod tests {
             event_count: 1,
             mutation_revision: 4,
             cursor_event_hash,
+            projection_revision: None,
         };
 
         let valid = sync_state_payload(
@@ -2711,6 +2953,7 @@ mod tests {
             Some("main".into()),
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -2731,6 +2974,7 @@ mod tests {
             None,
             None,
             false,
+            false,
         )
         .unwrap();
         assert_eq!(legacy["event_updates"][0]["reset"], false);
@@ -2742,6 +2986,7 @@ mod tests {
             Some("main".into()),
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -2807,10 +3052,12 @@ mod tests {
                 event_count,
                 mutation_revision: 4,
                 cursor_event_hash: Some(final_hash.clone()),
+                projection_revision: None,
             }],
             Some("main".into()),
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -2837,10 +3084,12 @@ mod tests {
                 event_count,
                 mutation_revision: 4,
                 cursor_event_hash: None,
+                projection_revision: None,
             }],
             Some("main".into()),
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -2856,12 +3105,14 @@ mod tests {
                 event_count: 3,
                 mutation_revision: 4,
                 cursor_event_hash: None,
+                projection_revision: None,
             },
             SyncAgentCursor {
                 id: "main".into(),
                 event_count: 1,
                 mutation_revision: 5,
                 cursor_event_hash: None,
+                projection_revision: None,
             },
         ] {
             let payload = sync_state_payload(
@@ -2871,6 +3122,7 @@ mod tests {
                 Some("main".into()),
                 None,
                 None,
+                false,
                 false,
             )
             .unwrap();
@@ -2886,10 +3138,12 @@ mod tests {
                 event_count: 1,
                 mutation_revision: 9,
                 cursor_event_hash: Some("stale".into()),
+                projection_revision: None,
             }],
             Some("main".into()),
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -2909,7 +3163,12 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"open-settings\""));
         assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
         assert!(EDB_CACHE_JS.contains("keyPath: [\"sessionKey\", \"order\"]"));
-        assert!(APP_JS.contains("cache_metadata_only: !state.edbCacheInitialized"));
+        assert!(
+            APP_JS
+                .contains("cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized")
+        );
+        assert!(APP_JS.contains("const RAW_EDB_DECODING_PREFERENCE = \"me-raw-edb-decoding\""));
+        assert!(APP_JS.contains("return !state.rawEdbDecoding"));
         assert!(APP_JS.contains("if (payload.reset || events.length > 0) {"));
         assert!(APP_JS.contains("persistAgentEdb(meta, store, Boolean(payload.reset), {"));
     }
@@ -3007,6 +3266,7 @@ mod tests {
             Some("selected".into()),
             None,
             None,
+            false,
             false,
         )
         .unwrap();
@@ -3657,7 +3917,9 @@ mod tests {
     fn embedded_webui_projects_appended_events_incrementally() {
         assert!(APP_JS.contains("pendingRender: emptyRenderRequest()"));
         assert!(APP_JS.contains("projectedOrder: 0"));
-        assert!(APP_JS.contains("needsReplay: true"));
+        assert!(APP_JS.contains("needsReplay: raw"));
+        assert!(APP_JS.contains("store.projectionChanges || emptyProjectionChanges()"));
+        assert!(APP_JS.contains("/api/ui-projections/"));
         assert!(APP_JS.contains("store.events.slice(store.projectedOrder)"));
         assert!(APP_JS.contains("consumeChatEvents(store.projection, appended)"));
         assert!(APP_JS.contains("consumeWorkMapEvents(store.workmap, appended)"));
@@ -3691,7 +3953,7 @@ mod tests {
             .map(|(body, _)| body)
             .expect("hydrateEdbCache function should exist");
         assert_eq!(cache_hydration.matches("renderAll();").count(), 1);
-        assert_eq!(APP_JS.matches("renderAll();").count(), 5);
+        assert_eq!(APP_JS.matches("renderAll();").count(), 6);
         assert!(APP_JS.contains("if (changes.workmap)"));
         assert!(APP_JS.contains("while (cache.nextOrder < events.length)"));
         assert!(APP_JS.contains("store.needsReplay = true"));
@@ -4011,6 +4273,14 @@ mod tests {
         );
         assert_eq!(
             client
+                .get(format!("{address}/api/ui-projections/main/state"))
+                .send()
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
                 .post(format!("{address}/api/auth/login"))
                 .json(&json!({"password": "wrong"}))
                 .send()
@@ -4238,6 +4508,160 @@ mod tests {
         drop(second_server);
         fs::remove_dir_all(first_directory).unwrap();
         fs::remove_dir_all(second_directory).unwrap();
+    }
+
+    #[test]
+    fn ui_projection_http_routes_enforce_revision_ranges_errors_and_gzip() {
+        let directory = workspace();
+        let workspace = Workspace::open(
+            &directory,
+            WorkspaceConfig {
+                version: 2,
+                model: "test".into(),
+                effort: "unset".into(),
+                orchestrator: "chatbot".into(),
+            },
+            vec![model()],
+        )
+        .unwrap();
+        let (backend, commands) = workspace_ui_ports(workspace);
+        let UiCommandReceipt::AgentCreated(created) = commands
+            .submit(UiCommand::AddAgent {
+                orchestrator: "chatbot".into(),
+            })
+            .unwrap()
+        else {
+            panic!("AddAgent did not create a session");
+        };
+        let agent_id = created.id.to_string();
+        let server = start_from(backend, commands, 0, None).unwrap();
+        let address = server
+            .address()
+            .replace("http://0.0.0.0:", "http://127.0.0.1:");
+        let client = reqwest::blocking::Client::new();
+        let state_url = format!("{address}/api/ui-projections/{agent_id}/state");
+
+        let state_response = client
+            .get(&state_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "identity")
+            .send()
+            .unwrap();
+        assert_eq!(state_response.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            state_response
+                .headers()
+                .get(reqwest::header::CACHE_CONTROL)
+                .unwrap(),
+            "no-store"
+        );
+        assert_eq!(
+            state_response.headers().get(reqwest::header::VARY).unwrap(),
+            "Accept-Encoding"
+        );
+        let state: serde_json::Value = state_response.json().unwrap();
+        let revision = state["state"]["revision"].as_str().unwrap().to_owned();
+        let count = state["state"]["count"].as_u64().unwrap();
+
+        let current: serde_json::Value = client
+            .get(format!("{state_url}?revision={revision}"))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(current["state"]["changed_from"], serde_json::Value::Null);
+
+        let range: serde_json::Value = client
+            .get(format!(
+                "{address}/api/ui-projections/{agent_id}/range?start=0&end={count}&revision={revision}"
+            ))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(range["range"]["start"], 0);
+        assert_eq!(range["range"]["end"], count);
+        assert_eq!(range["range"]["count"], count);
+        assert_eq!(
+            range["range"]["projections"].as_array().unwrap().len(),
+            count as usize
+        );
+
+        let hash: serde_json::Value = client
+            .get(format!(
+                "{address}/api/ui-projections/{agent_id}/hash?start=0&end={count}&revision={revision}"
+            ))
+            .send()
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(hash["hash"]["start"], 0);
+        assert_eq!(hash["hash"]["end"], count);
+        assert_eq!(hash["hash"]["hash"], range["range"]["hash"]);
+
+        let stale = client
+            .get(format!(
+                "{address}/api/ui-projections/{agent_id}/range?start=0&end={count}&revision=stale"
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(stale.status(), reqwest::StatusCode::CONFLICT);
+        let stale: serde_json::Value = stale.json().unwrap();
+        assert_eq!(stale["code"], "stale_revision");
+        assert_eq!(stale["current_revision"], revision);
+
+        let invalid = client
+            .get(format!(
+                "{address}/api/ui-projections/{agent_id}/hash?start=0&end={}&revision={revision}",
+                count + 1
+            ))
+            .send()
+            .unwrap();
+        assert_eq!(invalid.status(), reqwest::StatusCode::BAD_REQUEST);
+        assert_eq!(
+            invalid.json::<serde_json::Value>().unwrap()["code"],
+            "invalid_range"
+        );
+
+        let missing = client
+            .get(format!("{address}/api/ui-projections/missing/state"))
+            .send()
+            .unwrap();
+        assert_eq!(missing.status(), reqwest::StatusCode::NOT_FOUND);
+        assert_eq!(
+            missing.json::<serde_json::Value>().unwrap()["code"],
+            "agent_not_found"
+        );
+
+        let compressed = client
+            .get(&state_url)
+            .header(reqwest::header::ACCEPT_ENCODING, "gzip")
+            .send()
+            .unwrap();
+        assert_eq!(compressed.status(), reqwest::StatusCode::OK);
+        assert_eq!(
+            compressed
+                .headers()
+                .get(reqwest::header::CONTENT_ENCODING)
+                .unwrap(),
+            "gzip"
+        );
+        let compressed_body = compressed.bytes().unwrap();
+        let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_ref());
+        let mut decoded = Vec::new();
+        decoder.read_to_end(&mut decoded).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&decoded).unwrap()["state"]["revision"],
+            revision
+        );
+
+        drop(server);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

@@ -11,8 +11,9 @@ globalThis.MeFrontendRuntime = {
   capabilities: { multipleWorkspaces: true, gatewaySettings: true },
   apiPath(path, workspaceId = "chat") {
     const child = path === "/api/sync" || path === "/api/snapshot" || path === "/api/command"
-      || path.startsWith("/api/deletion-blocker/") || path.startsWith("/api/session-terminal/")
-      || path.startsWith("/api/remote-control/") || path.startsWith("/api/files/");
+      || path.startsWith("/api/deletion-blocker/") || path.startsWith("/api/ui-projections/")
+      || path.startsWith("/api/session-terminal/") || path.startsWith("/api/remote-control/")
+      || path.startsWith("/api/files/");
     return child ? `/api/workspaces/${workspaceId}${path.slice(4)}` : path;
   },
   createEdbCache() {
@@ -54,6 +55,10 @@ function loadRuntime(relative) {
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
       createAgentStore: typeof createAgentStore === "function" ? createAgentStore : null,
+      resetProjectionSourceBucket: typeof resetProjectionSourceBucket === "function" ? resetProjectionSourceBucket : null,
+      usesUiProjection: typeof usesUiProjection === "function" ? usesUiProjection : null,
+      installProjectionState: typeof installProjectionState === "function" ? installProjectionState : null,
+      advanceCurrentProjection: typeof advanceCurrentProjection === "function" ? advanceCurrentProjection : null,
       normalizeWindowBorderStyle: typeof normalizeWindowBorderStyle === "function" ? normalizeWindowBorderStyle : null,
       localPreferenceSettingsHtml: typeof localPreferenceSettingsHtml === "function" ? localPreferenceSettingsHtml : null,
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
@@ -201,6 +206,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("derives saved prompt state from raw EDB while preserving dirty local drafts", () => {
     for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
+      runtime.state.rawEdbDecoding = true;
       runtime.state.snapshot.chatbot_default_static_prompt = "内置默认提示";
       runtime.state.snapshot.agents = [{ id: "chat", orchestrator: "chatbot" }];
       runtime.state.selectedAgent = "chat";
@@ -422,7 +428,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain("full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged)");
       expect(source).toContain("if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();");
       expect(source).toContain("if (bulkEventRecoveryActive()) return emptyProjectionChanges();");
-      expect(source).toContain("loadProgress: createAgentLoadProgress(meta, eventCount, mutationRevision)");
+      expect(source).toContain("loadProgress: raw ? createAgentLoadProgress(meta, eventCount, mutationRevision) : null");
       expect(source).toContain("percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100)");
       expect(source).not.toContain("showEventRecoveryOverlay");
       expect(source).not.toContain("eventRecoveryProgressFill");
@@ -513,6 +519,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   test("keeps zero-delay event catch-up conditional on a changed sync cursor", () => {
     for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
+      runtime.state.rawEdbDecoding = true;
       runtime.state.snapshotInitialized = true;
       runtime.state.snapshot.revision = 3;
       runtime.state.selectedAgent = "main";
@@ -636,6 +643,10 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const gateway = loadFrontendAdapter("../src/gateway_webui/runtime.js");
     expect(direct.apiPath("/api/sync", "w-one")).toBe("/api/sync");
     expect(gateway.apiPath("/api/sync", "w-one")).toBe("/api/workspaces/w-one/sync");
+    expect(direct.apiPath("/api/ui-projections/main/state", "w-one"))
+      .toBe("/api/ui-projections/main/state");
+    expect(gateway.apiPath("/api/ui-projections/main/range?start=0&end=1&revision=one", "w-one"))
+      .toBe("/api/workspaces/w-one/ui-projections/main/range?start=0&end=1&revision=one");
     expect(gateway.apiPath("/api/session-terminal/main/read", "w-one"))
       .toBe("/api/workspaces/w-one/session-terminal/main/read");
     expect(gateway.apiPath("/api/auth/status", "w-one")).toBe("/api/auth/status");
@@ -649,8 +660,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(first.workerActivityIndexes).not.toBe(second.workerActivityIndexes);
   });
 
-  test("background-syncs every inactive Workspace while retaining complete raw Events", () => {
+  test("background-syncs every inactive Workspace while retaining complete raw Events", async () => {
     const gateway = loadRuntime("../src/webui/app.js");
+    gateway.state.rawEdbDecoding = true;
     gateway.state.connectionPhase = "connected";
     gateway.state.activeCatchUpPending = false;
     expect(gateway.backgroundSyncCanRun()).toBe(true);
@@ -686,7 +698,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.backgroundSyncRequestBody(requestWorkspace).agents[0].cursor_event_hash).toBeNull();
 
     const workspace = gateway.emptyGatewayWorkspaceState();
-    const changed = gateway.applyBackgroundSyncState(workspace, {
+    const changed = await gateway.applyBackgroundSyncState(workspace, {
       snapshot,
       event_updates: [{
         agent_id: "main", reset: false, mutation_revision: 0, cursor_event_hash: "event-hash",
@@ -724,13 +736,15 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
     for (const relative of ["../src/webui/app.js"]) {
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(source).toContain("agents: [...state.stores].map(([id, store]) => ({");
+      expect(source).toContain("ui_projection: usesUiProjection()");
+      expect(source).toContain("? { id, projection_revision: store.projectionRevision }");
       expect(source).toContain("const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));");
     }
   });
 
   test("tracks cache restoration and catch-up independently for each session", () => {
     const gateway = loadRuntime("../src/webui/app.js");
+    gateway.state.rawEdbDecoding = true;
     const readyMeta = {
       id: "ready", edb_id: "a".repeat(64), event_count: 2, mutation_revision: 1,
       prompt_submission_revision: 0, input_draft_revision: 0,
@@ -776,6 +790,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
   test("restores complete cached Events into resident Session stores", () => {
     const gateway = loadRuntime("../src/webui/app.js");
+    gateway.state.rawEdbDecoding = true;
     const edbId = "f".repeat(64);
     const snapshot = { environment: { workspace: "/workspace" }, agents: [] };
     gateway.state.snapshot = snapshot;
@@ -802,6 +817,99 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain("store.events.push(...events);");
   });
 
+
+  test("uses revision-bound generic UI projections by default without retaining raw Events", () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const cachedEvents = [event("UserPrompt", 1, { content: "cached raw" })];
+    const meta = {
+      id: "main", edb_id: "a".repeat(64), event_count: 3, mutation_revision: 0,
+      prompt_submission_revision: 0, input_draft_revision: 0,
+    };
+    expect(runtime.usesUiProjection()).toBe(true);
+    const store = runtime.createAgentStore(meta, {
+      events: cachedEvents, eventCount: 1, mutationRevision: 0, lastEventHash: "raw-hash",
+    }, { environment: { workspace: "/workspace" } });
+    expect(store.events).toEqual([]);
+    expect(store.needsReplay).toBe(false);
+    expect(store.projectionLoading).toBe(true);
+
+    const firstMessage = {
+      kind: "user", key: "user-1", revision: 1, content: "hello", timestamp: 10,
+      eventId: 1, rewindable: true,
+    };
+    const secondMessage = {
+      kind: "assistant", key: "assistant-1", revision: 2, content: "one", timestamp: 20,
+    };
+    const projectionState = {
+      agent_id: "main", edb_id: meta.edb_id, revision: "revision-one",
+      source_event_count: 3, source_mutation_revision: 0, last_event_id: 3,
+      count: 2, changed_from: 0, summary: { turn_state: "Started" },
+      model: "model-a", effort: "high", api_state: "Streaming",
+      api_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
+      turn_state: { state: "active", prompt_id: 1 },
+      workmap: runtime.emptyWorkMap(),
+      context: {
+        total: 12, values: { system: 3, compact: 0, memory: 0, user: 4, model: 5, tool: 0 },
+        compact_content: null, compact_analysis: null, memory_content: null,
+      },
+      system_prompt: { mode: "Default", content: null, event_id: null, changes: [] },
+      compact_activity: null,
+    };
+    runtime.installProjectionState(store, projectionState, {
+      agent_id: "main", revision: "revision-one", start: 0, end: 2, count: 2,
+      projections: [firstMessage, secondMessage],
+    });
+    expect(store.events).toEqual([]);
+    expect(store.projection.messages).toHaveLength(2);
+    expect(store.projection.model).toBe("model-a");
+    expect(store.projection.turnState).toEqual({ state: "active", promptId: 1 });
+    expect(store.summary).toEqual({ turnState: "Started" });
+    expect(store.projectionChanges.transcriptFrom).toBe(0);
+
+    const retained = store.projection.messages[0];
+    runtime.installProjectionState(store, {
+      ...projectionState, revision: "revision-two", changed_from: 1,
+      api_state: "Completed", turn_state: null,
+    }, {
+      agent_id: "main", revision: "revision-two", start: 1, end: 2, count: 2,
+      projections: [{ ...secondMessage, revision: 4, content: "two" }],
+    });
+    expect(store.projection.messages[0]).toBe(retained);
+    expect(store.projection.messages[1].content).toBe("two");
+    expect(store.projectionChanges.transcriptFrom).toBe(1);
+
+    runtime.installProjectionState(store, {
+      ...projectionState, revision: "revision-three", changed_from: null,
+      api_state: "Retrying", turn_state: null,
+    });
+    expect(store.projection.messages[0]).toBe(retained);
+    expect(store.projection.apiState).toBe("Retrying");
+    expect(store.projectionChanges.transcript).toBe(false);
+    const bucket = runtime.emptyGatewayWorkspaceState();
+    const drafts = bucket.drafts;
+    const draftSync = bucket.draftSync;
+    const previousStores = bucket.stores;
+    bucket.stores.set("main", store);
+    bucket.promptDrafts.set("main", { dirty: true });
+    bucket.workerActivityIndexes.set("worker", { marker: true });
+    runtime.resetProjectionSourceBucket(bucket);
+    expect(bucket.stores).not.toBe(previousStores);
+    expect(bucket.stores.size).toBe(0);
+    expect(bucket.promptDrafts.size).toBe(0);
+    expect(bucket.workerActivityIndexes.size).toBe(0);
+    expect(bucket.drafts).toBe(drafts);
+    expect(bucket.draftSync).toBe(draftSync);
+
+
+    runtime.state.rawEdbDecoding = true;
+    expect(runtime.usesUiProjection()).toBe(false);
+    const rawStore = runtime.createAgentStore(meta, {
+      events: cachedEvents, eventCount: 1, mutationRevision: 0, lastEventHash: "raw-hash",
+    }, { environment: { workspace: "/workspace" } });
+    expect(rawStore.events).toBe(cachedEvents);
+    expect(rawStore.needsReplay).toBe(true);
+    expect(rawStore.projectionLoading).toBe(false);
+  });
   test("stores lightweight Gateway session metadata before raw EDB hydration", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     const workspace = gateway.emptyGatewayWorkspaceState();
@@ -881,7 +989,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.normalizeWindowBorderStyle("theme")).toBe("theme");
     expect(gateway.normalizeWindowBorderStyle("invalid")).toBe("default");
     const localHtml = gateway.localPreferenceSettingsHtml();
-    expect(localHtml).toBe("");
+    expect(localHtml).toContain("兼容渲染模式");
+    expect(localHtml).toContain('data-local-preference="raw-edb-decoding"');
+    expect(localHtml).not.toContain("边框样式");
 
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const index = readFileSync(join(import.meta.dir, "../src/webui/index.html"), "utf8");
@@ -891,7 +1001,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain('class="settings-subsection-header"');
     expect(source).not.toContain('class="settings-section-icon"');
     expect(source).toContain('const WINDOW_BORDER_STYLE_PREFERENCE = "me-window-border-style";');
-    expect(source).toContain('if (!runtimeCapabilities.windowBorderStyle) return "";');
+    expect(source).toContain("const borderStyle = runtimeCapabilities.windowBorderStyle ?");
+    expect(source).toContain('const RAW_EDB_DECODING_PREFERENCE = "me-raw-edb-decoding";');
     expect(source).toContain("<strong>边框样式</strong>");
     expect(source).toContain(">默认</option>");
     expect(source).toContain(">主题</option>");

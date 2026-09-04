@@ -38,11 +38,12 @@ use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
-const DEVICE_PREFERENCE_KEYS: [&str; 4] = [
+const DEVICE_PREFERENCE_KEYS: [&str; 5] = [
     "me-theme",
     "me-color-mode",
     "me-send-shortcut",
     "me-window-border-style",
+    "me-raw-edb-decoding",
 ];
 
 const MAX_REMEMBERED_PASSWORD_BYTES: usize = 4096;
@@ -616,6 +617,7 @@ fn valid_device_preference(key: &str, value: &str) -> bool {
         "me-color-mode" => matches!(value, "light" | "dark"),
         "me-send-shortcut" => matches!(value, "enter" | "modified-enter"),
         "me-window-border-style" => matches!(value, "default" | "theme"),
+        "me-raw-edb-decoding" => matches!(value, "true" | "false"),
         _ => false,
     }
 }
@@ -1059,6 +1061,9 @@ mod tests {
         ));
         assert!(valid_device_preference("me-window-border-style", "default"));
         assert!(valid_device_preference("me-window-border-style", "theme"));
+        assert!(valid_device_preference("me-raw-edb-decoding", "true"));
+        assert!(valid_device_preference("me-raw-edb-decoding", "false"));
+        assert!(!valid_device_preference("me-raw-edb-decoding", "yes"));
         assert!(!valid_device_preference("me-theme", "unknown"));
         assert!(!valid_device_preference("me-window-border-style", "accent"));
         assert!(!valid_device_preference(

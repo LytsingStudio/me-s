@@ -33,6 +33,7 @@ const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
 const WINDOW_BORDER_STYLE_PREFERENCE = "me-window-border-style";
 const WINDOW_BORDER_DEFAULT = "default";
 const WINDOW_BORDER_THEME = "theme";
+const RAW_EDB_DECODING_PREFERENCE = "me-raw-edb-decoding";
 const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";
 const API_ACTIVE = new Set(["Requesting", "Streaming", "Retrying"]);
 const API_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -118,6 +119,7 @@ const state = {
   composing: false,
   sendShortcut: readSendShortcutPreference(),
   windowBorderStyle: readWindowBorderStylePreference(),
+  rawEdbDecoding: readRawEdbDecodingPreference(),
   userMenu: null,
   agentMenu: null,
   modal: null,
@@ -421,6 +423,14 @@ function readWindowBorderStylePreference() {
   return normalizeWindowBorderStyle(readLocalPreference(WINDOW_BORDER_STYLE_PREFERENCE));
 }
 
+function readRawEdbDecodingPreference() {
+  return readLocalPreference(RAW_EDB_DECODING_PREFERENCE) === "true";
+}
+
+function usesUiProjection() {
+  return !state.rawEdbDecoding;
+}
+
 function applyWindowBorderStyle() {
   document.documentElement.dataset.windowBorderStyle = state.windowBorderStyle;
 }
@@ -462,6 +472,7 @@ function persistDevicePreference(key, value) {
 function restoreRuntimeDevicePreferences() {
   state.sendShortcut = readSendShortcutPreference();
   state.windowBorderStyle = readWindowBorderStylePreference();
+  state.rawEdbDecoding = readRawEdbDecodingPreference();
   applyWindowBorderStyle();
   elements.loginSettings?.classList.toggle("hidden", !runtimeCapabilities.windowBorderStyle);
   const activeTheme = globalThis.MeTheme.apply(
@@ -478,6 +489,49 @@ function setSendShortcut(value) {
   }
   renderComposer();
   elements.input.focus();
+}
+
+function resetProjectionSourceBucket(bucket) {
+  bucket.stores = new Map();
+  bucket.promptDrafts = new Map();
+  bucket.workerActivityIndexes = new Map();
+  bucket.snapshotInitialized = false;
+  bucket.edbCacheInitialized = false;
+  bucket.cacheValidated = false;
+  bucket.catchUpPending = true;
+  bucket.eventRecovery = null;
+}
+
+function setRawEdbDecoding(enabled) {
+  const next = Boolean(enabled);
+  if (state.rawEdbDecoding === next) return;
+  stopHttpPolling();
+  cancelBackgroundWorkspaceSync();
+  captureActiveWorkspace();
+  state.rawEdbDecoding = next;
+  persistLocalPreference(RAW_EDB_DECODING_PREFERENCE, String(next));
+  for (const workspace of state.workspaceStates.values()) resetProjectionSourceBucket(workspace);
+  const active = state.workspaceId ? gatewayWorkspaceState(state.workspaceId) : null;
+  if (active) {
+    state.snapshot = active.snapshot;
+    state.stores = active.stores;
+    state.promptDrafts = active.promptDrafts;
+    state.workerActivityIndexes = active.workerActivityIndexes;
+    state.selectedAgent = active.selectedAgent;
+  } else {
+    state.stores = new Map();
+    state.promptDrafts = new Map();
+    state.workerActivityIndexes = new Map();
+  }
+  state.snapshotInitialized = false;
+  state.edbCacheInitialized = false;
+  state.activeCatchUpPending = true;
+  state.eventRecovery = null;
+  state.pendingRender = emptyRenderRequest();
+  renderAll();
+  resetConnectionForInitialSync();
+  renderSessionSyncOverlay();
+  if (state.workspaceId && (!state.authRequired || state.authenticated)) startHttpPolling();
 }
 
 function sendShortcutHint() {
@@ -614,6 +668,7 @@ async function loadEdbCacheEntries(snapshot) {
 }
 
 function discardStoredAgentEdb(snapshot, agentId, store = null) {
+  if (usesUiProjection()) return;
   const scope = edbCacheScope(snapshot);
   const key = store?.cacheKey || (scope
     ? frontendRuntime.cacheKey(scope, agentId, store?.edbId || "")
@@ -659,11 +714,13 @@ function settleAgentLoadProgress(store) {
 }
 
 function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
-  const events = Array.isArray(cached?.events) ? cached.events : [];
+  const raw = !usesUiProjection();
+  const events = raw && Array.isArray(cached?.events) ? cached.events : [];
   const eventCount = events.length;
   const scope = edbCacheScope(snapshot);
   const edbId = String(meta.edb_id || "");
-  const mutationRevision = cached ? Number(cached.mutationRevision) || 0 : Number(meta.mutation_revision) || 0;
+  const mutationRevision = raw && cached
+    ? Number(cached.mutationRevision) || 0 : Number(meta.mutation_revision) || 0;
   return {
     edbId,
     cacheKey: cached?.key || (scope ? frontendRuntime.cacheKey(scope, meta.id, edbId) : ""),
@@ -674,14 +731,19 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
     promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
     inputDraftRevision: Number(meta.input_draft_revision || 0),
     pendingPromptSubmission: null,
+    projectionRevision: null,
+    projectionCount: 0,
+    projectionState: null,
+    projectionLoading: !raw,
+    projectionChanges: null,
     projection: emptyProjection(),
     workmap: emptyWorkMap(),
     turnHistory: null,
     summary: projectAgentSummary(events),
     projectedOrder: 0,
-    needsReplay: true,
+    needsReplay: raw,
     needsTurnHistory: false,
-    loadProgress: createAgentLoadProgress(meta, eventCount, mutationRevision),
+    loadProgress: raw ? createAgentLoadProgress(meta, eventCount, mutationRevision) : null,
   };
 }
 
@@ -716,6 +778,7 @@ async function hydrateEdbCache(snapshot) {
 }
 
 function persistWorkspaceAgentEdb(snapshot, meta, store, replace = false, batch = null) {
+  if (usesUiProjection()) return;
   const scope = edbCacheScope(snapshot);
   if (!store || !scope || !store.edbId) return;
   edbCache.saveSession({
@@ -776,6 +839,8 @@ async function api(path, options = {}, workspaceId = state.workspaceId) {
   if (!response.ok || payload.ok === false) {
     const error = new Error(payload.error || `HTTP ${response.status}`);
     error.status = response.status;
+    error.code = payload.code || null;
+    error.currentRevision = payload.current_revision || null;
     throw error;
   }
   return payload;
@@ -915,7 +980,9 @@ function backgroundSyncProgressSignature(workspace) {
   return JSON.stringify({
     snapshotRevision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
     agents: [...workspace.stores]
-      .map(([id, store]) => [id, store.eventCount ?? store.events.length, store.mutationRevision])
+      .map(([id, store]) => usesUiProjection()
+        ? [id, store.projectionRevision]
+        : [id, store.eventCount ?? store.events.length, store.mutationRevision])
       .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
   });
 }
@@ -923,13 +990,16 @@ function backgroundSyncProgressSignature(workspace) {
 function backgroundSyncRequestBody(workspace) {
   return {
     snapshot_revision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
-    agents: [...workspace.stores].map(([id, store]) => ({
-      id,
-      event_count: store.eventCount ?? store.events.length,
-      mutation_revision: store.mutationRevision,
-      cursor_event_hash: workspace.cacheValidated ? null : store.lastEventHash ?? null,
-    })),
-    cache_metadata_only: !workspace.edbCacheInitialized,
+    ui_projection: usesUiProjection(),
+    agents: [...workspace.stores].map(([id, store]) => usesUiProjection()
+      ? { id, projection_revision: store.projectionRevision }
+      : {
+        id,
+        event_count: store.eventCount ?? store.events.length,
+        mutation_revision: store.mutationRevision,
+        cursor_event_hash: workspace.cacheValidated ? null : store.lastEventHash ?? null,
+      }),
+    cache_metadata_only: !usesUiProjection() && !workspace.edbCacheInitialized,
     selected_agent: null,
     terminal_session: null,
     terminal_revision: null,
@@ -1150,7 +1220,175 @@ function syncBackgroundAgentEvents(workspace, meta, payload) {
   };
 }
 
-function applyBackgroundSyncState(workspace, payload) {
+function projectionTurnState(value) {
+  return value ? { state: value.state, promptId: Number(value.prompt_id) } : null;
+}
+
+function projectionSummary(value) {
+  return { turnState: value?.turn_state ?? null };
+}
+
+function installProjectionState(store, projectionState, range = null) {
+  const previousRevision = store.projectionRevision;
+  const count = Math.max(0, Number(projectionState.count) || 0);
+  let messages = store.projection?.messages || [];
+  let transcriptFrom = null;
+  if (range) {
+    const start = Number(range.start);
+    const end = Number(range.end);
+    const projections = Array.isArray(range.projections) ? range.projections : [];
+    if (range.agent_id !== projectionState.agent_id
+        || range.revision !== projectionState.revision
+        || Number(range.count) !== count
+        || !Number.isInteger(start) || !Number.isInteger(end)
+        || start < 0 || end < start || end !== count
+        || projections.length !== end - start || start > messages.length) {
+      throw new Error("会话内容响应不完整");
+    }
+    messages = messages.slice(0, start).concat(projections);
+    transcriptFrom = start;
+  }
+  if (messages.length !== count) throw new Error("会话内容数量不一致");
+
+  const projection = emptyProjection();
+  projection.messages = messages;
+  projection.apiState = projectionState.api_state ?? null;
+  projection.apiUsage = projectionState.api_usage ?? null;
+  projection.model = projectionState.model ?? null;
+  projection.effort = projectionState.effort ?? null;
+  projection.turnState = projectionTurnState(projectionState.turn_state);
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index];
+    message._projectionIndex = index;
+    if (message.key) projection._messageByKey.set(message.key, message);
+    if (message.tool) message.tool._messageIndex = index;
+  }
+  const activity = projectionState.compact_activity;
+  if (activity) {
+    const message = projection._messageByKey.get(activity.message_key);
+    if (message) {
+      projection._compactActivity = {
+        compactId: activity.compact_id,
+        kind: activity.kind,
+        totalStages: Number(activity.total_stages) || 1,
+        stage: Number(activity.stage) || 1,
+        message,
+      };
+    }
+  }
+
+  const revisionChanged = previousRevision !== projectionState.revision;
+  store.events = [];
+  store.eventCount = Math.max(0, Number(projectionState.source_event_count) || 0);
+  store.mutationRevision = Math.max(0, Number(projectionState.source_mutation_revision) || 0);
+  store.lastEventHash = null;
+  store.edbId = String(projectionState.edb_id || store.edbId || "");
+  store.projection = projection;
+  store.projectionRevision = projectionState.revision;
+  store.projectionCount = count;
+  store.projectionState = projectionState;
+  store.projectionLoading = false;
+  store.summary = projectionSummary(projectionState.summary);
+  store.workmap = projectionState.workmap || emptyWorkMap();
+  store.turnHistory = projectionState.context?.memory_content ?? null;
+  store.projectedOrder = 0;
+  store.needsReplay = false;
+  store.needsTurnHistory = false;
+  store.loadProgress = null;
+  store.projectionChanges = revisionChanged ? {
+    transcript: transcriptFrom !== null,
+    transcriptFrom,
+    status: true,
+    turn: true,
+    workmap: true,
+    fullReplay: transcriptFrom === 0,
+  } : null;
+  return revisionChanged;
+}
+
+async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft, signal = null) {
+  if (!payload.ui_projection) throw new Error("同步响应未提供会话内容");
+  const states = new Map((payload.projection_states || []).map((entry) => [entry.agent_id, entry]));
+  const pending = [];
+  const prepared = [];
+  for (const meta of bucket.snapshot.agents || []) {
+    let store = bucket.stores.get(meta.id);
+    if (!store) {
+      store = createAgentStore(meta, null, bucket.snapshot);
+      bucket.stores.set(meta.id, store);
+      bucket.drafts.set(meta.id, String(meta.input_draft || ""));
+    }
+    observeDraft(meta, store);
+    store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
+    const projectionState = states.get(meta.id);
+    if (!projectionState) throw new Error("同步响应缺少会话状态");
+    const loadingBefore = Boolean(store.projectionLoading);
+    const summaryBefore = JSON.stringify(store.summary);
+    const count = Math.max(0, Number(projectionState.count) || 0);
+    const revisionChanged = store.projectionRevision !== projectionState.revision;
+    let start = revisionChanged && projectionState.changed_from != null
+      ? Number(projectionState.changed_from) : null;
+    if (start !== null && (!Number.isInteger(start) || start < 0 || start > count)) {
+      throw new Error("同步响应包含无效的会话范围");
+    }
+    if (revisionChanged && (store.projectionRevision === null
+        || (start !== null && start > store.projection.messages.length))) {
+      start = 0;
+    }
+    if (store.projection.messages.length !== count && start === null) start = 0;
+    const needsRange = start !== null;
+    store.projectionLoading = needsRange;
+    const entry = { meta, store, projectionState, loadingBefore, summaryBefore, range: null };
+    prepared.push(entry);
+    if (needsRange) {
+      pending.push(api(
+        `/api/ui-projections/${encodeURIComponent(meta.id)}/range?start=${start}&end=${count}&revision=${encodeURIComponent(projectionState.revision)}`,
+        signal ? { signal } : {},
+        workspaceId,
+      ).then((response) => { entry.range = response.range; }));
+    }
+  }
+  if (bucket === state && prepared.some((entry) => entry.store.projectionLoading)) {
+    renderAgents();
+    renderSessionSyncOverlay();
+  }
+  await Promise.all(pending);
+  return prepared.map((entry) => {
+    const changed = installProjectionState(entry.store, entry.projectionState, entry.range);
+    return {
+      agentId: entry.meta.id,
+      changed,
+      summaryChanged: entry.summaryBefore !== JSON.stringify(entry.store.summary),
+      loadChanged: entry.loadingBefore !== Boolean(entry.store.projectionLoading),
+    };
+  });
+}
+
+async function applyBackgroundSyncState(workspace, payload, workspaceId, signal = null) {
+  if (!usesUiProjection()) return applyRawBackgroundSyncState(workspace, payload);
+  const previousSnapshot = workspace.snapshot;
+  if (payload.snapshot) {
+    workspace.snapshot = payload.snapshot;
+    workspace.snapshotInitialized = true;
+  }
+  if (!workspace.snapshotInitialized) throw new Error("同步响应未提供初始状态");
+  const presentationChanged = snapshotPresentationSignature(previousSnapshot)
+    !== snapshotPresentationSignature(workspace.snapshot);
+  const structureChanged = reconcileBackgroundAgents(workspace, workspace.snapshot);
+  const changes = await synchronizeProjectionBucket(
+    workspace,
+    payload,
+    workspaceId,
+    (meta, store) => observeBackgroundInputDraft(workspace, meta, store),
+    signal,
+  );
+  workspace.edbCacheInitialized = true;
+  workspace.cacheValidated = true;
+  return presentationChanged || structureChanged
+    || changes.some((change) => change.changed || change.summaryChanged || change.loadChanged);
+}
+
+function applyRawBackgroundSyncState(workspace, payload) {
   const previousSnapshot = workspace.snapshot;
   if (payload.snapshot) {
     workspace.snapshot = payload.snapshot;
@@ -1191,14 +1429,16 @@ async function requestBackgroundWorkspaceSync() {
       body: JSON.stringify(backgroundSyncRequestBody(candidate.workspace)),
     }, candidate.workspaceId);
     if (!backgroundSyncOperationCurrent(operation)) return;
-    if (message.cache_metadata_only) {
+    if (!usesUiProjection() && message.cache_metadata_only) {
       if (!await hydrateBackgroundEdbCache(operation, message.snapshot)) return;
       sidebarChanged = true;
       candidate.workspace.backgroundFailures = 0;
       candidate.workspace.backgroundNextSyncAt = 0;
       candidate.workspace.catchUpPending = true;
     } else {
-      sidebarChanged = applyBackgroundSyncState(candidate.workspace, message);
+      sidebarChanged = await applyBackgroundSyncState(
+        candidate.workspace, message, candidate.workspaceId, controller?.signal,
+      );
       if (!backgroundSyncOperationCurrent(operation)) return;
       const madeProgress = progressBefore !== backgroundSyncProgressSignature(candidate.workspace);
       candidate.workspace.backgroundFailures = 0;
@@ -1844,7 +2084,9 @@ function httpSyncProgressSignature() {
   return JSON.stringify({
     snapshotRevision: state.snapshotInitialized ? state.snapshot.revision : null,
     agents: [...state.stores]
-      .map(([id, store]) => [id, store.eventCount ?? store.events.length, store.mutationRevision])
+      .map(([id, store]) => usesUiProjection()
+        ? [id, store.projectionRevision]
+        : [id, store.eventCount ?? store.events.length, store.mutationRevision])
       .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
     selectedAgent: state.selectedAgent,
     terminalSession: state.view.kind === "terminal" ? state.view.sessionId : null,
@@ -1869,22 +2111,25 @@ async function requestHttpSync() {
       signal: controller?.signal,
       body: JSON.stringify({
         snapshot_revision: state.snapshotInitialized ? state.snapshot.revision : null,
-        agents: [...state.stores].map(([id, store]) => ({
-          id,
-          event_count: store.eventCount ?? store.events.length,
-          mutation_revision: store.mutationRevision,
-          cursor_event_hash: ["initial", "reconnecting"].includes(state.connectionPhase)
-              || (id === state.selectedAgent && store.needsTurnHistory)
-            ? store.lastEventHash ?? null : null,
-        })),
-        cache_metadata_only: !state.edbCacheInitialized,
+        ui_projection: usesUiProjection(),
+        agents: [...state.stores].map(([id, store]) => usesUiProjection()
+          ? { id, projection_revision: store.projectionRevision }
+          : {
+            id,
+            event_count: store.eventCount ?? store.events.length,
+            mutation_revision: store.mutationRevision,
+            cursor_event_hash: ["initial", "reconnecting"].includes(state.connectionPhase)
+                || (id === state.selectedAgent && store.needsTurnHistory)
+              ? store.lastEventHash ?? null : null,
+          }),
+        cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized,
         selected_agent: state.selectedAgent,
         terminal_session: state.view.kind === "terminal" ? state.view.sessionId : null,
         terminal_revision: terminalKey ? state.terminalRevisions.get(terminalKey) ?? null : null,
       }),
     }, state.workspaceId);
     if (generation !== state.syncGeneration || state.pageClosing) return;
-    if (message.cache_metadata_only) {
+    if (!usesUiProjection() && message.cache_metadata_only) {
       await hydrateEdbCache(message.snapshot);
       if (generation !== state.syncGeneration || state.pageClosing) return;
       state.syncInFlight = false;
@@ -1896,8 +2141,12 @@ async function requestHttpSync() {
     state.syncInFlight = false;
     state.syncController = null;
     try {
-      applySyncState(message);
+      await applySyncState(message, controller?.signal);
     } catch (error) {
+      if (error.status === 409 && error.code === "stale_revision") {
+        scheduleHttpSync(0);
+        return;
+      }
       return failHttpSync("无法更新界面", error);
     }
     state.activeCatchUpPending = Boolean(message.more_events)
@@ -1914,6 +2163,10 @@ async function requestHttpSync() {
     state.syncInFlight = false;
     state.syncController = null;
     if (error.status === 401) return showLogin("登录已失效，请重新登录");
+    if (error.status === 409 && error.code === "stale_revision") {
+      scheduleHttpSync(0);
+      return;
+    }
     if (error.status && ![502, 503, 504].includes(error.status)) {
       return failHttpSync("界面同步失败", error);
     }
@@ -1931,7 +2184,58 @@ function requestHttpSyncNow() {
   if (!state.syncInFlight && connectionCanPoll()) void requestHttpSync();
 }
 
-function applySyncState(payload) {
+async function applySyncState(payload, signal = null) {
+  if (!usesUiProjection()) return applyRawSyncState(payload);
+  const phaseBefore = state.connectionPhase;
+  const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";
+  const previousSnapshot = state.snapshot;
+  if (payload.snapshot) {
+    state.snapshot = payload.snapshot;
+    state.snapshotInitialized = true;
+  }
+  if (!state.snapshotInitialized) throw new Error("同步响应未提供初始状态");
+  const presentationChanged = snapshotPresentationSignature(previousSnapshot)
+    !== snapshotPresentationSignature(state.snapshot);
+  const selectionChanged = reconcileAgents();
+  const changes = await synchronizeProjectionBucket(
+    state, payload, state.workspaceId, observeInputDraft, signal,
+  );
+  state.edbCacheInitialized = true;
+  state.eventRecovery = null;
+  const selectedChanged = changes.some((change) =>
+    change.changed && change.agentId === state.selectedAgent);
+  const agentSummaryChanged = changes.some((change) => change.summaryChanged);
+  const agentLoadChanged = changes.some((change) => change.loadChanged);
+  const responseMatchesSelection = (payload.selected_agent ?? null) === state.selectedAgent;
+  const apiActivityChanged = responseMatchesSelection
+    ? syncApiActivity(payload.api_activity || {}) : false;
+  const terminalChanged = responseMatchesSelection
+    ? syncTerminals(payload.terminals || []) : false;
+  if (responseMatchesSelection && payload.terminal_frame_updated) {
+    syncTerminalFrame(payload.terminal_session, payload.terminal_frame ?? null);
+  }
+  notePollingSuccess(responseMatchesSelection, responseMatchesSelection);
+  const connectionChanged = phaseBefore !== state.connectionPhase;
+  requestRender({
+    full: startingRecoveryCycle || selectionChanged,
+    connection: connectionChanged,
+    agents: presentationChanged || agentSummaryChanged || agentLoadChanged,
+    tabs: presentationChanged || terminalChanged,
+    currentEvents: selectedChanged,
+    apiActivity: apiActivityChanged,
+    status: apiActivityChanged,
+  });
+  if (!inputHasPriority()) flushPendingRender();
+  else if (state.view.kind === "terminal") renderTerminal();
+  renderSessionSyncOverlay();
+  renderConnectionOverlayForPhase();
+  for (const [agentId, sync] of state.draftSync) {
+    if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
+  }
+  if (!responseMatchesSelection) requestHttpSyncNow();
+}
+
+function applyRawSyncState(payload) {
   const phaseBefore = state.connectionPhase;
   const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";
   const hadBulkRecovery = bulkEventRecoveryActive();
@@ -3088,6 +3392,11 @@ function advanceCurrentProjection() {
   if (bulkEventRecoveryActive()) return emptyProjectionChanges();
   const store = currentStore();
   if (!store) return emptyProjectionChanges();
+  if (usesUiProjection()) {
+    const changes = store.projectionChanges || emptyProjectionChanges();
+    store.projectionChanges = null;
+    return markPendingPromptConfirmation(store, changes);
+  }
   if (store.needsReplay) {
     store.projection = projectChat(store.events);
     store.workmap = projectWorkMap(store.events);
@@ -3169,6 +3478,9 @@ function agentLoadingState(workspaceId, agentId) {
   const meta = bucket.snapshot?.agents?.find((agent) => agent.id === agentId);
   if (!meta) return { loading: false, percent: null };
   const store = bucket.stores.get(agentId);
+  if (usesUiProjection()) {
+    return { loading: !store || store.projectionLoading, percent: null };
+  }
   if (!bucket.edbCacheInitialized || !store) return { loading: true, percent: null };
   if (!store.loadProgress) return { loading: false, percent: null };
   return {
@@ -3487,20 +3799,35 @@ function showView(view) {
   if (state.view.kind === "terminal") void renderTerminal();
 }
 
+function systemPromptChanges(agentId = state.selectedAgent) {
+  const store = state.stores.get(agentId);
+  if (usesUiProjection()) return store?.projectionState?.system_prompt?.changes || [];
+  return (store?.events || []).flatMap((event) => {
+    const [kind, value] = eventParts(event);
+    return kind === "SystemStaticPromptChange" ? [value] : [];
+  });
+}
+
 function latestSystemPromptState(agentId = state.selectedAgent) {
   const defaultContent = String(state.snapshot.chatbot_default_static_prompt ?? "");
-  const events = state.stores.get(agentId)?.events || [];
-  for (let index = events.length - 1; index >= 0; index -= 1) {
-    const [kind, value] = eventParts(events[index]);
-    if (kind !== "SystemStaticPromptChange") continue;
-    const custom = normalize(value.mode) === "custom";
+  if (usesUiProjection()) {
+    const prompt = state.stores.get(agentId)?.projectionState?.system_prompt;
+    const custom = normalize(prompt?.mode) === "custom";
     return {
       mode: custom ? "Custom" : "Default",
-      content: custom ? String(value.content ?? "") : defaultContent,
-      eventId: Number(value.id),
+      content: custom ? String(prompt?.content ?? "") : defaultContent,
+      eventId: prompt?.event_id == null ? null : Number(prompt.event_id),
     };
   }
-  return { mode: "Default", content: defaultContent, eventId: null };
+  const changes = systemPromptChanges(agentId);
+  const latest = changes[changes.length - 1];
+  if (!latest) return { mode: "Default", content: defaultContent, eventId: null };
+  const custom = normalize(latest.mode) === "custom";
+  return {
+    mode: custom ? "Custom" : "Default",
+    content: custom ? String(latest.content ?? "") : defaultContent,
+    eventId: Number(latest.id),
+  };
 }
 
 function systemPromptChangeMatches(value, pending) {
@@ -3522,13 +3849,9 @@ function systemPromptEditorState(agentId = state.selectedAgent) {
     state.promptDrafts.set(agentId, draft);
   }
   if (draft.pending) {
-    const events = state.stores.get(agentId)?.events || [];
-    const confirmation = events.find((event) => {
-      const [kind, value] = eventParts(event);
-      return kind === "SystemStaticPromptChange"
-        && Number(value.id) > draft.pending.afterEventId
-        && systemPromptChangeMatches(value, draft.pending);
-    });
+    const confirmation = systemPromptChanges(agentId).find((value) =>
+      Number(value.id) > draft.pending.afterEventId
+        && systemPromptChangeMatches(value, draft.pending));
     if (confirmation) {
       const confirmed = draft.pending;
       draft.pending = null;
@@ -3580,7 +3903,9 @@ function renderSystemPromptEditor() {
 }
 
 function lastPhysicalEventId(agentId) {
-  return (state.stores.get(agentId)?.events || []).reduce((highest, event) => {
+  const store = state.stores.get(agentId);
+  if (usesUiProjection()) return Number(store?.projectionState?.last_event_id ?? -1);
+  return (store?.events || []).reduce((highest, event) => {
     const [, value] = eventParts(event);
     const id = Number(value.id);
     return Number.isFinite(id) ? Math.max(highest, id) : highest;
@@ -4121,6 +4446,7 @@ function updateWorkerActivityNode(node, wait) {
 }
 
 function workerActivityForWait(wait) {
+  if (usesUiProjection()) return wait.activity || null;
   const worker = state.snapshot.agents.find((agent) => agent.kind === "sub-agent"
     && agent.orchestrator === "worker-agent" && agent.parent_agent_id === state.selectedAgent);
   if (!worker) return null;
@@ -4384,7 +4710,7 @@ function renderComposer() {
   elements.sendSpinner.classList.toggle("hidden", !sending);
   elements.sendLabel.textContent = pending?.status === "confirming" ? "正在确认" : sending ? "正在发送" : "发送";
   elements.stop.disabled = !canStop;
-  elements.input.placeholder = readOnly ? `${worker ? "Worker" : "子 Agent"} 对话只读 · ${childStateLabel(currentStore()?.events || [])}` : "发送消息";
+  elements.input.placeholder = readOnly ? `${worker ? "Worker" : "子 Agent"} 对话只读 · ${childStateLabel(currentStore())}` : "发送消息";
   elements.inputHint.textContent = sending
     ? "消息进入列表后即可继续输入"
     : worker ? "可调整模型、推理强度或停止当前任务"
@@ -4490,11 +4816,24 @@ function estimateContextBreakdown(events, usage, memoryContent) {
   };
 }
 
+function projectedContextBreakdown(store) {
+  const context = store?.projectionState?.context;
+  return {
+    total: context?.total ?? null,
+    values: context?.values || { system: 0, compact: 0, memory: 0, user: 0, model: 0, tool: 0 },
+    compactContent: context?.compact_content ?? null,
+    compactAnalysis: context?.compact_analysis ?? null,
+    memoryContent: context?.memory_content ?? null,
+  };
+}
+
 function renderContextDrawer() {
   const projection = currentProjection();
   const model = state.snapshot.models.find((candidate) => candidate.name === projection.model);
   const limit = Number(model?.context_window);
-  const { total, values: usageValues, compactContent, compactAnalysis, memoryContent } = estimateContextBreakdown(currentStore()?.events || [], projection.apiUsage, currentStore()?.turnHistory ?? null);
+  const { total, values: usageValues, compactContent, compactAnalysis, memoryContent } = usesUiProjection()
+    ? projectedContextBreakdown(currentStore())
+    : estimateContextBreakdown(currentStore()?.events || [], projection.apiUsage, currentStore()?.turnHistory ?? null);
   const configuredReserve = Number(model?.output_token_reservations?.[projection.effort] ?? 0);
   const outputReserve = Number.isFinite(configuredReserve) && configuredReserve > 0 ? configuredReserve : 0;
   const values = { ...usageValues, reserve: outputReserve };
@@ -5282,19 +5621,24 @@ function resolveGatewayEdbCacheLabel(entry) {
 }
 
 function localPreferenceSettingsHtml() {
-  if (!runtimeCapabilities.windowBorderStyle) return "";
-  return `<section class="settings-section settings-local-section">
-    <header class="settings-section-header">
-      <div class="settings-section-heading"><h3>本机偏好</h3><p>仅保存在当前设备，并会立即生效。</p></div>
-    </header>
-    <div class="settings-preference-list">
+  const borderStyle = runtimeCapabilities.windowBorderStyle ? `
       <label class="settings-preference-row settings-preference-select">
         <span class="settings-preference-copy"><strong>边框样式</strong><small>选择桌面窗口边缘使用的颜色。</small></span>
         <select data-local-preference="window-border-style">
           <option value="default" ${state.windowBorderStyle === WINDOW_BORDER_DEFAULT ? "selected" : ""}>默认</option>
           <option value="theme" ${state.windowBorderStyle === WINDOW_BORDER_THEME ? "selected" : ""}>主题</option>
         </select>
+      </label>` : "";
+  return `<section class="settings-section settings-local-section">
+    <header class="settings-section-header">
+      <div class="settings-section-heading"><h3>本机偏好</h3><p>仅保存在当前设备，并会立即生效。</p></div>
+    </header>
+    <div class="settings-preference-list">
+      <label class="settings-preference-row">
+        <span class="settings-preference-copy"><strong>兼容渲染模式</strong><small>遇到显示异常时可切换使用。切换后将重新载入会话。</small></span>
+        <input class="settings-toggle" type="checkbox" data-local-preference="raw-edb-decoding" ${state.rawEdbDecoding ? "checked" : ""}>
       </label>
+      ${borderStyle}
     </div>
   </section>`;
 }
@@ -5302,6 +5646,8 @@ function localPreferenceSettingsHtml() {
 function bindLocalPreferenceSettings(container = elements.modalContent) {
   const borderStyle = container.querySelector('[data-local-preference="window-border-style"]');
   borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));
+  const rawEdbDecoding = container.querySelector('[data-local-preference="raw-edb-decoding"]');
+  rawEdbDecoding?.addEventListener("change", () => setRawEdbDecoding(rawEdbDecoding.checked));
 }
 
 function openLocalSettings() {
@@ -5551,6 +5897,10 @@ async function sendCommand(payload, workspaceId = state.workspaceId, { refresh =
 }
 
 function promptSubmissionBoundary(meta, store) {
+  if (usesUiProjection() && store?.projectionState?.last_event_id != null) {
+    const projectionBoundary = Number(store.projectionState.last_event_id);
+    if (Number.isSafeInteger(projectionBoundary)) return projectionBoundary;
+  }
   if (meta?.last_event_id != null) {
     const snapshotBoundary = Number(meta.last_event_id);
     if (Number.isSafeInteger(snapshotBoundary)) return snapshotBoundary;
@@ -5932,8 +6282,10 @@ function toast(message, error = false) {
   setTimeout(() => node.remove(), 3500);
 }
 
-function childStateLabel(events) {
-  const latest = [...events].reverse().map(eventParts).find(([kind]) => kind === "AgentTurn")?.[1];
+function childStateLabel(store) {
+  if (usesUiProjection()) return normalize(store?.summary?.turnState || "working");
+  const latest = [...(store?.events || [])].reverse().map(eventParts)
+    .find(([kind]) => kind === "AgentTurn")?.[1];
   if (!latest) return "working";
   return normalize(latest.state);
 }

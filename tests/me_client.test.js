@@ -38,6 +38,7 @@ function loadClientRuntime({ platform = "", userAgent = "" } = {}) {
               "me-color-mode": "light",
               "me-send-shortcut": "enter",
               "me-window-border-style": "theme",
+              "me-raw-edb-decoding": "false",
             },
             rememberedDevices: [
               { endpoint: "http://127.0.0.1:38200", password: "local secret", updatedAt: 2, online: true },
@@ -138,6 +139,8 @@ describe("ME Client native adapter", () => {
       localDevice: { endpoint: "http://127.0.0.1:38200", online: true, requiresPassword: true },
     });
     expect(await runtime.configureTarget("https://gateway.example")).toEqual({ endpoint: "https://gateway.example" });
+    expect(runtime.apiPath("/api/ui-projections/main/state", "workspace-one"))
+      .toBe("/api/workspaces/workspace-one/ui-projections/main/state");
     const response = await sandbox.fetch("/api/auth/status", { cache: "no-store" });
     expect(await response.json()).toEqual({ required: true, authenticated: false });
     const request = calls.find((call) => call.command === "gateway_request").payload.request;
@@ -428,24 +431,28 @@ describe("ME Client native adapter", () => {
     expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("light");
     expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("enter");
     expect(runtime.devicePreferences.getItem("me-window-border-style")).toBe("theme");
+    expect(runtime.devicePreferences.getItem("me-raw-edb-decoding")).toBe("false");
     expect(runtime.capabilities.windowBorderStyle).toBe(true);
 
     await runtime.devicePreferences.setItem("me-theme", "obsidian");
     await runtime.devicePreferences.setItem("me-color-mode", "dark");
     await runtime.devicePreferences.setItem("me-send-shortcut", "modified-enter");
     await runtime.devicePreferences.setItem("me-window-border-style", "default");
+    await runtime.devicePreferences.setItem("me-raw-edb-decoding", "true");
     await runtime.devicePreferences.setItem("gateway.endpoint", "must-not-persist");
     await runtime.configureTarget("https://other-gateway.example");
     expect(runtime.devicePreferences.getItem("me-theme")).toBe("obsidian");
     expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("dark");
     expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("modified-enter");
     expect(runtime.devicePreferences.getItem("me-window-border-style")).toBe("default");
+    expect(runtime.devicePreferences.getItem("me-raw-edb-decoding")).toBe("true");
     expect(calls.filter((call) => call.command === "set_device_preference").map((call) => call.payload))
       .toEqual([
         { key: "me-theme", value: "obsidian" },
         { key: "me-color-mode", value: "dark" },
         { key: "me-send-shortcut", value: "modified-enter" },
         { key: "me-window-border-style", value: "default" },
+        { key: "me-raw-edb-decoding", value: "true" },
       ]);
 
     const ios = loadClientRuntime({ platform: "iPhone", userAgent: "Mozilla/5.0 (iPhone)" });
@@ -455,7 +462,8 @@ describe("ME Client native adapter", () => {
     const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
     expect(clientRuntime).not.toMatch(/document\.cookie|localStorage|globalThis\.indexedDB/);
     expect(clientRuntime).toContain('"me-theme", "me-color-mode", "me-send-shortcut", "me-window-border-style"');
-    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 4]');
+    expect(clientRuntime).toContain('"me-raw-edb-decoding"');
+    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 5]');
     expect(nativeRuntime).toContain('run_blocking(move || cache.set_setting(&key, &value)).await');
     expect(nativeRuntime).toContain('device_preferences: BTreeMap<String, String>');
   });

@@ -35,6 +35,7 @@ pub mod toolbox;
 pub mod tui;
 mod turn_history;
 pub mod ui_backend;
+pub mod ui_projection;
 pub mod updater;
 pub mod web_auth;
 pub mod webui;

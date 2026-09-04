@@ -5,6 +5,7 @@
     const value = String(path || "");
     const childPath = value === "/api/sync" || value === "/api/snapshot" || value === "/api/command"
       || value.startsWith("/api/deletion-blocker/")
+      || value.startsWith("/api/ui-projections/")
       || value.startsWith("/api/session-terminal/")
       || value.startsWith("/api/remote-control/")
       || value.startsWith("/api/files/");

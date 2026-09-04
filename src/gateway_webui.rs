@@ -659,7 +659,12 @@ mod tests {
         let app_script = INDEX_HTML.find("/app.js").unwrap();
         assert!(cache_script < app_script);
         assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
-        assert!(APP_JS.contains("cache_metadata_only: !state.edbCacheInitialized"));
+        assert!(
+            APP_JS
+                .contains("cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized")
+        );
+        assert!(APP_JS.contains("/api/ui-projections/"));
+        assert!(RUNTIME_JS.contains("/api/ui-projections/"));
         assert!(APP_JS.contains("id=\"settings-edb-cache-manager\""));
         assert!(APP_JS.contains("edbCacheInitialized: state.edbCacheInitialized"));
         assert!(APP_JS.contains("state.edbCacheInitialized = workspace.edbCacheInitialized"));

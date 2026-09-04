@@ -301,9 +301,12 @@ describe("WebUI authoritative input draft synchronization", () => {
     expect(reached([event("FollowUpPrompt", 12, { content: "相同正文" })])).toBe(true);
   });
 
-  test("submission boundary prefers the authoritative snapshot and safely falls back to local events", () => {
+  test("submission boundary prefers projection authority, then snapshot and raw Events", () => {
     const { promptSubmissionBoundary } = loadDraftRuntime();
     const store = { events: [event("AssistResponse", 7, { content: "done" })] };
+    expect(promptSubmissionBoundary({ last_event_id: 9 }, {
+      ...store, projectionState: { last_event_id: 11 },
+    })).toBe(11);
     expect(promptSubmissionBoundary({ last_event_id: 9 }, store)).toBe(9);
     expect(promptSubmissionBoundary({}, store)).toBe(7);
     expect(promptSubmissionBoundary({}, { events: [] })).toBe(-1);

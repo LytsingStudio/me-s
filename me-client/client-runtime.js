@@ -64,6 +64,7 @@
 
   const DEVICE_PREFERENCE_KEYS = new Set([
     "me-theme", "me-color-mode", "me-send-shortcut", "me-window-border-style",
+    "me-raw-edb-decoding",
   ]);
   const devicePreferenceValues = new Map();
   let devicePreferencesReady = false;
@@ -178,6 +179,7 @@
     const value = String(path || "");
     const childPath = value === "/api/sync" || value === "/api/snapshot" || value === "/api/command"
       || value.startsWith("/api/deletion-blocker/")
+      || value.startsWith("/api/ui-projections/")
       || value.startsWith("/api/session-terminal/")
       || value.startsWith("/api/remote-control/")
       || value.startsWith("/api/files/");

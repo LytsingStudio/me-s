@@ -9,6 +9,10 @@ use crate::{
     config::UNSET_EFFORT,
     event::{AgentKind, EdbMutation, Event, EventId, SystemStaticPromptMode},
     terminal::{TerminalFrame, TerminalSessionPreview},
+    ui_projection::{
+        UiProjectionCache, UiProjectionCursor, UiProjectionHash, UiProjectionRange,
+        UiProjectionState,
+    },
     workspace::{AgentId, Workspace, WorkspaceHandle},
 };
 
@@ -132,6 +136,44 @@ pub trait UiBackend: Send + Sync {
 
     fn agent_ids(&self) -> Result<Vec<AgentId>>;
 
+    fn snapshot_with_ui_projection_states(
+        &self,
+        cursors: &[UiProjectionCursor],
+    ) -> Result<(UiSnapshot, Vec<UiProjectionState>)> {
+        let snapshot = self.snapshot()?;
+        let states = UiProjectionCache::default().states(&snapshot, cursors)?;
+        Ok((snapshot, states))
+    }
+
+    fn ui_projection_states(
+        &self,
+        cursors: &[UiProjectionCursor],
+    ) -> Result<Vec<UiProjectionState>> {
+        Ok(self.snapshot_with_ui_projection_states(cursors)?.1)
+    }
+
+    fn ui_projection_range(
+        &self,
+        agent_id: &AgentId,
+        start: usize,
+        end: usize,
+        expected_revision: &str,
+    ) -> Result<UiProjectionRange> {
+        let snapshot = self.snapshot()?;
+        UiProjectionCache::default().range(&snapshot, agent_id, start, end, expected_revision)
+    }
+
+    fn ui_projection_hash(
+        &self,
+        agent_id: &AgentId,
+        start: usize,
+        end: usize,
+        expected_revision: &str,
+    ) -> Result<UiProjectionHash> {
+        let snapshot = self.snapshot()?;
+        UiProjectionCache::default().hash(&snapshot, agent_id, start, end, expected_revision)
+    }
+
     fn session_terminal_agent_ids(&self) -> Result<Vec<AgentId>> {
         Ok(self
             .snapshot()?
@@ -241,6 +283,7 @@ pub struct WorkspaceUiBackend {
     models: Arc<[UiModelOption]>,
     orchestrators: Arc<[String]>,
     default_orchestrator: String,
+    projections: Arc<Mutex<UiProjectionCache>>,
 }
 
 #[derive(Clone)]
@@ -293,6 +336,7 @@ pub fn workspace_ui_ports(workspace: Workspace) -> (WorkspaceUiBackend, Workspac
             models,
             orchestrators,
             default_orchestrator,
+            projections: Arc::new(Mutex::new(UiProjectionCache::default())),
         },
         WorkspaceUiCommandGateway { handle },
     )
@@ -345,6 +389,54 @@ impl UiBackend for WorkspaceUiBackend {
 
     fn agent_ids(&self) -> Result<Vec<AgentId>> {
         self.handle.agent_ids()
+    }
+
+    fn snapshot_with_ui_projection_states(
+        &self,
+        cursors: &[UiProjectionCursor],
+    ) -> Result<(UiSnapshot, Vec<UiProjectionState>)> {
+        let snapshot = self.snapshot()?;
+        let states = self
+            .projections
+            .lock()
+            .map_err(|_| "UI projection cache lock is poisoned")?
+            .states(&snapshot, cursors)?;
+        Ok((snapshot, states))
+    }
+
+    fn ui_projection_states(
+        &self,
+        cursors: &[UiProjectionCursor],
+    ) -> Result<Vec<UiProjectionState>> {
+        Ok(self.snapshot_with_ui_projection_states(cursors)?.1)
+    }
+
+    fn ui_projection_range(
+        &self,
+        agent_id: &AgentId,
+        start: usize,
+        end: usize,
+        expected_revision: &str,
+    ) -> Result<UiProjectionRange> {
+        let snapshot = self.snapshot()?;
+        self.projections
+            .lock()
+            .map_err(|_| "UI projection cache lock is poisoned")?
+            .range(&snapshot, agent_id, start, end, expected_revision)
+    }
+
+    fn ui_projection_hash(
+        &self,
+        agent_id: &AgentId,
+        start: usize,
+        end: usize,
+        expected_revision: &str,
+    ) -> Result<UiProjectionHash> {
+        let snapshot = self.snapshot()?;
+        self.projections
+            .lock()
+            .map_err(|_| "UI projection cache lock is poisoned")?
+            .hash(&snapshot, agent_id, start, end, expected_revision)
     }
 
     fn session_terminal_agent_ids(&self) -> Result<Vec<AgentId>> {
