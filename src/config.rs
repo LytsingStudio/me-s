@@ -13,6 +13,7 @@ use crate::Result;
 
 const GLOBAL_CONFIG_VERSION: u32 = 1;
 const WORKSPACE_CONFIG_VERSION: u32 = 2;
+const MAX_MODEL_CONTEXT_WINDOW: u64 = 262_144;
 pub const UNSET_EFFORT: &str = "unset";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -165,6 +166,18 @@ impl GlobalConfig {
             .into());
         }
         let mut config: Self = toml::from_str(&fs::read_to_string(path)?)?;
+        for model in &mut config.models {
+            let configured = model.capabilities.context_window;
+            if configured > MAX_MODEL_CONTEXT_WINDOW {
+                eprintln!(
+                    "warning: model preset \"{}\" sets context_window to {} tokens; using the maximum of {} tokens",
+                    model.name.escape_default(),
+                    configured,
+                    MAX_MODEL_CONTEXT_WINDOW
+                );
+                model.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW;
+            }
+        }
         config.add_unset_effort();
         config.validate()?;
         Ok(config)
@@ -496,6 +509,50 @@ mod tests {
             WorkspaceConfig::load(&legacy_path).unwrap().orchestrator,
             "main-agent"
         );
+
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn global_config_load_clamps_context_windows_without_rewriting_file() {
+        let directory = temporary_path("context-window-limit");
+        let path = directory.join("models.toml");
+        let mut above = model();
+        above.name = "模型-above".into();
+        above.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW + 1;
+        let mut exact = model();
+        exact.name = "exact".into();
+        exact.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW;
+        let mut below = model();
+        below.name = "below".into();
+        below.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW - 1;
+        let config = GlobalConfig {
+            version: GLOBAL_CONFIG_VERSION,
+            default_model: above.name.clone(),
+            models: vec![above, exact, below],
+        };
+        config.save(&path).unwrap();
+        let original = fs::read(&path).unwrap();
+
+        let loaded = GlobalConfig::load(&path).unwrap();
+
+        assert_eq!(
+            loaded
+                .model("模型-above")
+                .unwrap()
+                .capabilities
+                .context_window,
+            MAX_MODEL_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            loaded.model("exact").unwrap().capabilities.context_window,
+            MAX_MODEL_CONTEXT_WINDOW
+        );
+        assert_eq!(
+            loaded.model("below").unwrap().capabilities.context_window,
+            MAX_MODEL_CONTEXT_WINDOW - 1
+        );
+        assert_eq!(fs::read(&path).unwrap(), original);
 
         fs::remove_dir_all(directory).unwrap();
     }
