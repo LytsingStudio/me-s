@@ -13,7 +13,9 @@ use crate::Result;
 
 const GLOBAL_CONFIG_VERSION: u32 = 1;
 const WORKSPACE_CONFIG_VERSION: u32 = 2;
-const MAX_MODEL_CONTEXT_WINDOW: u64 = 262_144;
+const MAX_MODEL_OUTPUT_TOKENS: u64 = 262_144;
+const OUTPUT_TOKEN_PARAMETER_NAMES: [&str; 3] =
+    ["max_output_tokens", "max_completion_tokens", "max_tokens"];
 pub const UNSET_EFFORT: &str = "unset";
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -139,14 +141,32 @@ impl ModelConfig {
 }
 
 fn request_output_limit(parameters: &toml::Table) -> Option<u64> {
-    ["max_output_tokens", "max_completion_tokens", "max_tokens"]
-        .into_iter()
-        .find_map(|name| {
-            parameters
-                .get(name)
-                .and_then(toml::Value::as_integer)
-                .and_then(|value| u64::try_from(value).ok())
-        })
+    OUTPUT_TOKEN_PARAMETER_NAMES.into_iter().find_map(|name| {
+        parameters
+            .get(name)
+            .and_then(toml::Value::as_integer)
+            .and_then(|value| u64::try_from(value).ok())
+    })
+}
+
+fn clamp_output_token_parameters(parameters: &mut toml::Table) -> bool {
+    let mut clamped = false;
+    for name in OUTPUT_TOKEN_PARAMETER_NAMES {
+        let Some(value) = parameters.get_mut(name) else {
+            continue;
+        };
+        let Some(configured) = value
+            .as_integer()
+            .and_then(|value| u64::try_from(value).ok())
+        else {
+            continue;
+        };
+        if configured > MAX_MODEL_OUTPUT_TOKENS {
+            *value = toml::Value::Integer(MAX_MODEL_OUTPUT_TOKENS as i64);
+            clamped = true;
+        }
+    }
+    clamped
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -167,15 +187,24 @@ impl GlobalConfig {
         }
         let mut config: Self = toml::from_str(&fs::read_to_string(path)?)?;
         for model in &mut config.models {
-            let configured = model.capabilities.context_window;
-            if configured > MAX_MODEL_CONTEXT_WINDOW {
+            let mut clamped = false;
+            if let Some(max_output_tokens) = model.capabilities.max_output_tokens.as_mut()
+                && *max_output_tokens > MAX_MODEL_OUTPUT_TOKENS
+            {
+                *max_output_tokens = MAX_MODEL_OUTPUT_TOKENS;
+                clamped = true;
+            }
+            clamped |= clamp_output_token_parameters(&mut model.parameters);
+            for parameters in model.effort_parameters.values_mut() {
+                clamped |= clamp_output_token_parameters(parameters);
+            }
+            if clamped {
                 eprintln!(
-                    "warning: model preset \"{}\" sets context_window to {} tokens; using the maximum of {} tokens",
+                    "warning: model preset \"{}\" sets one or more output token limits above {} tokens; using {} tokens for those limits",
                     model.name.escape_default(),
-                    configured,
-                    MAX_MODEL_CONTEXT_WINDOW
+                    MAX_MODEL_OUTPUT_TOKENS,
+                    MAX_MODEL_OUTPUT_TOKENS
                 );
-                model.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW;
             }
         }
         config.add_unset_effort();
@@ -514,44 +543,66 @@ mod tests {
     }
 
     #[test]
-    fn global_config_load_clamps_context_windows_without_rewriting_file() {
-        let directory = temporary_path("context-window-limit");
+    fn global_config_load_clamps_output_tokens_without_rewriting_or_changing_context() {
+        let directory = temporary_path("output-token-limit");
         let path = directory.join("models.toml");
-        let mut above = model();
-        above.name = "模型-above".into();
-        above.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW + 1;
-        let mut exact = model();
-        exact.name = "exact".into();
-        exact.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW;
-        let mut below = model();
-        below.name = "below".into();
-        below.capabilities.context_window = MAX_MODEL_CONTEXT_WINDOW - 1;
+        let mut limited = model();
+        limited.name = "模型-limited".into();
+        limited.capabilities.context_window = 1_048_576;
+        limited.capabilities.max_output_tokens = Some(MAX_MODEL_OUTPUT_TOKENS + 1);
+        limited.parameters = toml::from_str(
+            "max_output_tokens = 300000\nmax_completion_tokens = 262144\nmax_tokens = 200000\ntemperature = 0.2",
+        )
+        .unwrap();
+        limited.effort_parameters.insert(
+            "high".into(),
+            toml::from_str(
+                "max_output_tokens = 300001\nmax_completion_tokens = 262144\nmax_tokens = 200001\nreasoning_effort = \"high\"",
+            )
+            .unwrap(),
+        );
+        let mut absent = model();
+        absent.name = "absent".into();
+        absent.capabilities.context_window = 2_000_000;
         let config = GlobalConfig {
             version: GLOBAL_CONFIG_VERSION,
-            default_model: above.name.clone(),
-            models: vec![above, exact, below],
+            default_model: limited.name.clone(),
+            models: vec![limited, absent],
         };
         config.save(&path).unwrap();
         let original = fs::read(&path).unwrap();
 
         let loaded = GlobalConfig::load(&path).unwrap();
+        let limited = loaded.model("模型-limited").unwrap();
 
+        assert_eq!(limited.capabilities.context_window, 1_048_576);
         assert_eq!(
-            loaded
-                .model("模型-above")
-                .unwrap()
-                .capabilities
-                .context_window,
-            MAX_MODEL_CONTEXT_WINDOW
+            limited.capabilities.max_output_tokens,
+            Some(MAX_MODEL_OUTPUT_TOKENS)
         );
         assert_eq!(
-            loaded.model("exact").unwrap().capabilities.context_window,
-            MAX_MODEL_CONTEXT_WINDOW
+            limited.parameters["max_output_tokens"].as_integer(),
+            Some(MAX_MODEL_OUTPUT_TOKENS as i64)
         );
         assert_eq!(
-            loaded.model("below").unwrap().capabilities.context_window,
-            MAX_MODEL_CONTEXT_WINDOW - 1
+            limited.parameters["max_completion_tokens"].as_integer(),
+            Some(MAX_MODEL_OUTPUT_TOKENS as i64)
         );
+        assert_eq!(limited.parameters["max_tokens"].as_integer(), Some(200_000));
+        let high = &limited.effort_parameters["high"];
+        assert_eq!(
+            high["max_output_tokens"].as_integer(),
+            Some(MAX_MODEL_OUTPUT_TOKENS as i64)
+        );
+        assert_eq!(
+            high["max_completion_tokens"].as_integer(),
+            Some(MAX_MODEL_OUTPUT_TOKENS as i64)
+        );
+        assert_eq!(high["max_tokens"].as_integer(), Some(200_001));
+        let absent = loaded.model("absent").unwrap();
+        assert_eq!(absent.capabilities.context_window, 2_000_000);
+        assert_eq!(absent.capabilities.max_output_tokens, None);
+        assert!(absent.parameters.is_empty());
         assert_eq!(fs::read(&path).unwrap(), original);
 
         fs::remove_dir_all(directory).unwrap();
