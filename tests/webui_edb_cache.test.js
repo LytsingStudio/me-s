@@ -123,7 +123,8 @@ describe("browser-local raw EDB cache", () => {
     expect(sharedSource).toContain("store.events = events;");
     expect(sharedSource).toContain("store.events.push(...events);");
     expect(sharedSource).toContain("if (payload.turn_history_updated) {");
-    expect(sharedSource).toContain("state.stores.clear()");
+    expect(sharedSource).toContain("store.pendingPromptSubmission = previous.pendingPromptSubmission");
+    expect(sharedSource).toContain("generation !== state.syncGeneration || state.pageClosing || usesUiProjection()");
     expect(sharedSource).toContain("projection: emptyProjection()");
     expect(sharedSource).toContain("workmap: emptyWorkMap()");
     expect(sharedSource).toContain("loadProgress: raw ? createAgentLoadProgress(meta, eventCount, mutationRevision) : null");

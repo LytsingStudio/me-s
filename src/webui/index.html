@@ -106,14 +106,6 @@
         <span id="terminal-tabs" data-work-only></span>
       </nav>
 
-      <div id="session-sync-overlay" class="session-sync-overlay hidden" role="status" aria-live="polite" aria-atomic="true" aria-hidden="true" tabindex="-1">
-        <div class="session-sync-card">
-          <span class="connection-spinner" aria-hidden="true"></span>
-          <strong>正在同步</strong>
-          <span id="session-sync-progress">正在准备会话，请稍候。</span>
-        </div>
-      </div>
-
       <section id="chat-view" class="view active">
         <div id="transcript" class="transcript">
           <div id="transcript-content" class="transcript-content"></div>
@@ -237,15 +229,6 @@
         <button id="status-context-trigger" class="status-selector status-context-selector" type="button" aria-haspopup="dialog" aria-expanded="false" title="查看上下文用量"><span id="status-context">—/—</span></button>
       </footer>
     </main>
-  </div>
-
-  <div id="connection-overlay" class="connection-overlay hidden" role="alertdialog" aria-modal="true" aria-labelledby="connection-overlay-title">
-    <div class="connection-card">
-      <span class="connection-spinner" aria-hidden="true"></span>
-      <h2 id="connection-overlay-title">正在重新连接</h2>
-      <p id="connection-overlay-message">连接已断开，正在恢复当前界面。</p>
-      <button id="connection-retry" class="primary-button" type="button">立即重试</button>
-    </div>
   </div>
 
   <div id="user-message-menu" class="user-message-menu hidden" role="menu">

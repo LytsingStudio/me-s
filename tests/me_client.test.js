@@ -319,27 +319,15 @@ describe("ME Client native adapter", () => {
     expect(css).toContain("inset: 0;");
     expect(css).not.toContain("backdrop-filter");
     expect(css).toContain(
-      "html.me-client-platform-windows .connection-overlay,\n"
-      + "html.me-client-platform-windows .modal-backdrop,\n"
+      "html.me-client-platform-windows .modal-backdrop,\n"
       + "html.me-client-platform-windows .drawer-backdrop,\n"
       + "html.me-client-platform-windows .mobile-sidebar-backdrop {\n"
       + "  overflow: hidden;\n"
       + "  border-radius: var(--client-window-radius);\n"
       + "}",
     );
-    expect(css).toContain(
-      "html.me-client-platform-windows .session-sync-overlay {\n"
-      + "  overflow: hidden;\n"
-      + "  border-radius: 0 0 var(--client-window-radius) 0;\n"
-      + "}",
-    );
-    expect(css).toContain(
-      "@media (orientation: portrait) {\n"
-      + "  html.me-client-platform-windows .session-sync-overlay {\n"
-      + "    border-bottom-left-radius: var(--client-window-radius);\n"
-      + "  }\n"
-      + "}",
-    );
+    expect(css).not.toContain(".connection-overlay");
+    expect(css).not.toContain(".session-sync-overlay");
     expect(css).not.toContain(".me-client-platform-windows .user-message-menu");
     expect(css).not.toContain(".me-client-platform-windows .agent-menu");
     expect(css).not.toContain(".me-client-platform-windows .toast-region");
@@ -387,7 +375,6 @@ describe("ME Client native adapter", () => {
     expect(frontendBuild).toContain('"window-shadow.html"');
     expect(windowsConfig).toContain('"transparent": true');
     expect(windowsConfig).toContain('"shadow": false');
-    expect(sharedCss).toContain("inset: 46px 0 0");
     expect(sharedCss).toContain("align-items: flex-end");
     expect(sharedCss).toContain("min-height: 46px");
     expect(sharedCss).toContain("height: 38px");

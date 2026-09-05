@@ -35,8 +35,7 @@ button, textarea { font: inherit; }
 button { color: inherit; }
 .hidden { display: none !important; }
 
-[data-target-configuration] { display: none; }
-.target-configuration [data-target-configuration] { display: grid; }
+:root:not(.target-configuration) [data-target-configuration] { display: none !important; }
 .single-workspace [data-multiple-workspaces] { display: none !important; }
 
 .login-screen { display: grid; width: 100%; height: 100%; min-height: 0; overflow: auto; overscroll-behavior: contain; padding: 24px; position: relative; isolation: isolate; place-items: center;
@@ -200,14 +199,7 @@ button { color: inherit; }
 
 
 .app-shell { display: grid; width: 100%; height: 100%; height: 100dvh; min-height: 0; grid-template-columns: 250px minmax(0, 1fr); overflow: hidden; }
-.connection-overlay { position: fixed; inset: 0; z-index: 120; display: grid; place-items: center; padding: 24px; background: var(--overlay-bg); backdrop-filter: blur(7px); }
-.connection-card { display: grid; justify-items: center; width: min(360px, 100%); padding: 28px 25px 24px; border: 1px solid var(--border-bright); border-radius: 16px; background: var(--panel); box-shadow: var(--shadow); text-align: center; }
-.connection-card h2 { margin: 16px 0 7px; font-size: 18px; }
-.connection-card p { min-height: 38px; margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.55; }
-.connection-card button { min-width: 112px; }
-.connection-spinner { width: 26px; height: 26px; border: 3px solid var(--border-bright); border-top-color: var(--violet); border-radius: 50%; animation: connection-spin .8s linear infinite; }
 @keyframes connection-spin { to { transform: rotate(360deg); } }
-@media (prefers-reduced-motion: reduce) { .connection-spinner { animation-duration: 1.8s; } }
 .sidebar { display: flex; min-width: 0; flex-direction: column; overflow: hidden; border-right: 1px solid var(--border); background: var(--sidebar); }
 .sidebar-scroll { min-height: 0; flex: 1 1 auto; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: transparent transparent; scrollbar-width: thin; }
 .sidebar-scroll.scrollbar-active, .sidebar-scroll:focus-within { scrollbar-color: var(--border-bright) transparent; }
@@ -263,10 +255,6 @@ button { color: inherit; }
 .primary-button.danger:hover { background: var(--danger-hover-bg); }
 .primary-button:disabled, .ghost-button:disabled { opacity: .4; cursor: default; }
 
-.session-sync-overlay { position: absolute; z-index: 70; inset: 46px 0 0; display: grid; place-items: center; padding: 24px; background: color-mix(in srgb, var(--bg) 82%, transparent); backdrop-filter: blur(6px); }
-.session-sync-card { display: grid; min-width: min(280px, 100%); justify-items: center; gap: 10px; padding: 24px 28px; border: 1px solid var(--border-bright); border-radius: 15px; background: color-mix(in srgb, var(--panel) 94%, transparent); box-shadow: var(--shadow); text-align: center; }
-.session-sync-card strong { margin-top: 4px; font-size: 16px; }
-.session-sync-card > span:last-child { color: var(--muted); font-size: 12px; }
 
 .view-tabs { display: flex; align-items: flex-end; gap: 4px; min-height: 46px; padding: 0 25px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .view-tabs button { display: inline-flex; height: 38px; align-items: center; justify-content: center; padding: 0 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
@@ -661,7 +649,6 @@ button { color: inherit; }
   body.mobile-sidebar-open .mobile-sidebar-backdrop { opacity: 1; pointer-events: auto; }
 
   .workspace { grid-template-rows: auto minmax(0, 1fr) auto; }
-  .session-sync-overlay { inset-block-start: calc(51px + env(safe-area-inset-top)); padding: 18px; }
   .view-tabs {
     min-height: calc(51px + env(safe-area-inset-top));
     padding: env(safe-area-inset-top) max(8px, env(safe-area-inset-right)) 0 max(8px, env(safe-area-inset-left));

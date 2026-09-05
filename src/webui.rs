@@ -389,6 +389,8 @@ struct SyncAgentCursor {
     cursor_event_hash: Option<String>,
     #[serde(default)]
     projection_revision: Option<String>,
+    #[serde(default)]
+    projection_window: Option<crate::ui_projection::UiProjectionWindow>,
 }
 
 fn cursor_event_hash_matches(cursor: &SyncAgentCursor, events: &[Event]) -> bool {
@@ -417,6 +419,11 @@ fn sync_state_payload(
         .map(|cursor| UiProjectionCursor {
             agent_id: cursor.id.clone(),
             revision: cursor.projection_revision.clone(),
+            window: if selected_agent.as_deref() == Some(cursor.id.as_str()) {
+                cursor.projection_window.clone()
+            } else {
+                None
+            },
         })
         .collect::<Vec<_>>();
     let (snapshot, projection_states) = if ui_projection {
@@ -1807,6 +1814,7 @@ fn ui_projection_response(
             let states = backend.ui_projection_states(&[UiProjectionCursor {
                 agent_id: agent_id.to_string(),
                 revision: known_revision,
+                window: None,
             }]);
             match states {
                 Ok(states) => match states
@@ -2829,6 +2837,7 @@ mod tests {
                 mutation_revision: 0,
                 cursor_event_hash: None,
                 projection_revision: None,
+                projection_window: None,
             }],
             Some("main".into()),
             None,
@@ -2857,6 +2866,7 @@ mod tests {
                 mutation_revision: 0,
                 cursor_event_hash: None,
                 projection_revision: Some(revision),
+                projection_window: None,
             }],
             Some("main".into()),
             None,
@@ -2871,6 +2881,39 @@ mod tests {
             serde_json::Value::Null
         );
     }
+    #[test]
+    fn http_sync_only_selected_agent_can_request_an_inline_projection_window() {
+        let backend = sync_test_backend(sync_test_events(300), 0);
+        for selected in [None, Some("main".to_owned())] {
+            let cursor = serde_json::from_value::<SyncAgentCursor>(json!({
+                "id": "main",
+                "projection_window": { "start": 0, "end": 0, "count": 0, "follow_tail": true }
+            }))
+            .unwrap();
+            let payload = sync_state_payload(
+                &backend,
+                None,
+                vec![cursor],
+                selected.clone(),
+                None,
+                None,
+                false,
+                true,
+            )
+            .unwrap();
+            let state = &payload["projection_states"][0];
+            if selected.is_some() {
+                let range = &state["range"];
+                assert_eq!(range["revision"], state["revision"]);
+                assert_eq!(range["count"], state["count"]);
+                assert!(range["projections"].as_array().unwrap().len() <= 64);
+            } else {
+                assert!(state.get("range").is_none());
+            }
+            assert_eq!(payload["event_updates"], json!([]));
+        }
+    }
+
     #[test]
     fn http_sync_metadata_only_returns_authoritative_cache_metadata_without_events() {
         let events = sync_test_events(3);
@@ -2944,6 +2987,7 @@ mod tests {
             mutation_revision: 4,
             cursor_event_hash,
             projection_revision: None,
+            projection_window: None,
         };
 
         let valid = sync_state_payload(
@@ -3053,6 +3097,7 @@ mod tests {
                 mutation_revision: 4,
                 cursor_event_hash: Some(final_hash.clone()),
                 projection_revision: None,
+                projection_window: None,
             }],
             Some("main".into()),
             None,
@@ -3085,6 +3130,7 @@ mod tests {
                 mutation_revision: 4,
                 cursor_event_hash: None,
                 projection_revision: None,
+                projection_window: None,
             }],
             Some("main".into()),
             None,
@@ -3106,6 +3152,7 @@ mod tests {
                 mutation_revision: 4,
                 cursor_event_hash: None,
                 projection_revision: None,
+                projection_window: None,
             },
             SyncAgentCursor {
                 id: "main".into(),
@@ -3113,6 +3160,7 @@ mod tests {
                 mutation_revision: 5,
                 cursor_event_hash: None,
                 projection_revision: None,
+                projection_window: None,
             },
         ] {
             let payload = sync_state_payload(
@@ -3139,6 +3187,7 @@ mod tests {
                 mutation_revision: 9,
                 cursor_event_hash: Some("stale".into()),
                 projection_revision: None,
+                projection_window: None,
             }],
             Some("main".into()),
             None,
@@ -3743,13 +3792,11 @@ mod tests {
 
     #[test]
     fn embedded_webui_uses_recoverable_incremental_http_polling() {
-        assert!(INDEX_HTML.contains("id=\"connection-overlay\""));
-        assert!(INDEX_HTML.contains("id=\"connection-retry\""));
+        assert!(!INDEX_HTML.contains("id=\"connection-overlay\""));
+        assert!(!INDEX_HTML.contains("id=\"session-sync-overlay\""));
         assert!(!INDEX_HTML.contains("id=\"event-recovery-progress\""));
         assert!(!INDEX_HTML.contains("role=\"progressbar\""));
-        assert!(
-            STYLE_CSS.contains(".connection-overlay { position: fixed; inset: 0; z-index: 120;")
-        );
+        assert!(!STYLE_CSS.contains(".connection-overlay"));
         assert!(!STYLE_CSS.contains(".event-recovery-progress-fill"));
         assert!(STYLE_CSS.contains(".agent-load-progress"));
         assert!(APP_JS.contains("function eventRecoveryProgress(recovery, localEventCount)"));
@@ -3763,15 +3810,12 @@ mod tests {
         assert!(
             APP_JS.contains("const madeProgress = progressBefore !== httpSyncProgressSignature()")
         );
-        assert!(
-            APP_JS.contains("scheduleHttpSync(message.more_events && madeProgress ? 0 : delay)")
-        );
+        assert!(APP_JS.contains("scheduleHttpSync((message.more_events && madeProgress)"));
         assert!(APP_JS.contains("HTTP_SYNC_ACTIVE_MS = 250"));
         assert!(APP_JS.contains("HTTP_SYNC_IDLE_MS = 1000"));
         assert!(APP_JS.contains("typeof PORTRAIT_LAYOUT.addListener === \"function\""));
         assert!(!APP_JS.contains(".at(-1)"));
-        assert!(APP_JS.contains("elements.app.inert = true"));
-        assert!(APP_JS.contains("elements.app.inert = false"));
+        assert!(!APP_JS.contains(".inert ="));
         assert!(APP_JS.contains("snapshot_revision:"));
         assert!(APP_JS.contains("mutation_revision: store.mutationRevision"));
         assert!(APP_JS.contains("Math.min(RECONNECT_MAX_MS"));
@@ -3799,7 +3843,7 @@ mod tests {
         assert!(APP_JS.contains("const CONNECTION_STABILIZE_MS = 1000;"));
         assert!(APP_JS.contains("const CONNECTION_STABILIZE_SUCCESSES = 2;"));
         assert!(APP_JS.contains("connectionPhase: \"initial\""));
-        assert!(APP_JS.contains("connectionOverlayMode: null"));
+        assert!(!APP_JS.contains("connectionOverlayMode"));
         assert!(
             STYLE_CSS
                 .contains(".transcript-window > .message-block, .transcript-window > .tool-card")

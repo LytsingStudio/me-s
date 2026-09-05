@@ -58,6 +58,58 @@ pub struct UiProjectionCursor {
     pub agent_id: String,
     #[serde(default)]
     pub revision: Option<String>,
+    #[serde(default)]
+    pub window: Option<UiProjectionWindow>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct UiProjectionWindow {
+    pub start: usize,
+    pub end: usize,
+    pub count: usize,
+    pub follow_tail: bool,
+}
+
+impl UiProjectionWindow {
+    fn range(&self, state: &UiProjectionState, known: Option<&str>) -> Option<(usize, usize)> {
+        let count = state.count;
+        let tail = || Some((count.saturating_sub(64), count));
+        if self.start > self.end || self.end > self.count || self.end - self.start > 192 {
+            return tail();
+        }
+        if count == 0 {
+            return None;
+        }
+        if known.is_none()
+            || self.start == self.end
+            || self.start >= count
+            || (self.follow_tail && self.end < count)
+        {
+            return tail();
+        }
+        if known == Some(state.revision.as_str()) {
+            return None;
+        }
+        let Some(changed) = state.changed_from else {
+            return if self.end > count { tail() } else { None };
+        };
+        if self.end == self.count {
+            let start = changed.min(count);
+            return if start >= self.start && count - start <= 192 {
+                Some((start, count))
+            } else {
+                tail()
+            };
+        }
+        if changed >= self.end && self.end <= count {
+            return None;
+        }
+        let start = self.start.min(count);
+        let end = start
+            .saturating_add((self.end - self.start).clamp(64, 192))
+            .min(count);
+        Some((changed.clamp(start, end), end))
+    }
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -80,6 +132,8 @@ pub struct UiProjectionState {
     pub context: UiContextProjection,
     pub system_prompt: UiSystemPromptProjection,
     pub compact_activity: Option<UiCompactActivityProjection>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub range: Option<UiProjectionRange>,
 }
 
 #[derive(Clone, Debug, Serialize, PartialEq)]
@@ -309,13 +363,20 @@ impl UiProjectionCache {
         self.stores.retain(|id, _| visible.contains(id));
         let cursors = cursors
             .iter()
-            .map(|cursor| (cursor.agent_id.as_str(), cursor.revision.as_deref()))
+            .map(|cursor| (cursor.agent_id.as_str(), cursor))
             .collect::<HashMap<_, _>>();
         let mut states = Vec::with_capacity(snapshot.agents.len());
         for agent in &snapshot.agents {
-            let known = cursors.get(agent.id.as_str()).copied().flatten();
+            let cursor = cursors.get(agent.id.as_str());
+            let known = cursor.and_then(|cursor| cursor.revision.as_deref());
             let store = self.synchronize(snapshot, &agent.id)?;
-            states.push(store.state(agent, known));
+            let mut state = store.state(agent, known);
+            if let Some(window) = cursor.and_then(|cursor| cursor.window.as_ref()) {
+                if let Some((start, end)) = window.range(&state, known) {
+                    state.range = Some(store.range(agent, start, end)?);
+                }
+            }
+            states.push(state);
         }
         Ok(states)
     }
@@ -475,6 +536,7 @@ impl UiProjectionStore {
 
     fn state(&self, agent: &UiAgentSnapshot, known: Option<&str>) -> UiProjectionState {
         UiProjectionState {
+            range: None,
             agent_id: agent.id.to_string(),
             edb_id: agent.edb_id.clone(),
             revision: self.revision.clone(),
@@ -1848,6 +1910,94 @@ mod tests {
     }
 
     #[test]
+    fn sync_window_keeps_streaming_state_and_body_on_one_revision() {
+        let mut edb = EventDataBase::new();
+        edb.append_agent_kind_def(crate::event::AgentKind::Primary, "main-agent", None, None)
+            .unwrap();
+        let prompt = edb.append_user_prompt("hello").unwrap();
+        edb.append_api_requesting(prompt).unwrap();
+        let mut cache = UiProjectionCache::default();
+        let mut cursor = UiProjectionCursor {
+            agent_id: "main".into(),
+            revision: None,
+            window: Some(UiProjectionWindow {
+                start: 0,
+                end: 0,
+                count: 0,
+                follow_tail: true,
+            }),
+        };
+        for index in 1..=40 {
+            edb.append_assist_response(prompt, "line\n", false).unwrap();
+            let snapshot = snapshot(vec![agent(edb.events().to_vec(), 0)]);
+            let state = cache
+                .states(&snapshot, &[cursor.clone()])
+                .unwrap()
+                .remove(0);
+            let range = state.range.as_ref().unwrap();
+            assert_eq!(range.revision, state.revision);
+            assert_eq!(range.count, state.count);
+            assert_eq!(range.end, state.count);
+            assert_eq!(range.start, if index == 1 { 0 } else { 1 });
+            assert!(matches!(range.projections.last().unwrap(),
+                UiPartProjection::Assistant { content, .. } if *content == "line\n".repeat(index)));
+            cursor.revision = Some(state.revision.clone());
+            cursor.window = Some(UiProjectionWindow {
+                start: 0,
+                end: state.count,
+                count: state.count,
+                follow_tail: true,
+            });
+            assert!(
+                cache.states(&snapshot, &[cursor.clone()]).unwrap()[0]
+                    .range
+                    .is_none()
+            );
+            // Metadata-only consumers never acquire message bodies.
+            assert!(cache.states(&snapshot, &[]).unwrap()[0].range.is_none());
+        }
+    }
+
+    #[test]
+    fn sync_window_is_bounded_and_handles_history_shrink_and_changed_prefix() {
+        let mut edb = EventDataBase::new();
+        edb.append_agent_kind_def(crate::event::AgentKind::Primary, "main-agent", None, None)
+            .unwrap();
+        for _ in 0..300 {
+            edb.append_user_prompt("history").unwrap();
+        }
+        let agent = agent(edb.events().to_vec(), 0);
+        let store = UiProjectionStore::new(&agent, None).unwrap();
+        let mut state = store.state(&agent, None);
+        let mut window = UiProjectionWindow {
+            start: 0,
+            end: 0,
+            count: 0,
+            follow_tail: true,
+        };
+        assert_eq!(window.range(&state, None), Some((236, 300)));
+        window = UiProjectionWindow {
+            start: 40,
+            end: 104,
+            count: 300,
+            follow_tail: false,
+        };
+        state.changed_from = Some(299);
+        assert_eq!(window.range(&state, Some("old")), None);
+        state.changed_from = Some(70);
+        assert_eq!(window.range(&state, Some("old")), Some((70, 104)));
+        state.changed_from = Some(0);
+        assert_eq!(window.range(&state, Some("old")), Some((40, 104)));
+        state.count = 20;
+        assert_eq!(window.range(&state, Some("old")), Some((0, 20)));
+        state.count = 0;
+        assert_eq!(window.range(&state, Some("old")), None);
+        state.count = 300;
+        window.end = usize::MAX;
+        assert_eq!(window.range(&state, Some("old")), Some((236, 300)));
+    }
+
+    #[test]
     fn public_projection_matches_shared_webui_message_shape() {
         let mut edb = EventDataBase::new();
         edb.append_agent_kind_def(crate::event::AgentKind::Primary, "main-agent", None, None)
@@ -2115,6 +2265,7 @@ mod tests {
                 &[UiProjectionCursor {
                     agent_id: "main".into(),
                     revision: Some(first_revision.clone()),
+                    window: None,
                 }],
             )
             .unwrap();

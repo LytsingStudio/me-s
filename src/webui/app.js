@@ -155,7 +155,6 @@ const state = {
   degradedTimer: null,
   stabilizingSince: null,
   stabilizingSuccesses: 0,
-  connectionOverlayMode: null,
   terminalFrames: new Map(),
   terminalFramesUnavailable: new Set(),
   pageClosing: false,
@@ -171,8 +170,6 @@ const $ = (selector) => document.querySelector(selector);
 const elements = {
   app: $("#app"),
   workspace: $(".workspace"),
-  sessionSyncOverlay: $("#session-sync-overlay"),
-  sessionSyncProgress: $("#session-sync-progress"),
   loginScreen: $("#login-screen"),
   loginSettings: $("#login-settings"),
   loginForm: $("#login-form"),
@@ -192,10 +189,6 @@ const elements = {
   loginLocalStatus: $("#login-local-status"),
   loginRememberedList: $("#login-remembered-list"),
   loginRemoteDevice: $("#login-remote-device"),
-  connectionOverlay: $("#connection-overlay"),
-  connectionOverlayTitle: $("#connection-overlay-title"),
-  connectionOverlayMessage: $("#connection-overlay-message"),
-  connectionRetry: $("#connection-retry"),
   themeCycle: $("#theme-cycle"),
   themeMode: $("#theme-mode"),
   sidebarScroll: $(".sidebar-scroll"),
@@ -535,7 +528,6 @@ function setRawEdbDecoding(enabled) {
   state.pendingRender = emptyRenderRequest();
   renderAll();
   resetConnectionForInitialSync();
-  renderSessionSyncOverlay();
   if (state.workspaceId && (!state.authRequired || state.authenticated)) startHttpPolling();
 }
 
@@ -757,11 +749,13 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
 
 async function hydrateEdbCache(snapshot) {
   if (!snapshot) throw new Error("同步响应未提供缓存元数据");
+  const generation = state.syncGeneration;
   state.snapshot = snapshot;
   state.snapshotInitialized = true;
   reconcileAgents();
   renderAgents();
   const entries = await loadEdbCacheEntries(snapshot);
+  if (generation !== state.syncGeneration || state.pageClosing || usesUiProjection()) return;
   const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
   for (const entry of entries) {
     if (entry.agentId && !agentIds.has(entry.agentId) && entry.key) void edbCache.discardSession(entry.key);
@@ -772,17 +766,23 @@ async function hydrateEdbCache(snapshot) {
     if (!cached || cacheEntryValid(cached, meta)) continue;
     cachedByAgent.delete(meta.id);
     if (cached.key) await edbCache.discardSession(cached.key);
+    if (generation !== state.syncGeneration || state.pageClosing || usesUiProjection()) return;
   }
-  state.stores.clear();
   for (const meta of snapshot.agents || []) {
     const cached = cachedByAgent.get(meta.id);
-    state.stores.set(meta.id, createAgentStore(meta, cached || null, snapshot));
-    state.drafts.set(meta.id, String(meta.input_draft || ""));
+    const previous = state.stores.get(meta.id);
+    const store = createAgentStore(meta, cached || null, snapshot);
+    if (previous) {
+      store.pendingPromptSubmission = previous.pendingPromptSubmission;
+      store.inputDraftRevision = previous.inputDraftRevision;
+      store.promptSubmissionRevision = previous.promptSubmissionRevision;
+    }
+    state.stores.set(meta.id, store);
+    if (!state.drafts.has(meta.id)) state.drafts.set(meta.id, String(meta.input_draft || ""));
   }
   state.edbCacheInitialized = true;
   restoreDraft();
   renderAll();
-  renderConnectionOverlayForPhase();
 }
 
 function persistWorkspaceAgentEdb(snapshot, meta, store, replace = false, batch = null) {
@@ -971,6 +971,7 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   transcriptVirtualizer?.prepareScroll(workspace.scrollTop, workspace.followBottom);
   renderAll();
   requestAnimationFrame(() => {
+    if (state.workspaceId !== workspaceId) return;
     elements.transcript.scrollTop = workspace.followBottom ? elements.transcript.scrollHeight : workspace.scrollTop;
     transcriptVirtualizer?.noteScroll();
     transcriptBottomFollower.restore(workspace.followBottom);
@@ -1386,6 +1387,9 @@ function installProjectionState(store, projectionState, range = null, retain = "
   const count = projectionCountForState(projectionState);
   const changedFrom = projectionChangedFrom(projectionState, count);
   const revisionChanged = previousRevision !== projectionState.revision;
+  // Never advance the displayed revision before its replacement messages are ready.
+  if (!range && previousMessages.length && count > 0
+      && projectionStateRangeRequest(store, projectionState, true)) return false;
   let messages = previousMessages;
   let start = previous.start;
   let end = previous.end;
@@ -1482,7 +1486,8 @@ function installProjectionState(store, projectionState, range = null, retain = "
   store.projectionCount = count;
   store.projectionStart = start;
   store.projectionEnd = end;
-  store.projectionState = projectionState;
+  const { range: _range, ...committedState } = projectionState;
+  store.projectionState = committedState;
   if (count === 0) store.projectionLoading = false;
   store.summary = projectionSummary(projectionState.summary);
   store.workmap = projectionState.workmap || emptyWorkMap();
@@ -1500,7 +1505,7 @@ function projectionRangePath(agentId, request, revision) {
 }
 
 function fetchProjectionRange(store, agentId, projectionState, request, workspaceId, signal = null) {
-  const key = `${workspaceId || ""}:${projectionState.revision}:${request.start}:${request.end}`;
+  const key = `${state.syncGeneration}:${workspaceId || ""}:${projectionState.revision}:${request.start}:${request.end}`;
   const existing = store.projectionRangeLoading;
   if (existing?.key === key) return existing.promise;
   const token = { key, promise: null };
@@ -1509,7 +1514,9 @@ function fetchProjectionRange(store, agentId, projectionState, request, workspac
     signal ? { signal } : {},
     workspaceId,
   ).then((payload) => {
-    if (!payload.range) throw new Error("会话内容响应不完整");
+    if (!payload.range || payload.range.start !== request.start || payload.range.end !== request.end) {
+      throw new Error("会话内容响应不完整");
+    }
     return payload.range;
   }).finally(() => {
     if (store.projectionRangeLoading === token) store.projectionRangeLoading = null;
@@ -1522,10 +1529,10 @@ function projectionFollowing() {
   try { return Boolean(transcriptBottomFollower.isFollowing()); } catch (_) { return true; }
 }
 
-async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft, signal = null) {
+async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft) {
   if (!payload.ui_projection) throw new Error("同步响应未提供会话内容");
   const states = new Map((payload.projection_states || []).map((entry) => [entry.agent_id, entry]));
-  const prepared = [];
+  const changes = [];
   for (const meta of bucket.snapshot.agents || []) {
     let store = bucket.stores.get(meta.id);
     if (!store) {
@@ -1540,44 +1547,23 @@ async function synchronizeProjectionBucket(bucket, payload, workspaceId, observe
     const loadingBefore = Boolean(store.projectionLoading);
     const summaryBefore = JSON.stringify(store.summary);
     const selected = bucket === state && meta.id === state.selectedAgent;
-    const request = projectionStateRangeRequest(
-      store, projectionState, selected, selected && projectionFollowing(),
-    );
-    const changed = installProjectionState(store, projectionState);
-    if (!selected || !request) {
-      store.projectionLoading = false;
-    } else if (store.projection.messages.length === 0 || store.projectionLoading) {
-      store.projectionLoading = projectionCountForState(projectionState) > 0;
+    const request = projectionStateRangeRequest(store, projectionState, selected, selected && projectionFollowing());
+    const range = selected ? projectionState.range : null;
+    if (range && request && (range.start > request.start || range.end < request.end)) {
+      throw new Error("会话内容响应不完整");
     }
-    prepared.push({
-      meta, store, projectionState, request, changed, loadingBefore, summaryBefore,
+    const changed = request && !range ? false : installProjectionState(
+      store, projectionState, range, request?.retain || "end",
+    );
+    store.summary = projectionSummary(projectionState.summary);
+    store.projectionLoading = Boolean(selected && request && !range);
+    changes.push({
+      agentId: meta.id, changed,
+      summaryChanged: summaryBefore !== JSON.stringify(store.summary),
+      loadChanged: loadingBefore !== Boolean(store.projectionLoading),
     });
   }
-  if (bucket === state && prepared.some((entry) => entry.store.projectionLoading)) {
-    renderAgents();
-    renderSessionSyncOverlay();
-  }
-  for (const entry of prepared) {
-    if (!entry.request) continue;
-    try {
-      const range = await fetchProjectionRange(
-        entry.store, entry.meta.id, entry.projectionState, entry.request, workspaceId, signal,
-      );
-      if (entry.store.projectionRevision === entry.projectionState.revision) {
-        entry.changed = installProjectionState(
-          entry.store, entry.projectionState, range, entry.request.retain,
-        ) || entry.changed;
-      }
-    } finally {
-      entry.store.projectionLoading = false;
-    }
-  }
-  return prepared.map((entry) => ({
-    agentId: entry.meta.id,
-    changed: entry.changed,
-    summaryChanged: entry.summaryBefore !== JSON.stringify(entry.store.summary),
-    loadChanged: entry.loadingBefore !== Boolean(entry.store.projectionLoading),
-  }));
+  return changes;
 }
 
 function projectionAdjacentRange(store, direction, retain = null) {
@@ -1627,6 +1613,7 @@ function projectionRangeDirectionForViewport(store, viewportState, following) {
 
 async function requestSelectedProjectionRange(direction, retain = null) {
   if (!usesUiProjection() || !state.workspaceId || !state.selectedAgent) return false;
+  const generation = state.syncGeneration;
   const workspaceId = state.workspaceId;
   const agentId = state.selectedAgent;
   const store = currentStore();
@@ -1639,13 +1626,13 @@ async function requestSelectedProjectionRange(direction, retain = null) {
   if (blocking) {
     store.projectionLoading = true;
     renderAgents();
-    renderSessionSyncOverlay();
   }
   try {
     const range = await fetchProjectionRange(
       store, agentId, projectionState, request, workspaceId,
     );
-    if (state.workspaceId !== workspaceId || state.selectedAgent !== agentId
+    if (generation !== state.syncGeneration || !usesUiProjection()
+        || state.workspaceId !== workspaceId || state.selectedAgent !== agentId
         || currentStore() !== store || store.projectionRevision !== projectionState.revision) {
       return false;
     }
@@ -1657,16 +1644,16 @@ async function requestSelectedProjectionRange(direction, retain = null) {
     }
     if (blocking) {
       renderAgents();
-      renderSessionSyncOverlay();
     }
     scheduleSelectedProjectionRangeCheck();
     return changed;
   } catch (error) {
-    store.projectionLoading = false;
-    if (state.workspaceId === workspaceId && state.selectedAgent === agentId) {
+    if (generation === state.syncGeneration && usesUiProjection()
+        && state.workspaceId === workspaceId && state.selectedAgent === agentId) {
+      store.projectionLoading = false;
+      if (error.status === 401) { showLogin("登录已失效，请重新登录"); return false; }
       if (blocking) {
         renderAgents();
-        renderSessionSyncOverlay();
       }
       if (error.status === 409 && error.code === "stale_revision") requestHttpSyncNow();
       else scheduleHttpSync(HTTP_SYNC_IDLE_MS);
@@ -2001,7 +1988,6 @@ function showLogin(message = "") {
   state.connectionHadSuccess = false;
   state.reconnectAttempt = 0;
   setConnectionPhase("failed");
-  hideConnectionOverlay();
   elements.app.classList.add("hidden");
   elements.loginScreen.classList.remove("hidden");
   const target = state.loginView === "devices"
@@ -2156,6 +2142,7 @@ function setConnectionPhase(phase) {
   state.connectionPhase = phase;
   state.connected = phase === "connected" || phase === "degraded";
   state.connecting = ["initial", "degraded", "reconnecting", "stabilizing"].includes(phase);
+  if (changed) renderAgents();
   return changed;
 }
 
@@ -2194,17 +2181,6 @@ function resetConnectionForInitialSync() {
   setConnectionPhase("initial");
 }
 
-function retryConnectionNow() {
-  cancelActiveHttpSync();
-  clearDegradedTimer();
-  state.reconnectAttempt = 0;
-  state.connectionFailureDetail = "";
-  state.stabilizingSince = null;
-  state.stabilizingSuccesses = 0;
-  setConnectionPhase(state.connectionHadSuccess ? "reconnecting" : "initial");
-  renderConnectionOverlayForPhase();
-  startHttpPolling();
-}
 
 function startHttpPolling() {
   if (state.pageClosing || (state.authRequired && !state.authenticated)) return;
@@ -2216,7 +2192,6 @@ function startHttpPolling() {
   } else {
     setConnectionPhase(state.connectionPhase);
   }
-  renderConnectionOverlayForPhase();
   state.syncGeneration += 1;
   void requestHttpSync();
 }
@@ -2257,10 +2232,6 @@ function enterReconnecting(error) {
   setConnectionPhase("reconnecting");
   state.reconnectAttempt += 1;
   const delay = Math.min(RECONNECT_MAX_MS, 250 * (2 ** Math.min(state.reconnectAttempt - 1, 5)));
-  showConnectionOverlay(
-    "正在重新连接",
-    `${state.connectionFailureDetail}，将在 ${Math.max(1, Math.ceil(delay / 1000))} 秒内重试。`,
-  );
   schedulePollingRetry(delay);
 }
 
@@ -2310,48 +2281,16 @@ function handlePollingFailure(error, { timedOut = false } = {}) {
 
 function failHttpSync(title, error) {
   const detail = error instanceof Error ? error.message : String(error || "未知错误");
+  if (state.connectionFailureDetail !== detail) toast(`${title}，将自动重试。`, true);
   console.error(title, error);
   cancelActiveHttpSync();
-  if (typeof cancelBackgroundWorkspaceSync === "function") {
-    cancelBackgroundWorkspaceSync();
-  }
+  cancelBackgroundWorkspaceSync();
   clearDegradedTimer();
   state.connectionFailureDetail = detail;
   state.stabilizingSince = null;
   state.stabilizingSuccesses = 0;
-  setConnectionPhase("failed");
-  showConnectionOverlay(title, `${detail}。请点击“立即重试”。`);
-}
-
-function showConnectionOverlay(title, message) {
-  if (elements.connectionOverlayTitle.textContent !== title) elements.connectionOverlayTitle.textContent = title;
-  if (elements.connectionOverlayMessage.textContent !== message) elements.connectionOverlayMessage.textContent = message;
-  if (state.connectionOverlayMode === "connection") return;
-  elements.connectionRetry.classList.remove("hidden");
-  elements.connectionOverlay.classList.remove("hidden");
-  elements.app.inert = true;
-  state.connectionOverlayMode = "connection";
-  if (elements.app.contains(document.activeElement)) document.activeElement.blur();
-}
-
-function hideConnectionOverlay() {
-  if (state.connectionOverlayMode === "hidden") return;
-  elements.connectionOverlay.classList.add("hidden");
-  elements.connectionRetry.classList.remove("hidden");
-  elements.app.inert = false;
-  state.connectionOverlayMode = "hidden";
-}
-
-function renderConnectionOverlayForPhase() {
-  if (state.connectionPhase === "connected" || state.connectionPhase === "degraded") {
-    hideConnectionOverlay();
-  } else if (state.connectionPhase === "initial") {
-    showConnectionOverlay("正在连接", "正在同步当前界面，请稍候。");
-  } else if (state.connectionPhase === "reconnecting") {
-    showConnectionOverlay("正在重新连接", state.connectionFailureDetail || "正在恢复与服务的连接。");
-  } else if (state.connectionPhase === "stabilizing") {
-    showConnectionOverlay("连接正在恢复", "正在确认连接已稳定，请稍候。");
-  }
+  setConnectionPhase("reconnecting");
+  schedulePollingRetry(RECONNECT_MAX_MS);
 }
 
 function markConnectionStable() {
@@ -2441,7 +2380,13 @@ async function requestHttpSync() {
         snapshot_revision: state.snapshotInitialized ? state.snapshot.revision : null,
         ui_projection: usesUiProjection(),
         agents: [...state.stores].map(([id, store]) => usesUiProjection()
-          ? { id, projection_revision: store.projectionRevision }
+          ? {
+            id, projection_revision: store.projectionRevision,
+            ...(id === state.selectedAgent ? { projection_window: {
+              start: store.projectionStart, end: store.projectionEnd, count: store.projectionCount,
+              follow_tail: projectionFollowing() || Boolean(store.pendingPromptSubmission),
+            } } : {}),
+          }
           : {
             id,
             event_count: store.eventCount ?? store.events.length,
@@ -2460,23 +2405,18 @@ async function requestHttpSync() {
     if (!usesUiProjection() && message.cache_metadata_only) {
       await hydrateEdbCache(message.snapshot);
       if (generation !== state.syncGeneration || state.pageClosing) return;
-      state.syncInFlight = false;
-      state.syncController = null;
       captureActiveWorkspace();
       scheduleHttpSync(0);
       return;
     }
-    state.syncInFlight = false;
-    state.syncController = null;
     try {
       await applySyncState(message, controller?.signal);
     } catch (error) {
-      if (error.status === 409 && error.code === "stale_revision") {
-        scheduleHttpSync(0);
-        return;
-      }
+      if (generation !== state.syncGeneration || state.pageClosing) return;
+      if (error.status === 401 || error.name === "AbortError") throw error;
       return failHttpSync("无法更新界面", error);
     }
+    if (generation !== state.syncGeneration || state.pageClosing) return;
     state.activeCatchUpPending = Boolean(message.more_events)
       || (message.selected_agent ?? null) !== state.selectedAgent;
     if (!state.activeCatchUpPending) scheduleBackgroundWorkspaceSync(0);
@@ -2484,12 +2424,10 @@ async function requestHttpSync() {
     const delay = state.connectionPhase === "stabilizing"
       || message.more_events || state.apiActivity.active || state.view.kind === "terminal"
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
-    scheduleHttpSync(message.more_events && madeProgress ? 0 : delay);
+    scheduleHttpSync((message.more_events && madeProgress) || (message.selected_agent ?? null) !== state.selectedAgent ? 0 : delay);
   } catch (error) {
     state.activeCatchUpPending = true;
     if (generation !== state.syncGeneration || state.pageClosing) return;
-    state.syncInFlight = false;
-    state.syncController = null;
     if (error.status === 401) return showLogin("登录已失效，请重新登录");
     if (error.status === 409 && error.code === "stale_revision") {
       scheduleHttpSync(0);
@@ -2503,6 +2441,10 @@ async function requestHttpSync() {
     handlePollingFailure(failure, { timedOut });
   } finally {
     clearTimeout(timeout);
+    if (generation === state.syncGeneration) {
+      state.syncInFlight = false;
+      state.syncController = null;
+    }
   }
 }
 
@@ -2515,7 +2457,7 @@ function requestHttpSyncNow() {
 async function applySyncState(payload, signal = null) {
   if (!usesUiProjection()) return applyRawSyncState(payload);
   const phaseBefore = state.connectionPhase;
-  const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";
+  const generation = state.syncGeneration;
   const previousSnapshot = state.snapshot;
   if (payload.snapshot) {
     state.snapshot = payload.snapshot;
@@ -2528,6 +2470,7 @@ async function applySyncState(payload, signal = null) {
   const changes = await synchronizeProjectionBucket(
     state, payload, state.workspaceId, observeInputDraft, signal,
   );
+  if (generation !== state.syncGeneration || signal?.aborted || !usesUiProjection()) return;
   state.edbCacheInitialized = true;
   state.eventRecovery = null;
   const selectedChanged = changes.some((change) =>
@@ -2545,7 +2488,7 @@ async function applySyncState(payload, signal = null) {
   notePollingSuccess(responseMatchesSelection, responseMatchesSelection);
   const connectionChanged = phaseBefore !== state.connectionPhase;
   requestRender({
-    full: startingRecoveryCycle || selectionChanged,
+    full: selectionChanged,
     connection: connectionChanged,
     agents: presentationChanged || agentSummaryChanged || agentLoadChanged,
     tabs: presentationChanged || terminalChanged,
@@ -2555,8 +2498,6 @@ async function applySyncState(payload, signal = null) {
   });
   if (!inputHasPriority()) flushPendingRender();
   else if (state.view.kind === "terminal") renderTerminal();
-  renderSessionSyncOverlay();
-  renderConnectionOverlayForPhase();
   for (const [agentId, sync] of state.draftSync) {
     if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
   }
@@ -2634,7 +2575,6 @@ function applyRawSyncState(payload) {
   if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();
   else if (!inputHasPriority()) flushPendingRender();
   else if (state.view.kind === "terminal") renderTerminal();
-  renderConnectionOverlayForPhase();
   for (const [agentId, sync] of state.draftSync) {
     if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
   }
@@ -3812,46 +3752,19 @@ function agentLoadingState(workspaceId, agentId) {
   const meta = bucket.snapshot?.agents?.find((agent) => agent.id === agentId);
   if (!meta) return { loading: false, percent: null };
   const store = bucket.stores.get(agentId);
+  const selected = workspaceId === state.workspaceId && agentId === state.selectedAgent;
+  const connecting = selected && state.connecting;
   if (usesUiProjection()) {
-    const selected = workspaceId === state.workspaceId && agentId === state.selectedAgent;
-    return { loading: selected && Boolean(store?.projectionLoading), percent: null };
+    return { loading: selected && Boolean(connecting || store?.projectionLoading || !store?.projectionState), percent: null };
   }
   if (!bucket.edbCacheInitialized || !store) return { loading: true, percent: null };
-  if (!store.loadProgress) return { loading: false, percent: null };
+  if (!store.loadProgress) return { loading: connecting, percent: null };
   return {
     loading: true,
     percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100),
   };
 }
 
-function sessionSelectionAllowed(workspaceId, agentId) {
-  return !agentLoadingState(workspaceId, agentId).loading;
-}
-
-function selectedAgentLoadingState() {
-  if (!state.workspaceId || !state.selectedAgent) return { loading: false, percent: null };
-  return agentLoadingState(state.workspaceId, state.selectedAgent);
-}
-
-function renderSessionSyncOverlay() {
-  const loadingState = selectedAgentLoadingState();
-  const loading = loadingState.loading;
-  const wasVisible = !elements.sessionSyncOverlay.classList.contains("hidden");
-  elements.sessionSyncOverlay.classList.toggle("hidden", !loading);
-  elements.sessionSyncOverlay.setAttribute("aria-hidden", String(!loading));
-  elements.sessionSyncProgress.textContent = loadingState.percent == null
-    ? "正在准备会话，请稍候。" : `已完成 ${loadingState.percent}%`;
-  elements.workspace.querySelectorAll(":scope > .view, :scope > .statusbar").forEach((node) => {
-    node.inert = loading;
-  });
-  if (loading && elements.workspace.contains(document.activeElement)
-      && document.activeElement !== elements.mobileSidebarToggle) {
-    elements.sessionSyncOverlay.focus({ preventScroll: true });
-  } else if (!loading && wasVisible && document.activeElement === elements.sessionSyncOverlay
-      && state.view.kind === "chat") {
-    elements.input.focus({ preventScroll: true });
-  }
-}
 
 function renderAgents() {
   const workspaces = state.gateway.workspaces || [];
@@ -3888,7 +3801,6 @@ function renderAgents() {
       trigger.setAttribute("aria-expanded", "true");
     } else closeWorkspaceMenu();
   }
-  renderSessionSyncOverlay();
 }
 
 function createWorkspaceGroup(workspace) {
@@ -3985,7 +3897,6 @@ function updateAgentRow(row, agent, workspaceId, bucket) {
   row.setAttribute("aria-busy", String(loadingState.loading));
   const item = row.querySelector(".agent-item");
   item.title = loadingState.loading ? loadingLabel : "";
-  item.disabled = loadingState.loading;
   const dot = row.querySelector(".agent-dot");
   dot.classList.toggle("loading", loadingState.loading);
   dot.classList.toggle("active", active);
@@ -3998,7 +3909,6 @@ function updateAgentRow(row, agent, workspaceId, bucket) {
   const deleteButton = row.querySelector(".agent-delete");
   deleteButton.setAttribute("aria-label", `删除 ${label}`);
   deleteButton.title = `删除 ${label}`;
-  deleteButton.disabled = loadingState.loading;
 }
 
 function createAgentRow(agent, workspaceId = state.workspaceId) {
@@ -4024,13 +3934,13 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
 }
 
 function selectWorkspaceAgent(workspaceId, agentId) {
-  if (!sessionSelectionAllowed(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
 }
 
 function finishAgentSelection(id) {
+  cancelActiveHttpSync();
   closeContextDrawer();
   closeMobileSidebar();
   closeUserMessageMenu();
@@ -4063,7 +3973,6 @@ function finishAgentSelection(id) {
 }
 
 function selectAgent(id) {
-  if (!sessionSelectionAllowed(state.workspaceId, id)) return;
   finishAgentSelection(id);
 }
 
@@ -6221,11 +6130,6 @@ async function confirmModal() {
 }
 
 async function sendCommand(payload, workspaceId = state.workspaceId, { refresh = true } = {}) {
-  if (workspaceId === state.workspaceId && !state.connected) {
-    const error = new Error("连接尚未恢复，请稍候");
-    error.commandResultKnown = true;
-    throw error;
-  }
   try {
     const response = await api("/api/command", {
       method: "POST",
@@ -6485,7 +6389,7 @@ async function runDraftSync(agentId, sync) {
   const workspaceId = sync.workspaceId || state.workspaceId;
   sync.workspaceId = workspaceId;
   const active = workspaceId === state.workspaceId;
-  if (sync.paused || !active || !state.connected
+  if (sync.paused || !active || (state.authRequired && !state.authenticated)
       || (sync.retryAfter && Date.now() < sync.retryAfter)) return;
   const bucket = gatewayWorkspaceState(workspaceId);
   sync.sending = true;
@@ -6722,7 +6626,6 @@ elements.loginRememberedList?.addEventListener("click", (event) => {
   const connect = event.target.closest("button[data-login-endpoint]");
   if (connect) void loginRememberedDevice(connect.dataset.loginEndpoint);
 });
-elements.connectionRetry.addEventListener("click", retryConnectionNow);
 elements.addAgent.addEventListener("click", () => { if (workspaceMetadataReady("chat")) { closeMobileSidebar(); activateWorkspace("chat"); openAddAgent(); } });
 if (runtimeCapabilities.multipleWorkspaces) {
   elements.createWorkspace.addEventListener("click", () => { closeMobileSidebar(); void openDirectoryBrowser("create"); });

@@ -41,6 +41,12 @@ function loadRuntime(relative) {
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
   const factory = new Function("document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
+      requestSelectedProjectionRange,
+      configureRangeTest(request) {
+        api = request; renderAgents = () => {}; requestRender = () => {};
+        scheduleSelectedProjectionRangeCheck = () => {}; flushPendingRender = () => {};
+        requestHttpSyncNow = () => {}; scheduleHttpSync = () => {};
+      },
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, apiPath: frontendRuntime.apiPath,
       eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
@@ -49,7 +55,6 @@ function loadRuntime(relative) {
       prepareAgentLoadProgress: typeof prepareAgentLoadProgress === "function" ? prepareAgentLoadProgress : null,
       settleAgentLoadProgress: typeof settleAgentLoadProgress === "function" ? settleAgentLoadProgress : null,
       agentLoadingState: typeof agentLoadingState === "function" ? agentLoadingState : null,
-      sessionSelectionAllowed: typeof sessionSelectionAllowed === "function" ? sessionSelectionAllowed : null,
       workspaceMetadataReady: typeof workspaceMetadataReady === "function" ? workspaceMetadataReady : null,
       applyGatewayStartupMetadata: typeof applyGatewayStartupMetadata === "function" ? applyGatewayStartupMetadata : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
@@ -495,7 +500,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain("state.uiAnimationTimer = setTimeout(refreshUiAnimation, UI_ANIMATION_INTERVAL_MS)");
       expect(source).toContain('document.addEventListener("visibilitychange"');
       expect(source).not.toContain("setInterval(refreshRunningToolElapsed");
-      expect(source).toContain("scheduleHttpSync(message.more_events && madeProgress ? 0 : delay)");
+      expect(source).toContain("scheduleHttpSync((message.more_events && madeProgress)");
       const objectiveToggleStart = source.indexOf("function toggleObjectiveDisclosure");
       const objectiveToggleEnd = source.indexOf("\nfunction renderWorkMap", objectiveToggleStart);
       expect(source.slice(objectiveToggleStart, objectiveToggleEnd))
@@ -508,8 +513,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       for (const phase of ["degraded", "reconnecting", "stabilizing"]) {
         expect(source).toContain(`"${phase}"`);
       }
-      expect(source).toContain('if (state.connectionOverlayMode === "connection") return;');
-      expect(source).toContain('if (state.connectionOverlayMode === "hidden") return;');
+      expect(source).not.toContain("connectionOverlayMode");
     }
 
     for (const relative of ["../src/webui/style.css"]) {
@@ -565,13 +569,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(source).toContain("const madeProgress = progressBefore !== httpSyncProgressSignature()");
       expect(source).toContain("|| message.more_events || state.apiActivity.active");
-      expect(source).toContain("scheduleHttpSync(message.more_events && madeProgress ? 0 : delay)");
+      expect(source).toContain("scheduleHttpSync((message.more_events && madeProgress)");
     }
   });
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
-  if (!sessionSelectionAllowed(workspaceId, agentId)) return;
   closeMobileSidebar();
   if (state.workspaceId !== workspaceId) activateWorkspace(workspaceId, agentId);
   else selectAgent(agentId);
@@ -799,13 +802,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     gateway.state.stores.set("pending", pending);
     expect(gateway.agentLoadingState("chat", "ready")).toEqual({ loading: false, percent: null });
     expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 0 });
-    expect(gateway.sessionSelectionAllowed("chat", "ready")).toBe(true);
-    expect(gateway.sessionSelectionAllowed("chat", "pending")).toBe(false);
     pending.eventCount = 4;
     expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 50 });
     pending.eventCount = 6;
     gateway.settleAgentLoadProgress(pending);
-    expect(gateway.sessionSelectionAllowed("chat", "pending")).toBe(true);
+    expect(gateway.agentLoadingState("chat", "pending").loading).toBe(false);
     expect(pending.loadProgress).toBeNull();
     gateway.prepareAgentLoadProgress(
       pending, { ...pendingMeta, event_count: 10 }, null, pending.eventCount, pending.mutationRevision,
@@ -813,12 +814,76 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(pending.loadProgress).toEqual({
       mutationRevision: 1, startEventCount: 6, targetEventCount: 10,
     });
-    expect(gateway.sessionSelectionAllowed("chat", "pending")).toBe(false);
+    expect(gateway.agentLoadingState("chat", "pending").loading).toBe(true);
 
     const inactive = gateway.emptyGatewayWorkspaceState();
     inactive.snapshot = { environment: { workspace: "/other" }, agents: [pendingMeta] };
     gateway.state.workspaceStates.set("w-one", inactive);
     expect(gateway.agentLoadingState("w-one", "pending")).toEqual({ loading: true, percent: null });
+  });
+
+  test("commits progressive streaming bodies atomically without clearing prior display", async () => {
+    const r = loadRuntime("../src/webui/app.js");
+    r.state.workspaceId = "chat";
+    r.state.selectedAgent = "main";
+    r.state.snapshot = { agents: [{ id: "main" }] };
+    const store = r.createAgentStore({ id: "main" });
+    r.state.stores.set("main", store);
+    const first = uiProjectionState("main", "r1", 100);
+    r.installProjectionState(store, first, uiProjectionRange("main", "r1", 100, 36, 100));
+    const prefix = store.projection.messages[0];
+    for (let revision = 2; revision <= 40; revision++) {
+      const next = uiProjectionState("main", `r${revision}`, 100, 99);
+      const previous = store.projection;
+      store.projectionChanges = null;
+      await r.synchronizeProjectionBucket(r.state, { ui_projection: true, projection_states: [next] }, "chat", () => {});
+      expect(store.projection).toBe(previous);
+      expect(store.projectionChanges).toBeNull();
+      expect(store.projectionRevision).toBe(`r${revision - 1}`);
+      const range = uiProjectionRange("main", next.revision, 100, 99, 100);
+      range.projections[0] = { kind: "assistant", key: "stream", revision, content: "line\n".repeat(revision) };
+      expect(() => r.installProjectionState(store, next, { ...range, revision: "stale" })).toThrow();
+      expect(store.projection).toBe(previous);
+      const incomplete = { ...range, end: 99, projections: [] };
+      await expect(r.synchronizeProjectionBucket(r.state, {
+        ui_projection: true, projection_states: [{ ...next, range: incomplete }],
+      }, "chat", () => {})).rejects.toThrow("会话内容响应不完整");
+      expect(store.projection).toBe(previous);
+      await r.synchronizeProjectionBucket(r.state, { ui_projection: true, projection_states: [{ ...next, range }] }, "chat", () => {});
+      expect(store.projection.messages.at(-1).content).toBe("line\n".repeat(revision));
+      expect(store.projection.messages[0]).toBe(prefix);
+      expect(store.projection.messages).toHaveLength(64);
+      expect(store.projectionRevision).toBe(next.revision);
+      expect(store.projectionState.range).toBeUndefined();
+      expect(store.projectionLoading).toBe(false);
+      expect(store.projectionChanges.transcriptFrom).toBe(63);
+    }
+  });
+
+  test("pending, failed and late range replies cannot erase or overwrite the visible window", async () => {
+    for (const scenario of ["network", "stale", "workspace", "agent", "source", "generation"]) {
+      const r = loadRuntime("../src/webui/app.js");
+      r.state.workspaceId = "chat"; r.state.selectedAgent = "main";
+      const store = r.createAgentStore({ id: "main" });
+      r.state.stores.set("main", store);
+      const state = uiProjectionState("main", "r1", 200);
+      r.installProjectionState(store, state, uiProjectionRange("main", "r1", 200, 20, 84));
+      const previous = store.projection;
+      let resolve, reject;
+      r.configureRangeTest(() => new Promise((yes, no) => { resolve = yes; reject = no; }));
+      const pending = r.requestSelectedProjectionRange("tail");
+      expect(store.projection).toBe(previous);
+      if (scenario === "workspace") r.state.workspaceId = "other";
+      if (scenario === "agent") r.state.selectedAgent = "other";
+      if (scenario === "source") r.state.rawEdbDecoding = true;
+      if (scenario === "generation") r.state.syncGeneration++;
+      if (scenario === "network") reject(new Error("offline"));
+      else if (scenario === "stale") reject(Object.assign(new Error("stale"), { status: 409, code: "stale_revision" }));
+      else resolve({ range: uiProjectionRange("main", "r1", 200, 136, 200) });
+      expect(await pending).toBe(false);
+      expect(store.projection).toBe(previous);
+      expect([store.projectionStart, store.projectionEnd]).toEqual([20, 84]);
+    }
   });
 
   test("restores complete cached Events into resident Session stores", () => {
@@ -889,10 +954,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     const changedSuffix = runtime.projectionStateRangeRequest(store, secondState, true, true);
     expect(changedSuffix).toEqual({ start: 990, end: 1_002, retain: "end", direction: "sync" });
     runtime.installProjectionState(store, secondState);
-    expect([store.projectionStart, store.projectionEnd]).toEqual([936, 990]);
-    runtime.installProjectionState(
-      store, secondState, uiProjectionRange("main", "revision-two", 1_002, 990, 1_002),
-    );
+    expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_000]);
+    expect(store.projectionRevision).toBe("revision-one");
+    expect(store.projectionChanges).toBeNull();
+    const replacement = uiProjectionRange("main", "revision-two", 1_002, 990, 1_002);
+    replacement.projections.forEach((part) => { part.revision += 2000; });
+    runtime.installProjectionState(store, secondState, replacement);
     expect(store.projection.messages[0]).toBe(retained);
     expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_002]);
     expect(store.projection.messages).toHaveLength(66);
@@ -1310,15 +1377,13 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain("const active = !loadingState.loading && sidebarAgentActive(summary);");
     expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
     expect(source).not.toContain("startupPending: true");
-    expect(index).toContain('id="session-sync-overlay"');
-    expect(index).toContain("<strong>正在同步</strong>");
-    expect(source).toContain("if (!sessionSelectionAllowed(workspaceId, agentId)) return;");
-    expect(source).toContain("node.inert = loading;");
-    expect(source).toContain("renderSessionSyncOverlay();");
+    expect(index).not.toContain('id="session-sync-overlay"');
+    expect(source).not.toContain("sessionSelectionAllowed");
+    expect(source).not.toContain("node.inert = loading;");
     expect(source).toContain('row.classList.toggle("session-loading", loadingState.loading)');
     expect(source).toContain('class="agent-load-progress hidden"');
-    expect(source).toContain("item.disabled = loadingState.loading");
-    expect(source).toContain("deleteButton.disabled = loadingState.loading");
+    expect(source).not.toContain("item.disabled = loadingState.loading");
+    expect(source).not.toContain("deleteButton.disabled = loadingState.loading");
     expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
     expect(styles).toContain(".agent-dot.active + .agent-label { color: transparent; background:");
     expect(styles).not.toContain(".agent-dot.active + .agent-label { color: transparent; font-weight:");
@@ -1332,8 +1397,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain("@keyframes agent-dot-breathe { 0%, 66.667%, 100% { opacity: 1; } 33.333% { opacity: .35; } }");
     expect(styles).toContain("@keyframes agent-label-sweep { 0% { background-position: 100% 0; } 66.667%, 100% { background-position: 0 0; } }");
     expect(styles).toContain(".agent-row.session-loading { opacity: .72; }");
-    expect(styles).toContain(".session-sync-overlay { position: absolute;");
-    expect(styles).toContain(".session-sync-card { display: grid;");
+    expect(styles).not.toContain(".session-sync-overlay");
+    expect(styles).not.toContain(".session-sync-card");
     expect(styles).toContain(".agent-dot.loading { border-color: var(--border-bright); border-top-color: var(--cyan);");
     expect(styles).toContain("animation: agent-loading-spin .8s linear infinite;");
     expect(styles).toContain("@keyframes agent-loading-spin { to { transform: rotate(360deg); } }");

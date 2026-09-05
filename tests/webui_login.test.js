@@ -24,7 +24,7 @@ function loadShowLogin(relative) {
     connectionHadSuccess: true,
     reconnectAttempt: 3,
   };
-  const counters = { terminal: 0, polling: 0, background: 0, phase: 0, overlay: 0, focus: 0 };
+  const counters = { terminal: 0, polling: 0, background: 0, phase: 0, focus: 0 };
   const elements = {
     app: { classList: classList() },
     loginScreen: { classList: classList(["hidden"]) },
@@ -36,7 +36,7 @@ function loadShowLogin(relative) {
   };
   const factory = new Function(
     "state", "elements", "deactivateSessionTerminalView", "stopHttpPolling",
-    "cancelBackgroundWorkspaceSync", "setConnectionPhase", "hideConnectionOverlay",
+    "cancelBackgroundWorkspaceSync", "setConnectionPhase",
     "runtimeCapabilities", "frontendRuntime", "rememberedDevices", "setLoginView",
     "renderLoginDevices", "synchronizeWindowTitle", "markFrontendWindowReady",
     `${source.slice(start, end)}\nreturn showLogin;`,
@@ -48,7 +48,6 @@ function loadShowLogin(relative) {
     () => { counters.polling += 1; },
     () => { counters.background += 1; },
     () => { counters.phase += 1; },
-    () => { counters.overlay += 1; },
     { targetConfiguration: false },
     { endpoint: "" },
     null,
@@ -126,7 +125,6 @@ describe("WebUI login transition", () => {
     expect(runtime.counters.polling).toBe(1);
     expect(runtime.counters.background).toBe(1);
     expect(runtime.counters.phase).toBe(1);
-    expect(runtime.counters.overlay).toBe(1);
     expect(runtime.counters.focus).toBe(1);
 
     runtime.elements.loginPassword.value = "a";
@@ -137,7 +135,6 @@ describe("WebUI login transition", () => {
     expect(runtime.counters.polling).toBe(1);
     expect(runtime.counters.background).toBe(1);
     expect(runtime.counters.phase).toBe(1);
-    expect(runtime.counters.overlay).toBe(1);
     expect(runtime.counters.focus).toBe(1);
   });
 
@@ -176,6 +173,7 @@ describe("WebUI login transition", () => {
     expect(html).toContain('id="login-remote-device"');
     expect(html).toContain('id="login-remember"');
     expect(css).toContain("@keyframes login-flow-primary");
+    expect(css).toContain(":root:not(.target-configuration) [data-target-configuration] { display: none !important; }");
     expect(css).toContain("@media (prefers-reduced-motion: reduce)");
     expect(app).toContain('classList.toggle("remembered-device-logins", Boolean(rememberedDevices))');
     expect(app).toContain('device.endpoint === local.endpoint');

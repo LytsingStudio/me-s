@@ -383,17 +383,12 @@ describe("WebUI authoritative input draft synchronization", () => {
     });
   });
 
-  test("known local failures unlock while ambiguous HTTP outcomes keep waiting for authority", async () => {
-    const { state, sendCommand, commandResultIsUnknown } = loadDraftRuntime();
+  test("reconnecting commands reach the server while ambiguous outcomes keep waiting for authority", async () => {
+    const r = loadDraftRuntime({ fetch: () => Promise.resolve(jsonResponse({ ok: true })) });
+    const { state, sendCommand, commandResultIsUnknown } = r;
     state.connected = false;
-    let disconnected;
-    try {
-      await sendCommand({ command: "submit_user_prompt", agent_id: "main", content: "hello" });
-    } catch (error) {
-      disconnected = error;
-    }
-    expect(disconnected?.commandResultKnown).toBe(true);
-    expect(commandResultIsUnknown(disconnected)).toBe(false);
+    await sendCommand({ command: "submit_user_prompt", agent_id: "main", content: "hello" }, "chat", { refresh: false });
+    expect(r.fetchCalls).toHaveLength(1);
 
     const unavailable = new Error("service unavailable");
     unavailable.status = 503;
