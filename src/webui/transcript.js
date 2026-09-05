@@ -329,6 +329,12 @@
       scope.contextAfter.length = length;
       scope.heights.truncate(length);
     };
+    const pruneMeasurements = (scope) => {
+      const retained = new Set(scope.keys);
+      for (const key of scope.measurements.keys()) {
+        if (!retained.has(key)) scope.measurements.delete(key);
+      }
+    };
     const appendItem = (scope, item, index, previousContext, width) => {
       const key = keyFor(item, index);
       const revision = revisionFor(item, index);
@@ -362,6 +368,7 @@
             previousContext = appendItem(scope, items[appendIndex], appendIndex, previousContext, width);
           }
           scope.items = items;
+          pruneMeasurements(scope);
           return;
         }
         const estimate = estimateFor(item, index);
@@ -375,6 +382,7 @@
       }
       if (scope.keys.length > items.length) truncateScope(scope, items.length);
       scope.items = items;
+      pruneMeasurements(scope);
     };
     const viewportRect = () => viewport.getBoundingClientRect?.() || { top: 0, bottom: viewport.clientHeight || 0 };
     const captureAnchor = () => {
@@ -441,7 +449,10 @@
       const end = rangeBottom >= total ? length : Math.min(length, scope.heights.indexAt(rangeBottom) + 1);
       return [Math.min(start, Math.max(0, length - 1)), Math.max(start + 1, end)];
     };
-    const renderWindow = ({ forceRender = false, forceRange = false, following = followingNow(), scrollTop = viewport.scrollTop } = {}) => {
+    const renderWindow = ({
+      forceRender = false, forceRange = false, following = followingNow(),
+      scrollTop = viewport.scrollTop, anchor: preparedAnchor = null,
+    } = {}) => {
       if (!activeScope) return false;
       if (!activeScope.items.length) {
         const changed = !activeScope.empty || forceRender;
@@ -457,7 +468,7 @@
       const [start, end] = desiredRange(activeScope, following, scrollTop, forceRange);
       const rangeChanged = start !== activeScope.start || end !== activeScope.end;
       if (!rangeChanged && !forceRender) return false;
-      const anchor = following ? null : captureAnchor();
+      const anchor = following ? null : preparedAnchor || captureAnchor();
       activeScope.start = start;
       activeScope.end = end;
       updateSpacers();
@@ -500,21 +511,28 @@
       update(items, settings = {}) {
         const [scopeKey, scope] = scopeFor(settings.scopeKey);
         const scopeChanged = activeScopeKey !== scopeKey;
+        const prepared = preparedScroll;
+        preparedScroll = null;
+        const following = prepared ? prepared.following : settings.following ?? followingNow();
+        let anchor = scopeChanged || following ? null : captureAnchor();
         if (scopeChanged) {
           activeScopeKey = scopeKey;
           activeScope = scope;
           clearWindow();
         }
         syncItems(scope, items || [], settings.changedFrom ?? 0, Boolean(settings.force));
-        const prepared = preparedScroll;
-        preparedScroll = null;
-        const following = prepared ? prepared.following : settings.following ?? followingNow();
-        const scrollTop = prepared ? prepared.scrollTop : settings.scrollTop ?? viewport.scrollTop;
+        let scrollTop = prepared ? prepared.scrollTop : settings.scrollTop ?? viewport.scrollTop;
+        if (anchor) {
+          const anchorIndex = scope.keys.indexOf(anchor.key);
+          if (anchorIndex < 0) anchor = null;
+          else scrollTop = Math.max(0, scope.heights.prefix(anchorIndex) - anchor.offset);
+        }
         renderWindow({
           forceRender: true,
-          forceRange: scopeChanged || Boolean(prepared),
+          forceRange: scopeChanged || Boolean(prepared) || Boolean(anchor),
           following,
           scrollTop,
+          anchor,
         });
       },
       noteScroll() {
@@ -539,6 +557,8 @@
           topHeight: activeScope.heights.prefix(activeScope.start),
           bottomHeight: activeScope.heights.total() - activeScope.heights.prefix(activeScope.end),
           materialized: windowElement.children.length,
+          retained: activeScope.items.length,
+          measurements: activeScope.measurements.size,
         } : null;
       },
       destroy() {

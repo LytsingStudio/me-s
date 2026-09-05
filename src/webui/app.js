@@ -14,6 +14,10 @@ const CONNECTION_STABILIZE_SUCCESSES = 2;
 const INPUT_ANIMATION_QUIET_MS = 250;
 const UI_ANIMATION_INTERVAL_MS = 100;
 const TRANSCRIPT_BOTTOM_THRESHOLD_PX = 24;
+const PROJECTION_RANGE_CHUNK = 64;
+const PROJECTION_RANGE_LIMIT = 192;
+const PROJECTION_RANGE_EDGE_ITEMS = 12;
+const PROJECTION_TARGET_HEIGHT_PX = 5000;
 const SYSTEM_STATIC_PROMPT_MAX_BYTES = 32 * 1024;
 const TERMINAL_RENDER_OVERSCAN_ROWS = 80;
 const TERMINAL_RENDER_MIN_ROWS = 240;
@@ -157,6 +161,7 @@ const state = {
   pageClosing: false,
 };
 let transcriptVirtualizer = null;
+let projectionRangeCheckFrame = null;
 let terminalWindowRenderFrame = null;
 
 
@@ -733,8 +738,11 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
     pendingPromptSubmission: null,
     projectionRevision: null,
     projectionCount: 0,
+    projectionStart: 0,
+    projectionEnd: 0,
     projectionState: null,
-    projectionLoading: !raw,
+    projectionLoading: false,
+    projectionRangeLoading: null,
     projectionChanges: null,
     projection: emptyProjection(),
     workmap: emptyWorkMap(),
@@ -1228,27 +1236,208 @@ function projectionSummary(value) {
   return { turnState: value?.turn_state ?? null };
 }
 
-function installProjectionState(store, projectionState, range = null) {
-  const previousRevision = store.projectionRevision;
-  const count = Math.max(0, Number(projectionState.count) || 0);
-  let messages = store.projection?.messages || [];
-  let transcriptFrom = null;
+function projectionCountForState(projectionState) {
+  const count = Number(projectionState?.count);
+  if (!Number.isInteger(count) || count < 0) {
+    throw new Error("同步响应包含无效的会话数量");
+  }
+  return count;
+}
+
+function projectionChangedFrom(projectionState, count) {
+  if (projectionState?.changed_from == null) return null;
+  const changedFrom = Number(projectionState.changed_from);
+  if (!Number.isInteger(changedFrom) || changedFrom < 0 || changedFrom > count) {
+    throw new Error("同步响应包含无效的会话范围");
+  }
+  return changedFrom;
+}
+
+function projectionWindow(store) {
+  const messages = Array.isArray(store.projection?.messages) ? store.projection.messages : [];
+  const start = Number(store.projectionStart);
+  const end = Number(store.projectionEnd);
+  if (!Number.isInteger(start) || !Number.isInteger(end)
+      || start < 0 || end < start || messages.length !== end - start) {
+    throw new Error("本地会话内容范围无效");
+  }
+  return {
+    revision: store.projectionRevision,
+    count: Math.max(0, Number(store.projectionCount) || 0),
+    start, end, messages,
+  };
+}
+
+function projectionTailRange(count) {
+  if (count <= 0) return null;
+  return {
+    start: Math.max(0, count - PROJECTION_RANGE_CHUNK),
+    end: count,
+    retain: "end",
+    direction: "tail",
+  };
+}
+
+function projectionStateRangeRequest(store, projectionState, selected, following = false) {
+  if (!selected) return null;
+  const count = projectionCountForState(projectionState);
+  if (count === 0) return null;
+  const changedFrom = projectionChangedFrom(projectionState, count);
+  const previous = projectionWindow(store);
+  if (previous.revision === null || previous.messages.length === 0) {
+    return projectionTailRange(count);
+  }
+  if (store.pendingPromptSubmission && previous.end < count) {
+    return projectionTailRange(count);
+  }
+  const atTail = previous.end === previous.count;
+  if (previous.revision === projectionState.revision) {
+    return following && previous.end < count ? projectionTailRange(count) : null;
+  }
+  if (changedFrom === null) {
+    if (previous.start >= count) return projectionTailRange(count);
+    return following && previous.end < count ? projectionTailRange(count) : null;
+  }
+  if (atTail) {
+    const suffixStart = Math.min(changedFrom, count);
+    if (suffixStart >= previous.start && count - suffixStart <= PROJECTION_RANGE_LIMIT) {
+      return { start: suffixStart, end: count, retain: "end", direction: "sync" };
+    }
+    return projectionTailRange(count);
+  }
+  if (changedFrom >= previous.end && previous.end <= count) return null;
+  const start = Math.min(previous.start, count);
+  const length = Math.min(
+    PROJECTION_RANGE_LIMIT,
+    Math.max(PROJECTION_RANGE_CHUNK, previous.end - previous.start),
+  );
+  const end = Math.min(count, start + length);
+  if (end <= start) return projectionTailRange(count);
+  return {
+    start: changedFrom > start && changedFrom < end ? changedFrom : start,
+    end,
+    retain: "start",
+    direction: "sync",
+  };
+}
+
+function mergeProjectionRange(messages, start, end, rangeStart, rangeEnd, projections) {
+  if (rangeStart === rangeEnd) return { messages, start, end };
+  if (!messages.length || rangeEnd < start || rangeStart > end) {
+    return { messages: projections, start: rangeStart, end: rangeEnd };
+  }
+  const mergedStart = Math.min(start, rangeStart);
+  const mergedEnd = Math.max(end, rangeEnd);
+  const merged = [];
+  for (let index = mergedStart; index < mergedEnd; index += 1) {
+    if (index >= rangeStart && index < rangeEnd) {
+      merged.push(projections[index - rangeStart]);
+    } else if (index >= start && index < end) {
+      merged.push(messages[index - start]);
+    } else {
+      throw new Error("会话内容响应不连续");
+    }
+  }
+  return { messages: merged, start: mergedStart, end: mergedEnd };
+}
+
+function firstProjectionDifference(previous, next) {
+  const shared = Math.min(previous.length, next.length);
+  for (let index = 0; index < shared; index += 1) {
+    const left = previous[index];
+    const right = next[index];
+    if (left === right) continue;
+    if (left?.key === right?.key && left?.revision === right?.revision) continue;
+    return index;
+  }
+  return previous.length === next.length ? null : shared;
+}
+
+function recordProjectionChanges(store, revisionChanged, transcriptFrom) {
+  if (!revisionChanged && transcriptFrom === null) return;
+  const next = {
+    transcript: transcriptFrom !== null,
+    transcriptFrom,
+    status: revisionChanged,
+    turn: revisionChanged,
+    workmap: revisionChanged,
+    fullReplay: transcriptFrom === 0,
+  };
+  const current = store.projectionChanges;
+  if (!current) {
+    store.projectionChanges = next;
+    return;
+  }
+  current.transcript = current.transcript || next.transcript;
+  if (next.transcriptFrom !== null) {
+    current.transcriptFrom = current.transcriptFrom == null
+      ? next.transcriptFrom : Math.min(current.transcriptFrom, next.transcriptFrom);
+  }
+  current.status = current.status || next.status;
+  current.turn = current.turn || next.turn;
+  current.workmap = current.workmap || next.workmap;
+  current.fullReplay = current.fullReplay || next.fullReplay;
+}
+
+function installProjectionState(store, projectionState, range = null, retain = "end") {
+  const previous = projectionWindow(store);
+  const previousMessages = previous.messages;
+  const previousRevision = previous.revision;
+  const count = projectionCountForState(projectionState);
+  const changedFrom = projectionChangedFrom(projectionState, count);
+  const revisionChanged = previousRevision !== projectionState.revision;
+  let messages = previousMessages;
+  let start = previous.start;
+  let end = previous.end;
+
+  if (revisionChanged && changedFrom !== null) {
+    if (changedFrom <= start) {
+      start = Math.min(start, count);
+      end = start;
+      messages = [];
+    } else if (changedFrom < end) {
+      messages = messages.slice(0, changedFrom - start);
+      end = changedFrom;
+    }
+  }
+  if (start > count) {
+    start = count;
+    end = count;
+    messages = [];
+  } else if (end > count) {
+    end = count;
+    messages = messages.slice(0, end - start);
+  }
+
   if (range) {
-    const start = Number(range.start);
-    const end = Number(range.end);
+    const rangeStart = Number(range.start);
+    const rangeEnd = Number(range.end);
     const projections = Array.isArray(range.projections) ? range.projections : [];
     if (range.agent_id !== projectionState.agent_id
         || range.revision !== projectionState.revision
         || Number(range.count) !== count
-        || !Number.isInteger(start) || !Number.isInteger(end)
-        || start < 0 || end < start || end !== count
-        || projections.length !== end - start || start > messages.length) {
+        || !Number.isInteger(rangeStart) || !Number.isInteger(rangeEnd)
+        || rangeStart < 0 || rangeEnd < rangeStart || rangeEnd > count
+        || projections.length !== rangeEnd - rangeStart) {
       throw new Error("会话内容响应不完整");
     }
-    messages = messages.slice(0, start).concat(projections);
-    transcriptFrom = start;
+    ({ messages, start, end } = mergeProjectionRange(
+      messages, start, end, rangeStart, rangeEnd, projections,
+    ));
   }
-  if (messages.length !== count) throw new Error("会话内容数量不一致");
+
+  if (messages.length > PROJECTION_RANGE_LIMIT) {
+    if (retain === "start") {
+      messages = messages.slice(0, PROJECTION_RANGE_LIMIT);
+      end = start + messages.length;
+    } else {
+      messages = messages.slice(messages.length - PROJECTION_RANGE_LIMIT);
+      start = end - messages.length;
+    }
+  }
+  if (messages.length !== end - start || start < 0 || end > count) {
+    throw new Error("会话内容范围不一致");
+  }
 
   const projection = emptyProjection();
   projection.messages = messages;
@@ -1257,11 +1446,16 @@ function installProjectionState(store, projectionState, range = null) {
   projection.model = projectionState.model ?? null;
   projection.effort = projectionState.effort ?? null;
   projection.turnState = projectionTurnState(projectionState.turn_state);
-  for (let index = 0; index < messages.length; index += 1) {
-    const message = messages[index];
-    message._projectionIndex = index;
+  for (let localIndex = 0; localIndex < messages.length; localIndex += 1) {
+    const message = messages[localIndex];
+    const globalIndex = start + localIndex;
+    message._projectionIndex = globalIndex;
+    message._localProjectionIndex = localIndex;
     if (message.key) projection._messageByKey.set(message.key, message);
-    if (message.tool) message.tool._messageIndex = index;
+    if (message.tool) {
+      message.tool._messageIndex = globalIndex;
+      message.tool._localMessageIndex = localIndex;
+    }
   }
   const activity = projectionState.compact_activity;
   if (activity) {
@@ -1277,7 +1471,7 @@ function installProjectionState(store, projectionState, range = null) {
     }
   }
 
-  const revisionChanged = previousRevision !== projectionState.revision;
+  const transcriptFrom = firstProjectionDifference(previousMessages, messages);
   store.events = [];
   store.eventCount = Math.max(0, Number(projectionState.source_event_count) || 0);
   store.mutationRevision = Math.max(0, Number(projectionState.source_mutation_revision) || 0);
@@ -1286,8 +1480,10 @@ function installProjectionState(store, projectionState, range = null) {
   store.projection = projection;
   store.projectionRevision = projectionState.revision;
   store.projectionCount = count;
+  store.projectionStart = start;
+  store.projectionEnd = end;
   store.projectionState = projectionState;
-  store.projectionLoading = false;
+  if (count === 0) store.projectionLoading = false;
   store.summary = projectionSummary(projectionState.summary);
   store.workmap = projectionState.workmap || emptyWorkMap();
   store.turnHistory = projectionState.context?.memory_content ?? null;
@@ -1295,21 +1491,40 @@ function installProjectionState(store, projectionState, range = null) {
   store.needsReplay = false;
   store.needsTurnHistory = false;
   store.loadProgress = null;
-  store.projectionChanges = revisionChanged ? {
-    transcript: transcriptFrom !== null,
-    transcriptFrom,
-    status: true,
-    turn: true,
-    workmap: true,
-    fullReplay: transcriptFrom === 0,
-  } : null;
-  return revisionChanged;
+  recordProjectionChanges(store, revisionChanged, transcriptFrom);
+  return revisionChanged || transcriptFrom !== null;
+}
+
+function projectionRangePath(agentId, request, revision) {
+  return `/api/ui-projections/${encodeURIComponent(agentId)}/range?start=${request.start}&end=${request.end}&revision=${encodeURIComponent(revision)}`;
+}
+
+function fetchProjectionRange(store, agentId, projectionState, request, workspaceId, signal = null) {
+  const key = `${workspaceId || ""}:${projectionState.revision}:${request.start}:${request.end}`;
+  const existing = store.projectionRangeLoading;
+  if (existing?.key === key) return existing.promise;
+  const token = { key, promise: null };
+  token.promise = api(
+    projectionRangePath(agentId, request, projectionState.revision),
+    signal ? { signal } : {},
+    workspaceId,
+  ).then((payload) => {
+    if (!payload.range) throw new Error("会话内容响应不完整");
+    return payload.range;
+  }).finally(() => {
+    if (store.projectionRangeLoading === token) store.projectionRangeLoading = null;
+  });
+  store.projectionRangeLoading = token;
+  return token.promise;
+}
+
+function projectionFollowing() {
+  try { return Boolean(transcriptBottomFollower.isFollowing()); } catch (_) { return true; }
 }
 
 async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft, signal = null) {
   if (!payload.ui_projection) throw new Error("同步响应未提供会话内容");
   const states = new Map((payload.projection_states || []).map((entry) => [entry.agent_id, entry]));
-  const pending = [];
   const prepared = [];
   for (const meta of bucket.snapshot.agents || []) {
     let store = bucket.stores.get(meta.id);
@@ -1324,43 +1539,156 @@ async function synchronizeProjectionBucket(bucket, payload, workspaceId, observe
     if (!projectionState) throw new Error("同步响应缺少会话状态");
     const loadingBefore = Boolean(store.projectionLoading);
     const summaryBefore = JSON.stringify(store.summary);
-    const count = Math.max(0, Number(projectionState.count) || 0);
-    const revisionChanged = store.projectionRevision !== projectionState.revision;
-    let start = revisionChanged && projectionState.changed_from != null
-      ? Number(projectionState.changed_from) : null;
-    if (start !== null && (!Number.isInteger(start) || start < 0 || start > count)) {
-      throw new Error("同步响应包含无效的会话范围");
+    const selected = bucket === state && meta.id === state.selectedAgent;
+    const request = projectionStateRangeRequest(
+      store, projectionState, selected, selected && projectionFollowing(),
+    );
+    const changed = installProjectionState(store, projectionState);
+    if (!selected || !request) {
+      store.projectionLoading = false;
+    } else if (store.projection.messages.length === 0 || store.projectionLoading) {
+      store.projectionLoading = projectionCountForState(projectionState) > 0;
     }
-    if (revisionChanged && (store.projectionRevision === null
-        || (start !== null && start > store.projection.messages.length))) {
-      start = 0;
-    }
-    if (store.projection.messages.length !== count && start === null) start = 0;
-    const needsRange = start !== null;
-    store.projectionLoading = needsRange;
-    const entry = { meta, store, projectionState, loadingBefore, summaryBefore, range: null };
-    prepared.push(entry);
-    if (needsRange) {
-      pending.push(api(
-        `/api/ui-projections/${encodeURIComponent(meta.id)}/range?start=${start}&end=${count}&revision=${encodeURIComponent(projectionState.revision)}`,
-        signal ? { signal } : {},
-        workspaceId,
-      ).then((response) => { entry.range = response.range; }));
-    }
+    prepared.push({
+      meta, store, projectionState, request, changed, loadingBefore, summaryBefore,
+    });
   }
   if (bucket === state && prepared.some((entry) => entry.store.projectionLoading)) {
     renderAgents();
     renderSessionSyncOverlay();
   }
-  await Promise.all(pending);
-  return prepared.map((entry) => {
-    const changed = installProjectionState(entry.store, entry.projectionState, entry.range);
+  for (const entry of prepared) {
+    if (!entry.request) continue;
+    try {
+      const range = await fetchProjectionRange(
+        entry.store, entry.meta.id, entry.projectionState, entry.request, workspaceId, signal,
+      );
+      if (entry.store.projectionRevision === entry.projectionState.revision) {
+        entry.changed = installProjectionState(
+          entry.store, entry.projectionState, range, entry.request.retain,
+        ) || entry.changed;
+      }
+    } finally {
+      entry.store.projectionLoading = false;
+    }
+  }
+  return prepared.map((entry) => ({
+    agentId: entry.meta.id,
+    changed: entry.changed,
+    summaryChanged: entry.summaryBefore !== JSON.stringify(entry.store.summary),
+    loadChanged: entry.loadingBefore !== Boolean(entry.store.projectionLoading),
+  }));
+}
+
+function projectionAdjacentRange(store, direction, retain = null) {
+  const window = projectionWindow(store);
+  if (window.count <= 0) return null;
+  if (direction === "tail") {
+    if (window.messages.length > 0 && window.end === window.count) return null;
+    return projectionTailRange(window.count);
+  }
+  if (direction === "before" && window.start > 0) {
     return {
-      agentId: entry.meta.id,
-      changed,
-      summaryChanged: entry.summaryBefore !== JSON.stringify(entry.store.summary),
-      loadChanged: entry.loadingBefore !== Boolean(entry.store.projectionLoading),
+      start: Math.max(0, window.start - PROJECTION_RANGE_CHUNK),
+      end: window.start,
+      retain: retain || "start",
+      direction,
     };
+  }
+  if (direction === "after" && window.end < window.count) {
+    return {
+      start: window.end,
+      end: Math.min(window.count, window.end + PROJECTION_RANGE_CHUNK),
+      retain: retain || "end",
+      direction,
+    };
+  }
+  return null;
+}
+
+function projectionRangeDirectionForViewport(store, viewportState, following) {
+  if (!store || !viewportState) return null;
+  const window = projectionWindow(store);
+  if (following && window.end < window.count) return { direction: "tail", retain: "end" };
+  if (viewportState.totalHeight < PROJECTION_TARGET_HEIGHT_PX
+      && window.start > 0 && window.messages.length < PROJECTION_RANGE_LIMIT) {
+    return { direction: "before", retain: "end" };
+  }
+  if (!following && viewportState.start <= PROJECTION_RANGE_EDGE_ITEMS && window.start > 0) {
+    return { direction: "before", retain: "start" };
+  }
+  if (!following
+      && viewportState.end >= Math.max(0, window.messages.length - PROJECTION_RANGE_EDGE_ITEMS)
+      && window.end < window.count) {
+    return { direction: "after", retain: "end" };
+  }
+  return null;
+}
+
+async function requestSelectedProjectionRange(direction, retain = null) {
+  if (!usesUiProjection() || !state.workspaceId || !state.selectedAgent) return false;
+  const workspaceId = state.workspaceId;
+  const agentId = state.selectedAgent;
+  const store = currentStore();
+  const projectionState = store?.projectionState;
+  if (!store || !projectionState) return false;
+  const request = projectionAdjacentRange(store, direction, retain);
+  if (!request) return false;
+  const blocking = direction === "tail"
+    && (store.projection.messages.length === 0 || store.projectionEnd < store.projectionCount);
+  if (blocking) {
+    store.projectionLoading = true;
+    renderAgents();
+    renderSessionSyncOverlay();
+  }
+  try {
+    const range = await fetchProjectionRange(
+      store, agentId, projectionState, request, workspaceId,
+    );
+    if (state.workspaceId !== workspaceId || state.selectedAgent !== agentId
+        || currentStore() !== store || store.projectionRevision !== projectionState.revision) {
+      return false;
+    }
+    const changed = installProjectionState(store, projectionState, range, request.retain);
+    store.projectionLoading = false;
+    if (changed) {
+      requestRender({ currentEvents: true });
+      if (!inputHasPriority()) flushPendingRender();
+    }
+    if (blocking) {
+      renderAgents();
+      renderSessionSyncOverlay();
+    }
+    scheduleSelectedProjectionRangeCheck();
+    return changed;
+  } catch (error) {
+    store.projectionLoading = false;
+    if (state.workspaceId === workspaceId && state.selectedAgent === agentId) {
+      if (blocking) {
+        renderAgents();
+        renderSessionSyncOverlay();
+      }
+      if (error.status === 409 && error.code === "stale_revision") requestHttpSyncNow();
+      else scheduleHttpSync(HTTP_SYNC_IDLE_MS);
+    }
+    return false;
+  }
+}
+
+function scheduleSelectedProjectionRangeCheck() {
+  if (projectionRangeCheckFrame !== null) return;
+  projectionRangeCheckFrame = requestAnimationFrame(() => {
+    projectionRangeCheckFrame = null;
+    if (state.pageClosing || !usesUiProjection() || state.view.kind !== "chat") return;
+    const store = currentStore();
+    if (!store || store.projectionLoading || store.projectionRangeLoading) return;
+    const viewportState = transcriptVirtualizer?.inspect();
+    const scopeKey = `${state.workspaceId || ""}:${state.selectedAgent || ""}`;
+    if (!viewportState || viewportState.scopeKey !== scopeKey) return;
+    const request = projectionRangeDirectionForViewport(
+      store, viewportState, projectionFollowing(),
+    );
+    if (request) void requestSelectedProjectionRange(request.direction, request.retain);
   });
 }
 
@@ -2352,6 +2680,10 @@ function selectedEventRecoveryReady(recovery, agentId, mutationRevision, localEv
 }
 
 function prepareSelectedEventRecovery(meta, update, startCycle) {
+  if (usesUiProjection()) {
+    state.eventRecovery = null;
+    return false;
+  }
   if (!meta || meta.id !== state.selectedAgent) {
     state.eventRecovery = null;
     return false;
@@ -2781,19 +3113,21 @@ function markTranscriptChanged(changes, index) {
 
 function appendProjectedMessage(projection, changes, message) {
   message._projectionIndex = projection.messages.length;
+  message._localProjectionIndex = message._projectionIndex;
   projection.messages.push(message);
   if (message.key) projection._messageByKey.set(message.key, message);
-  markTranscriptChanged(changes, message._projectionIndex);
+  markTranscriptChanged(changes, message._localProjectionIndex);
   return message;
 }
 
 function markProjectedMessageChanged(changes, message) {
-  const index = message?._projectionIndex;
+  const index = message?._localProjectionIndex ?? message?._projectionIndex;
   if (index != null) markTranscriptChanged(changes, index);
 }
 
 function markProjectedToolChanged(projection, changes, tool) {
-  if (tool?._messageIndex != null) markTranscriptChanged(changes, tool._messageIndex);
+  const index = tool?._localMessageIndex ?? tool?._messageIndex;
+  if (index != null) markTranscriptChanged(changes, index);
 }
 
 function consumeChatEvents(projection, events) {
@@ -3389,7 +3723,6 @@ function renderIncremental(request) {
 }
 
 function advanceCurrentProjection() {
-  if (bulkEventRecoveryActive()) return emptyProjectionChanges();
   const store = currentStore();
   if (!store) return emptyProjectionChanges();
   if (usesUiProjection()) {
@@ -3397,6 +3730,7 @@ function advanceCurrentProjection() {
     store.projectionChanges = null;
     return markPendingPromptConfirmation(store, changes);
   }
+  if (bulkEventRecoveryActive()) return emptyProjectionChanges();
   if (store.needsReplay) {
     store.projection = projectChat(store.events);
     store.workmap = projectWorkMap(store.events);
@@ -3479,7 +3813,8 @@ function agentLoadingState(workspaceId, agentId) {
   if (!meta) return { loading: false, percent: null };
   const store = bucket.stores.get(agentId);
   if (usesUiProjection()) {
-    return { loading: !store || store.projectionLoading, percent: null };
+    const selected = workspaceId === state.workspaceId && agentId === state.selectedAgent;
+    return { loading: selected && Boolean(store?.projectionLoading), percent: null };
   }
   if (!bucket.edbCacheInitialized || !store) return { loading: true, percent: null };
   if (!store.loadProgress) return { loading: false, percent: null };
@@ -3703,6 +4038,8 @@ function finishAgentSelection(id) {
   closeWorkspaceMenu();
   deactivateSessionTerminalView();
   saveDraft();
+  const previousStore = currentStore();
+  if (previousStore) previousStore.projectionLoading = false;
   state.selectedAgent = id;
   transcriptBottomFollower.follow();
   state.view = { kind: "chat", sessionId: null };
@@ -3714,7 +4051,13 @@ function finishAgentSelection(id) {
   restoreDraft();
   const meta = state.snapshot.agents.find((agent) => agent.id === id);
   prepareSelectedEventRecovery(meta, null, true);
+  const store = currentStore();
+  if (usesUiProjection() && store?.projectionState
+      && store.projectionCount > 0 && store.projectionEnd < store.projectionCount) {
+    store.projectionLoading = true;
+  }
   renderAll();
+  if (usesUiProjection()) void requestSelectedProjectionRange("tail");
   persistGatewaySelection(state.workspaceId, id);
   requestHttpSyncNow();
 }
@@ -3989,6 +4332,7 @@ function renderTranscript(forceFull = false, changedFrom = 0) {
     force: forceFull,
     following: transcriptBottomFollower.isFollowing(),
   });
+  scheduleSelectedProjectionRangeCheck();
 }
 
 function renderEmptyTranscript(container) {
@@ -4113,7 +4457,8 @@ function initializeMessageNode(node, message, afterTool, followsTool, index) {
 }
 
 function messageDomKey(message, index) {
-  return `${state.selectedAgent}:${message.key || `${message.kind}:${message.timestamp}:${index}`}`;
+  const projectionIndex = message._projectionIndex ?? index;
+  return `${state.selectedAgent}:${message.key || `${message.kind}:${message.timestamp}:${projectionIndex}`}`;
 }
 
 function renderMessageHtml(message, afterTool, followsTool = false) {
@@ -6539,13 +6884,17 @@ transcriptVirtualizer = MeTranscript.createVirtualTranscript(
     renderRange: reconcileTranscript,
     renderEmpty: renderEmptyTranscript,
     isFollowing: () => transcriptBottomFollower.isFollowing(),
-    onLayoutChange: () => transcriptBottomFollower.layoutChanged(),
+    onLayoutChange: () => {
+      transcriptBottomFollower.layoutChanged();
+      scheduleSelectedProjectionRangeCheck();
+    },
   },
 );
 elements.transcript.addEventListener("scroll", () => {
   closeUserMessageMenu();
   transcriptBottomFollower.noteScroll();
   transcriptVirtualizer.noteScroll();
+  scheduleSelectedProjectionRangeCheck();
 }, { passive: true });
 elements.agents.addEventListener("scroll", closeAgentMenu, { passive: true });
 elements.workspaceList.addEventListener("scroll", closeWorkspaceMenu, { passive: true });

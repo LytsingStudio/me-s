@@ -433,14 +433,16 @@ impl Gateway {
         workspace_id: &str,
         method: reqwest::Method,
         child_path: &str,
+        query: Option<&str>,
         content_type: Option<&str>,
         accept_encoding: Option<&str>,
         range: Option<&str>,
         body: Vec<u8>,
     ) -> Result<ProxyResponse> {
-        validate_proxy_path(child_path)?;
+        validate_proxy_request(child_path, query)?;
         let route = self.process_route(workspace_id)?;
-        let url = format!("{}/api/{child_path}", route.address);
+        let mut url = reqwest::Url::parse(&format!("{}/api/{child_path}", route.address))?;
+        url.set_query(query);
         let client = if parse_file_download_content_path(child_path).is_some() {
             &self.download_proxy_client
         } else {
@@ -699,6 +701,26 @@ fn validate_directory_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_proxy_request(path: &str, query: Option<&str>) -> Result<()> {
+    validate_proxy_path(path)?;
+    if query.is_some() && !is_ui_projection_path(path) {
+        return Err("工作区接口不支持查询参数".into());
+    }
+    Ok(())
+}
+
+pub(crate) fn is_ui_projection_path(path: &str) -> bool {
+    path.strip_prefix("ui-projections/")
+        .and_then(|rest| rest.rsplit_once('/'))
+        .is_some_and(|(agent, operation)| {
+            !agent.is_empty()
+                && agent
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
+                && matches!(operation, "state" | "range" | "hash")
+        })
+}
+
 fn validate_proxy_path(path: &str) -> Result<()> {
     let valid_agent = |agent: &str| {
         !agent.is_empty()
@@ -748,6 +770,7 @@ fn validate_proxy_path(path: &str) -> Result<()> {
         )
     });
     if !matches!(path, "sync" | "snapshot" | "command")
+        && !is_ui_projection_path(path)
         && !deletion_blocker
         && !session_terminal
         && !file_post
@@ -781,6 +804,9 @@ mod tests {
             "sync",
             "snapshot",
             "command",
+            "ui-projections/main/state",
+            "ui-projections/main/range",
+            "ui-projections/worker_1/hash",
             "deletion-blocker/main",
             "deletion-blocker/worker_1",
             "session-terminal/main/read",
@@ -818,6 +844,12 @@ mod tests {
             "managed/ready",
             "managed/shutdown",
             "terminal/main/session",
+            "ui-projections/",
+            "ui-projections/main",
+            "ui-projections//state",
+            "ui-projections/main/unknown",
+            "ui-projections/main/range/extra",
+            "ui-projections/main/range?start=0",
             "deletion-blocker/",
             "deletion-blocker/main/extra",
             "deletion-blocker/..",
@@ -841,6 +873,30 @@ mod tests {
             "files/uploads/chunk/extra",
         ] {
             assert!(validate_proxy_path(path).is_err(), "{path}");
+        }
+    }
+
+    #[test]
+    fn proxy_queries_are_limited_to_ui_projection_reads() {
+        for (path, query) in [
+            ("ui-projections/main/state", Some("revision=known")),
+            (
+                "ui-projections/main/range",
+                Some("start=0&end=5&revision=known"),
+            ),
+            (
+                "ui-projections/worker_1/hash",
+                Some("start=0&end=5&revision=known"),
+            ),
+        ] {
+            validate_proxy_request(path, query).unwrap();
+        }
+
+        for path in ["sync", "snapshot", "command", "session-terminal/main/read"] {
+            assert!(
+                validate_proxy_request(path, Some("unexpected=1")).is_err(),
+                "{path}"
+            );
         }
     }
 

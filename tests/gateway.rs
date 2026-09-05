@@ -466,6 +466,49 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
         serde_json::from_slice::<serde_json::Value>(&identity_body).unwrap()
     );
 
+    let projection_sync_request = serde_json::json!({
+        "snapshot_revision": null, "ui_projection": true, "agents": [],
+        "selected_agent": session_agent, "terminal_session": null, "terminal_revision": null,
+    });
+    let projection_sync: serde_json::Value = http
+        .post(format!("{address}/api/workspaces/chat/sync"))
+        .header(reqwest::header::COOKIE, &cookie)
+        .json(&projection_sync_request)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    let projection_state = projection_sync["projection_states"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|state| state["agent_id"] == session_agent)
+        .unwrap();
+    let projection_revision = projection_state["revision"].as_str().unwrap();
+    let projection_count = projection_state["count"].as_u64().unwrap();
+    let projection_range: serde_json::Value = http
+        .get(format!(
+            "{address}/api/workspaces/chat/ui-projections/{session_agent}/range?start=0&end={projection_count}&revision={projection_revision}"
+        ))
+        .header(reqwest::header::COOKIE, &cookie)
+        .send()
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
+    assert_eq!(projection_range["range"]["start"], 0);
+    assert_eq!(projection_range["range"]["end"], projection_count);
+    assert_eq!(
+        projection_range["range"]["projections"]
+            .as_array()
+            .unwrap()
+            .len() as u64,
+        projection_count
+    );
+
     assert_eq!(
         http.post(format!(
             "{address}/api/workspaces/chat/session-terminal/{session_agent}/read"

@@ -15,7 +15,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 
 use crate::{
     Result,
-    gateway::{Gateway, OpenWorkspaceOutcome},
+    gateway::{Gateway, OpenWorkspaceOutcome, is_ui_projection_path},
     gateway_settings::GatewaySettings,
     web_auth::WebSessionAuth,
 };
@@ -167,9 +167,8 @@ fn serve(mut request: Request, gateway: Arc<Gateway>, auth: Arc<WebSessionAuth>)
 type HttpResponse = Response<Box<dyn Read + Send>>;
 
 fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Result<HttpResponse> {
-    let url = request.url();
-    let has_query = url.contains('?');
-    let path = url.split('?').next().unwrap_or(url).to_owned();
+    let url = request.url().to_owned();
+    let path = url.split('?').next().unwrap_or(url.as_str()).to_owned();
     if request.method() == &Method::Get
         && let Some(font) = crate::webui::shared_katex_font(&path)
     {
@@ -356,8 +355,8 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 }
             }
         }
-        (method, path) if !has_query && workspace_proxy_path(path).is_some() => {
-            let (workspace_id, child_path) = workspace_proxy_path(path).unwrap();
+        (method, _) if workspace_proxy_request(&url).is_some() => {
+            let (workspace_id, child_path, query) = workspace_proxy_request(&url).unwrap();
             let method = match method {
                 &Method::Get => reqwest::Method::GET,
                 &Method::Post => reqwest::Method::POST,
@@ -391,6 +390,7 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
                 workspace_id,
                 method,
                 child_path,
+                query,
                 content_type.as_deref(),
                 accept_encoding.as_deref(),
                 range.as_deref(),
@@ -531,6 +531,18 @@ fn workspace_close_id(path: &str) -> Option<&str> {
     (!id.is_empty() && !id.contains('/')).then_some(id)
 }
 
+fn workspace_proxy_request(url: &str) -> Option<(&str, &str, Option<&str>)> {
+    let (path, query) = match url.split_once('?') {
+        Some((path, query)) => (path, Some(query)),
+        None => (url, None),
+    };
+    let (workspace_id, child_path) = workspace_proxy_path(path)?;
+    if query.is_some() && !is_ui_projection_path(child_path) {
+        return None;
+    }
+    Some((workspace_id, child_path, query))
+}
+
 fn workspace_proxy_path(path: &str) -> Option<(&str, &str)> {
     let rest = path.strip_prefix("/api/workspaces/")?;
     let (workspace_id, child_path) = rest.split_once('/')?;
@@ -668,6 +680,21 @@ mod tests {
         assert!(APP_JS.contains("id=\"settings-edb-cache-manager\""));
         assert!(APP_JS.contains("edbCacheInitialized: state.edbCacheInitialized"));
         assert!(APP_JS.contains("state.edbCacheInitialized = workspace.edbCacheInitialized"));
+    }
+
+    #[test]
+    fn workspace_projection_proxy_preserves_query() {
+        let (workspace_id, child_path, query) = workspace_proxy_request(
+            "/api/workspaces/chat/ui-projections/main/range?start=0&end=5&revision=known",
+        )
+        .unwrap();
+        assert_eq!(workspace_id, "chat");
+        assert_eq!(child_path, "ui-projections/main/range");
+        assert_eq!(query, Some("start=0&end=5&revision=known"));
+        assert!(
+            workspace_proxy_request("/api/workspaces/chat/remote-control/status?private=true")
+                .is_none()
+        );
     }
 
     #[test]

@@ -431,6 +431,42 @@ describe("shared WebUI transcript reconciliation", () => {
     expect(after.bottomHeight).toBe(before.bottomHeight + 100);
   });
 
+  test("preserves the visible anchor while the resident projection range rebases", () => {
+    const subject = virtualHarness({ scrollTop: 450 });
+    const original = virtualItems(60);
+    subject.controller.update(original, { scopeKey: "main", force: true, following: false });
+    const anchor = subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-4");
+    expect(anchor.getBoundingClientRect().top).toBe(-50);
+
+    const prepended = [
+      ...Array.from({ length: 10 }, (_, index) => ({
+        key: `history-${index}`, revision: 1, estimate: 100, height: 100, kind: "message",
+      })),
+      ...original.slice(0, 50),
+    ];
+    subject.controller.update(prepended, { scopeKey: "main", force: true, following: false });
+    expect(subject.viewport.scrollTop).toBe(1_450);
+    expect(anchor.getBoundingClientRect().top).toBe(-50);
+    expect(subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-4")).toBe(anchor);
+    expect(subject.controller.inspect().retained).toBe(60);
+    expect(subject.controller.inspect().measurements).toBeLessThanOrEqual(60);
+
+    const appended = [
+      ...prepended.slice(10),
+      ...Array.from({ length: 10 }, (_, index) => ({
+        key: `future-${index}`, revision: 1, estimate: 100, height: 100, kind: "message",
+      })),
+    ];
+    subject.controller.update(appended, { scopeKey: "main", force: true, following: false });
+    expect(subject.viewport.scrollTop).toBe(450);
+    expect(anchor.getBoundingClientRect().top).toBe(-50);
+    expect(subject.controller.windowElement.children
+      .find((node) => node.dataset.messageKey === "message-4")).toBe(anchor);
+    expect(subject.controller.inspect().measurements).toBeLessThanOrEqual(60);
+  });
+
   test("keeps the authoritative shared core on the stable-DOM and gesture paths", () => {
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(source).toContain("MeTranscript.reconcileHtmlChildren(markdown, rendered)");

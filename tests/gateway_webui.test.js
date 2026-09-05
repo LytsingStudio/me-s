@@ -65,6 +65,13 @@ function loadRuntime(relative) {
       backgroundSyncCanRun: typeof backgroundSyncCanRun === "function" ? backgroundSyncCanRun : null,
       nextBackgroundWorkspace: typeof nextBackgroundWorkspace === "function" ? nextBackgroundWorkspace : null,
       applyBackgroundSyncState: typeof applyBackgroundSyncState === "function" ? applyBackgroundSyncState : null,
+      projectionStateRangeRequest: typeof projectionStateRangeRequest === "function" ? projectionStateRangeRequest : null,
+      projectionAdjacentRange: typeof projectionAdjacentRange === "function" ? projectionAdjacentRange : null,
+      projectionRangeDirectionForViewport: typeof projectionRangeDirectionForViewport === "function" ? projectionRangeDirectionForViewport : null,
+      projectionRangePath: typeof projectionRangePath === "function" ? projectionRangePath : null,
+      synchronizeProjectionBucket: typeof synchronizeProjectionBucket === "function" ? synchronizeProjectionBucket : null,
+      prepareSelectedEventRecovery: typeof prepareSelectedEventRecovery === "function" ? prepareSelectedEventRecovery : null,
+      bulkEventRecoveryActive: typeof bulkEventRecoveryActive === "function" ? bulkEventRecoveryActive : null,
       readWorkspaceDisclosure: typeof readWorkspaceDisclosure === "function" ? readWorkspaceDisclosure : null,
       persistWorkspaceDisclosure: typeof persistWorkspaceDisclosure === "function" ? persistWorkspaceDisclosure : null,
       workspaceExpanded: typeof workspaceExpanded === "function" ? workspaceExpanded : null,
@@ -131,6 +138,32 @@ function loadFrontendAdapter(relative) {
 
 function event(kind, id, value = {}) {
   return { [kind]: { id, timestamp_ms: id * 10, ...value } };
+}
+
+function uiProjectionState(agentId, revision, count, changedFrom = 0) {
+  return {
+    agent_id: agentId, edb_id: agentId.repeat(64).slice(0, 64), revision, count,
+    changed_from: changedFrom, source_event_count: count, source_mutation_revision: 0,
+    summary: { turn_state: null }, model: "model-a", effort: "high",
+    api_state: null, api_usage: null, turn_state: null, compact_activity: null,
+  };
+}
+
+function uiProjectionMessages(start, end) {
+  return Array.from({ length: end - start }, (_, offset) => {
+    const index = start + offset;
+    return {
+      kind: "notice", key: `message-${index}`, revision: index + 1,
+      content: `message ${index}`, timestamp: index,
+    };
+  });
+}
+
+function uiProjectionRange(agentId, revision, count, start, end) {
+  return {
+    agent_id: agentId, revision, count, start, end,
+    projections: uiProjectionMessages(start, end),
+  };
 }
 
 function visibleProjection(projection) {
@@ -818,11 +851,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
 
-  test("uses revision-bound generic UI projections by default without retaining raw Events", () => {
+  test("keeps only a bounded revision-bound projection range in the default frontend", () => {
     const runtime = loadRuntime("../src/webui/app.js");
     const cachedEvents = [event("UserPrompt", 1, { content: "cached raw" })];
     const meta = {
-      id: "main", edb_id: "a".repeat(64), event_count: 3, mutation_revision: 0,
+      id: "main", edb_id: "a".repeat(64), event_count: 1_000, mutation_revision: 0,
       prompt_submission_revision: 0, input_draft_revision: 0,
     };
     expect(runtime.usesUiProjection()).toBe(true);
@@ -831,60 +864,54 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }, { environment: { workspace: "/workspace" } });
     expect(store.events).toEqual([]);
     expect(store.needsReplay).toBe(false);
-    expect(store.projectionLoading).toBe(true);
+    expect(store.projectionLoading).toBe(false);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([0, 0]);
 
-    const firstMessage = {
-      kind: "user", key: "user-1", revision: 1, content: "hello", timestamp: 10,
-      eventId: 1, rewindable: true,
-    };
-    const secondMessage = {
-      kind: "assistant", key: "assistant-1", revision: 2, content: "one", timestamp: 20,
-    };
-    const projectionState = {
-      agent_id: "main", edb_id: meta.edb_id, revision: "revision-one",
-      source_event_count: 3, source_mutation_revision: 0, last_event_id: 3,
-      count: 2, changed_from: 0, summary: { turn_state: "Started" },
-      model: "model-a", effort: "high", api_state: "Streaming",
-      api_usage: { input_tokens: 10, output_tokens: 2, total_tokens: 12 },
-      turn_state: { state: "active", prompt_id: 1 },
-      workmap: runtime.emptyWorkMap(),
-      context: {
-        total: 12, values: { system: 3, compact: 0, memory: 0, user: 4, model: 5, tool: 0 },
-        compact_content: null, compact_analysis: null, memory_content: null,
-      },
-      system_prompt: { mode: "Default", content: null, event_id: null, changes: [] },
-      compact_activity: null,
-    };
-    runtime.installProjectionState(store, projectionState, {
-      agent_id: "main", revision: "revision-one", start: 0, end: 2, count: 2,
-      projections: [firstMessage, secondMessage],
-    });
+    const firstState = uiProjectionState("main", "revision-one", 1_000);
+    const initial = runtime.projectionStateRangeRequest(store, firstState, true, true);
+    expect(initial).toEqual({ start: 936, end: 1_000, retain: "end", direction: "tail" });
+    expect(runtime.projectionStateRangeRequest(store, firstState, false, true)).toBeNull();
+    expect(runtime.projectionRangePath("main", initial, firstState.revision))
+      .toBe("/api/ui-projections/main/range?start=936&end=1000&revision=revision-one");
+    runtime.installProjectionState(
+      store, firstState, uiProjectionRange("main", "revision-one", 1_000, 936, 1_000),
+    );
     expect(store.events).toEqual([]);
-    expect(store.projection.messages).toHaveLength(2);
+    expect(store.projection.messages).toHaveLength(64);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_000]);
+    expect(store.projection.messages[0]._projectionIndex).toBe(936);
+    expect(store.projection.messages[0]._localProjectionIndex).toBe(0);
     expect(store.projection.model).toBe("model-a");
-    expect(store.projection.turnState).toEqual({ state: "active", promptId: 1 });
-    expect(store.summary).toEqual({ turnState: "Started" });
-    expect(store.projectionChanges.transcriptFrom).toBe(0);
+    store.projectionChanges = null;
 
     const retained = store.projection.messages[0];
-    runtime.installProjectionState(store, {
-      ...projectionState, revision: "revision-two", changed_from: 1,
-      api_state: "Completed", turn_state: null,
-    }, {
-      agent_id: "main", revision: "revision-two", start: 1, end: 2, count: 2,
-      projections: [{ ...secondMessage, revision: 4, content: "two" }],
-    });
+    const secondState = uiProjectionState("main", "revision-two", 1_002, 990);
+    const changedSuffix = runtime.projectionStateRangeRequest(store, secondState, true, true);
+    expect(changedSuffix).toEqual({ start: 990, end: 1_002, retain: "end", direction: "sync" });
+    runtime.installProjectionState(store, secondState);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([936, 990]);
+    runtime.installProjectionState(
+      store, secondState, uiProjectionRange("main", "revision-two", 1_002, 990, 1_002),
+    );
     expect(store.projection.messages[0]).toBe(retained);
-    expect(store.projection.messages[1].content).toBe("two");
-    expect(store.projectionChanges.transcriptFrom).toBe(1);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_002]);
+    expect(store.projection.messages).toHaveLength(66);
+    expect(store.projection.messages.at(-1)._projectionIndex).toBe(1_001);
+    expect(store.projectionChanges.transcriptFrom).toBe(54);
 
-    runtime.installProjectionState(store, {
-      ...projectionState, revision: "revision-three", changed_from: null,
-      api_state: "Retrying", turn_state: null,
-    });
+    store.projectionChanges = null;
+    const thirdState = uiProjectionState("main", "revision-three", 1_002, null);
+    runtime.installProjectionState(store, thirdState);
     expect(store.projection.messages[0]).toBe(retained);
-    expect(store.projection.apiState).toBe("Retrying");
     expect(store.projectionChanges.transcript).toBe(false);
+
+    store.projectionChanges = null;
+    const backgroundState = uiProjectionState("main", "revision-four", 1_003, 1_002);
+    expect(runtime.projectionStateRangeRequest(store, backgroundState, false, true)).toBeNull();
+    runtime.installProjectionState(store, backgroundState);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_002]);
+    expect(store.projection.messages).toHaveLength(66);
+
     const bucket = runtime.emptyGatewayWorkspaceState();
     const drafts = bucket.drafts;
     const draftSync = bucket.draftSync;
@@ -900,7 +927,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(bucket.drafts).toBe(drafts);
     expect(bucket.draftSync).toBe(draftSync);
 
-
     runtime.state.rawEdbDecoding = true;
     expect(runtime.usesUiProjection()).toBe(false);
     const rawStore = runtime.createAgentStore(meta, {
@@ -909,6 +935,97 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(rawStore.events).toBe(cachedEvents);
     expect(rawStore.needsReplay).toBe(true);
     expect(rawStore.projectionLoading).toBe(false);
+  });
+
+  test("keeps raw EDB recovery from suppressing the first bounded projection render", () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const meta = {
+      id: "main", edb_id: "a".repeat(64), event_count: 1_000, mutation_revision: 0,
+      prompt_submission_revision: 0, input_draft_revision: 0,
+    };
+    runtime.state.workspaceId = "chat";
+    runtime.state.selectedAgent = "main";
+    runtime.state.snapshot = { environment: { workspace: "/workspace" }, agents: [meta] };
+    const store = runtime.createAgentStore(meta, null, runtime.state.snapshot);
+    runtime.state.stores.set("main", store);
+    expect(runtime.prepareSelectedEventRecovery(meta, null, true)).toBe(false);
+    expect(runtime.state.eventRecovery).toBeNull();
+
+    const projectionState = uiProjectionState("main", "revision-one", 1_000);
+    runtime.installProjectionState(
+      store, projectionState, uiProjectionRange("main", "revision-one", 1_000, 936, 1_000),
+    );
+    runtime.state.eventRecovery = runtime.createEventRecovery("main", 0, 1_000, 0);
+    expect(runtime.bulkEventRecoveryActive()).toBe(true);
+    const changes = runtime.advanceCurrentProjection();
+    expect(changes.transcript).toBe(true);
+    expect(store.projectionChanges).toBeNull();
+  });
+
+  test("evicts the far edge while browsing bounded projection ranges in both directions", () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const meta = {
+      id: "main", edb_id: "a".repeat(64), event_count: 1_000, mutation_revision: 0,
+      prompt_submission_revision: 0, input_draft_revision: 0,
+    };
+    const store = runtime.createAgentStore(meta, null, { environment: { workspace: "/workspace" } });
+    const projectionState = uiProjectionState("main", "revision-one", 1_000);
+    runtime.installProjectionState(
+      store, projectionState, uiProjectionRange("main", "revision-one", 1_000, 936, 1_000),
+    );
+    for (const start of [872, 808, 744, 680]) {
+      runtime.installProjectionState(
+        store, projectionState, uiProjectionRange("main", "revision-one", 1_000, start, start + 64), "start",
+      );
+      expect(store.projection.messages.length).toBeLessThanOrEqual(192);
+      expect(store.projection.messages.length).toBe(store.projectionEnd - store.projectionStart);
+    }
+    expect([store.projectionStart, store.projectionEnd]).toEqual([680, 872]);
+    expect(store.projection.messages[0].key).toBe("message-680");
+    expect(store.projection.messages.at(-1).key).toBe("message-871");
+
+    store.pendingPromptSubmission = { content: "new", afterEventId: 1 };
+    expect(runtime.projectionStateRangeRequest(store, projectionState, true, false))
+      .toEqual({ start: 936, end: 1_000, retain: "end", direction: "tail" });
+    store.pendingPromptSubmission = null;
+
+    for (const start of [872, 936]) {
+      runtime.installProjectionState(
+        store, projectionState, uiProjectionRange("main", "revision-one", 1_000, start, start + 64), "end",
+      );
+      expect(store.projection.messages.length).toBeLessThanOrEqual(192);
+    }
+    expect([store.projectionStart, store.projectionEnd]).toEqual([808, 1_000]);
+    expect(store.projection.messages[0]._projectionIndex).toBe(808);
+    expect(store.projection.messages.at(-1)._projectionIndex).toBe(999);
+    expect(runtime.projectionRangeDirectionForViewport(
+      store, { start: 0, end: 60, totalHeight: 8_000 }, false,
+    )).toEqual({ direction: "before", retain: "start" });
+  });
+
+  test("keeps inactive Workspace and unselected session projections metadata-only", async () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const workspace = runtime.emptyGatewayWorkspaceState();
+    workspace.snapshot = {
+      environment: { workspace: "/inactive" },
+      agents: [
+        { id: "one", edb_id: "1".repeat(64), prompt_submission_revision: 0, input_draft_revision: 0 },
+        { id: "two", edb_id: "2".repeat(64), prompt_submission_revision: 0, input_draft_revision: 0 },
+      ],
+    };
+    await runtime.synchronizeProjectionBucket(workspace, {
+      ui_projection: true,
+      projection_states: [
+        uiProjectionState("one", "one-revision", 500),
+        uiProjectionState("two", "two-revision", 700),
+      ],
+    }, "inactive", () => {});
+    expect(workspace.stores.get("one").projectionCount).toBe(500);
+    expect(workspace.stores.get("two").projectionCount).toBe(700);
+    expect(workspace.stores.get("one").projection.messages).toEqual([]);
+    expect(workspace.stores.get("two").projection.messages).toEqual([]);
+    expect(workspace.stores.get("one").projectionLoading).toBe(false);
+    expect(workspace.stores.get("two").projectionLoading).toBe(false);
   });
   test("stores lightweight Gateway session metadata before raw EDB hydration", () => {
     const gateway = loadRuntime("../src/webui/app.js");
