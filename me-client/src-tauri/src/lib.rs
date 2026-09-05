@@ -57,6 +57,7 @@ struct AppState {
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientBootstrap {
+    client_version: &'static str,
     endpoint: Option<String>,
     device_preferences: BTreeMap<String, String>,
     remembered_devices: Vec<RememberedDeviceStatus>,
@@ -661,6 +662,7 @@ async fn client_bootstrap(state: State<'_, AppState>) -> Result<ClientBootstrap,
         .collect();
     let local_device = discover_local_device().await;
     Ok(ClientBootstrap {
+        client_version: env!("CARGO_PKG_VERSION"),
         endpoint,
         device_preferences,
         remembered_devices,

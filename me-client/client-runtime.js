@@ -7,6 +7,7 @@
   const browserFetch = globalThis.fetch.bind(globalThis);
   const browserSendBeacon = globalThis.navigator?.sendBeacon?.bind(globalThis.navigator) || null;
   let endpoint = "";
+  let clientVersion = "";
   let activeEdbCache = null;
   let windowReadyPromise = null;
   let titleBarTitleElement = null;
@@ -554,12 +555,14 @@
       newSessionLabel: "新建聊天",
     }),
     get endpoint() { return endpoint; },
+    get clientVersion() { return clientVersion; },
     devicePreferences,
     rememberedDevices,
     async initialize() {
       document.documentElement.classList.add("me-client");
       installClientTitleBar();
       const bootstrap = await invoke("client_bootstrap");
+      clientVersion = String(bootstrap.clientVersion || "");
       loadDevicePreferences(bootstrap.devicePreferences);
       loadRememberedDevices(bootstrap.rememberedDevices);
       endpoint = String(bootstrap.endpoint || "");

@@ -2237,6 +2237,7 @@ fn auth_status_response(request: &Request, auth: &WebSessionAuth) -> Result<Http
         StatusCode(200),
         &json!({
             "ok": true,
+            "product_version": env!("CARGO_PKG_VERSION"),
             "required": auth.required(),
             "authenticated": auth.authorized_any(request_session_tokens(
                 request,
@@ -2473,6 +2474,17 @@ mod tests {
         ui_backend::{UiAgentSnapshot, UiApiActivity, UiEnvironment, workspace_ui_ports},
         workspace::Workspace,
     };
+
+    #[test]
+    fn auth_status_reports_running_product_version() {
+        let request = tiny_http::TestRequest::new().into();
+        let auth = WebSessionAuth::new("me_webui_session", 38199, Some("test")).unwrap();
+        let response = auth_status_response(&request, &auth).unwrap();
+        let payload: serde_json::Value = serde_json::from_reader(response.into_reader()).unwrap();
+        assert_eq!(payload["product_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["required"], true);
+        assert_eq!(payload["authenticated"], false);
+    }
 
     #[derive(Clone)]
     struct SnapshotBackend(UiSnapshot);

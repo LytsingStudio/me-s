@@ -35,11 +35,11 @@ function loadToolPresenters() {
   return globalThis.MeToolPresenters;
 }
 
-function loadRuntime(relative) {
+function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
-  const factory = new Function("document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", `${source.slice(0, eventBindings)}
+  const factory = new Function("globalThis", "document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       requestSelectedProjectionRange,
       configureRangeTest(request) {
@@ -66,6 +66,8 @@ function loadRuntime(relative) {
       advanceCurrentProjection: typeof advanceCurrentProjection === "function" ? advanceCurrentProjection : null,
       normalizeWindowBorderStyle: typeof normalizeWindowBorderStyle === "function" ? normalizeWindowBorderStyle : null,
       localPreferenceSettingsHtml: typeof localPreferenceSettingsHtml === "function" ? localPreferenceSettingsHtml : null,
+      bindLocalPreferenceSettings,
+      setSettingsRequest(request) { api = request; },
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
       backgroundSyncCanRun: typeof backgroundSyncCanRun === "function" ? backgroundSyncCanRun : null,
       nextBackgroundWorkspace: typeof nextBackgroundWorkspace === "function" ? nextBackgroundWorkspace : null,
@@ -113,6 +115,7 @@ function loadRuntime(relative) {
       elements: typeof elements === "object" ? elements : null };
   `);
   const runtime = factory(
+    Object.assign(Object.create(globalThis), { MeFrontendRuntime: runtimeAdapter }),
     {
       querySelector: () => null, cookie: "", location: { protocol: "http:", port: "38199" },
       documentElement: { classList: { toggle() {} }, dataset: {} },
@@ -1153,6 +1156,73 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     gateway.renderTranscript(true);
     expect(transcriptContent.innerHTML).toContain("/work");
     expect(transcriptContent.innerHTML).not.toContain("/chat");
+  });
+
+  test("shows each browser service version in the shared settings", async () => {
+    for (const multipleWorkspaces of [false, true]) {
+      const runtime = loadRuntime("../src/webui/app.js", {
+        ...globalThis.MeFrontendRuntime, capabilities: { multipleWorkspaces },
+      });
+      const html = runtime.localPreferenceSettingsHtml();
+      expect(html).toContain(`<dt>${multipleWorkspaces ? "ME Gateway" : "ME-S"}</dt>`);
+      expect(html).not.toContain("客户端版本");
+      expect(html).toContain("正在获取…");
+      const node = { textContent: "正在获取…" };
+      runtime.setSettingsRequest(async (path) => {
+        expect(path).toBe("/api/auth/status");
+        return { product_version: "0.1.80", authenticated: true };
+      });
+      await runtime.bindLocalPreferenceSettings({
+        querySelector: (selector) => selector === "[data-service-version]" ? node : null,
+      });
+      expect(node.textContent).toBe("0.1.80");
+    }
+  });
+
+  test("keeps client and remote versions separate without rebuilding settings", async () => {
+    const runtime = loadRuntime("../src/webui/app.js", {
+      ...globalThis.MeFrontendRuntime, clientVersion: "0.1.89",
+      capabilities: { multipleWorkspaces: true, targetConfiguration: true },
+    });
+    runtime.state.authenticated = false;
+    expect(runtime.localPreferenceSettingsHtml()).toContain("<dt>客户端版本</dt><dd>0.1.89</dd>");
+    expect(runtime.localPreferenceSettingsHtml()).toContain("远端服务版本");
+    expect(runtime.localPreferenceSettingsHtml()).toContain("未连接");
+    let resolve;
+    let requests = 0;
+    runtime.setSettingsRequest(() => {
+      requests += 1;
+      return new Promise((done) => { resolve = done; });
+    });
+    const node = { textContent: "未连接" };
+    const modelInput = { value: "unsaved model" };
+    const container = {
+      querySelector: (selector) => selector === "[data-service-version]" ? node : null,
+      set innerHTML(_value) { throw new Error("must not rebuild settings"); },
+    };
+    await runtime.bindLocalPreferenceSettings(container);
+    expect(requests).toBe(0);
+    expect(node.textContent).toBe("未连接");
+    runtime.state.authenticated = true;
+    const pending = runtime.bindLocalPreferenceSettings(container);
+    modelInput.value = "edited while loading";
+    resolve({ product_version: "0.1.80", authenticated: true });
+    await pending;
+    expect(node.textContent).toBe("0.1.80");
+    expect(modelInput.value).toBe("edited while loading");
+    expect(runtime.localPreferenceSettingsHtml()).toContain("<dt>客户端版本</dt><dd>0.1.89</dd>");
+
+    for (const [response, expected] of [
+      [{ authenticated: true }, "未知版本"],
+      [{ authenticated: false, product_version: "0.1.80" }, "未连接"],
+    ]) {
+      runtime.setSettingsRequest(async () => response);
+      await runtime.bindLocalPreferenceSettings(container);
+      expect(node.textContent).toBe(expected);
+    }
+    runtime.setSettingsRequest(async () => { throw new Error("offline"); });
+    await runtime.bindLocalPreferenceSettings(container);
+    expect(node.textContent).toBe("暂时无法获取");
   });
 
   test("renders classic authenticated settings and desktop-only local preferences", () => {

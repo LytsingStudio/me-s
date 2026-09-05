@@ -32,6 +32,7 @@ function loadClientRuntime({ platform = "", userAgent = "" } = {}) {
         async invoke(command, payload) {
           calls.push({ command, payload });
           if (command === "client_bootstrap") return {
+            clientVersion: "0.1.89",
             endpoint: "http://127.0.0.1:38201",
             devicePreferences: {
               "me-theme": "ocean",
@@ -138,6 +139,8 @@ describe("ME Client native adapter", () => {
       endpoint: "http://127.0.0.1:38201",
       localDevice: { endpoint: "http://127.0.0.1:38200", online: true, requiresPassword: true },
     });
+    expect(runtime.clientVersion).toBe("0.1.89");
+    expect(Object.getOwnPropertyDescriptor(runtime, "clientVersion").set).toBeUndefined();
     expect(await runtime.configureTarget("https://gateway.example")).toEqual({ endpoint: "https://gateway.example" });
     expect(runtime.apiPath("/api/ui-projections/main/state", "workspace-one"))
       .toBe("/api/workspaces/workspace-one/ui-projections/main/state");

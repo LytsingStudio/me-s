@@ -5883,6 +5883,10 @@ function localPreferenceSettingsHtml() {
           <option value="theme" ${state.windowBorderStyle === WINDOW_BORDER_THEME ? "selected" : ""}>主题</option>
         </select>
       </label>` : "";
+  const isClient = runtimeCapabilities.targetConfiguration;
+  const clientVersion = isClient ? `<div class="settings-version-row"><dt>客户端版本</dt><dd>${escapeHtml(frontendRuntime.clientVersion || "未知版本")}</dd></div>` : "";
+  const serviceLabel = isClient ? "远端服务版本" : runtimeCapabilities.multipleWorkspaces ? "ME Gateway" : "ME-S";
+  const serviceVersion = isClient && !state.authenticated ? "未连接" : "正在获取…";
   return `<section class="settings-section settings-local-section">
     <header class="settings-section-header">
       <div class="settings-section-heading"><h3>本机偏好</h3><p>仅保存在当前设备，并会立即生效。</p></div>
@@ -5894,14 +5898,31 @@ function localPreferenceSettingsHtml() {
       </label>
       ${borderStyle}
     </div>
+  </section>
+  <section class="settings-section settings-version-section">
+    <header class="settings-section-header"><div class="settings-section-heading"><h3>版本</h3></div></header>
+    <dl class="settings-version-list">
+      ${clientVersion}
+      <div class="settings-version-row"><dt>${serviceLabel}</dt><dd data-service-version aria-live="polite">${serviceVersion}</dd></div>
+    </dl>
   </section>`;
 }
 
-function bindLocalPreferenceSettings(container = elements.modalContent) {
+async function bindLocalPreferenceSettings(container = elements.modalContent) {
   const borderStyle = container.querySelector('[data-local-preference="window-border-style"]');
   borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));
   const rawEdbDecoding = container.querySelector('[data-local-preference="raw-edb-decoding"]');
   rawEdbDecoding?.addEventListener("change", () => setRawEdbDecoding(rawEdbDecoding.checked));
+  const serviceVersion = container.querySelector("[data-service-version]");
+  if (!serviceVersion || (runtimeCapabilities.targetConfiguration && !state.authenticated)) return;
+  try {
+    const status = await api("/api/auth/status");
+    serviceVersion.textContent = runtimeCapabilities.targetConfiguration && (!state.authenticated || !status.authenticated)
+      ? "未连接"
+      : typeof status.product_version === "string" && status.product_version.trim() ? status.product_version : "未知版本";
+  } catch {
+    serviceVersion.textContent = "暂时无法获取";
+  }
 }
 
 function openLocalSettings() {

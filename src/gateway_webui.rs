@@ -457,6 +457,7 @@ fn auth_status(request: &Request, auth: &WebSessionAuth) -> Result<HttpResponse>
         StatusCode(200),
         &json!({
             "ok": true,
+            "product_version": env!("CARGO_PKG_VERSION"),
             "required": auth.required(),
             "authenticated": auth.authorized_any(request_session_tokens(
                 request,
@@ -664,6 +665,17 @@ fn no_store() -> Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auth_status_reports_running_product_version() {
+        let request = tiny_http::TestRequest::new().into();
+        let auth = WebSessionAuth::new("me_gateway_session", 38199, Some("test")).unwrap();
+        let response = auth_status(&request, &auth).unwrap();
+        let payload: serde_json::Value = serde_json::from_reader(response.into_reader()).unwrap();
+        assert_eq!(payload["product_version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(payload["required"], true);
+        assert_eq!(payload["authenticated"], false);
+    }
 
     #[test]
     fn embedded_gateway_webui_loads_and_manages_the_shared_raw_edb_cache() {

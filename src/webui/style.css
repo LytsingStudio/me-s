@@ -886,6 +886,10 @@ button { color: inherit; }
 .settings-section-heading h3 { margin: 0; color: var(--text); font-size: 16px; }
 .settings-section-heading p { margin: 5px 0 0; color: var(--dim); font-size: 12px; line-height: 1.5; }
 .settings-editor .settings-section-action { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
+.settings-version-list { margin: 0; border-top: 1px solid var(--border); }
+.settings-version-row { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+.settings-version-row dt { color: var(--muted); }
+.settings-version-row dd { margin: 0; color: var(--text); text-align: right; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
 .settings-section-action svg { width: 15px; height: 15px; fill: none; stroke: currentColor; stroke-width: 1.9; stroke-linecap: round; }
 .settings-section-content { display: grid; gap: 14px; }
 .settings-default-model { display: grid !important; grid-template-columns: minmax(0, 1fr) minmax(220px, 42%); align-items: center; gap: 16px !important; padding: 12px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
