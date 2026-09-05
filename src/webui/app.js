@@ -1279,26 +1279,22 @@ function projectionTailRange(count) {
   };
 }
 
-function projectionStateRangeRequest(store, projectionState, selected, following = false) {
+function projectionStateRangeRequest(store, projectionState, selected, following = Boolean(store.pendingPromptSubmission)) {
   if (!selected) return null;
   const count = projectionCountForState(projectionState);
   if (count === 0) return null;
   const changedFrom = projectionChangedFrom(projectionState, count);
   const previous = projectionWindow(store);
-  if (previous.revision === null || previous.messages.length === 0) {
-    return projectionTailRange(count);
-  }
-  if (store.pendingPromptSubmission && previous.end < count) {
-    return projectionTailRange(count);
-  }
   const atTail = previous.end === previous.count;
-  if (previous.revision === projectionState.revision) {
-    return following && previous.end < count ? projectionTailRange(count) : null;
+  if (previous.revision === null || previous.messages.length === 0 || previous.start >= count
+      || (following && !atTail && previous.end < count)) {
+    return projectionTailRange(count);
   }
+  if (previous.revision === projectionState.revision) return null;
   if (changedFrom === null) {
-    if (previous.start >= count) return projectionTailRange(count);
-    return following && previous.end < count ? projectionTailRange(count) : null;
+    return previous.end > count ? projectionTailRange(count) : null;
   }
+  // Keep the complete bounded suffix, even while following or confirming a send.
   if (atTail) {
     const suffixStart = Math.min(changedFrom, count);
     if (suffixStart >= previous.start && count - suffixStart <= PROJECTION_RANGE_LIMIT) {
@@ -1315,7 +1311,7 @@ function projectionStateRangeRequest(store, projectionState, selected, following
   const end = Math.min(count, start + length);
   if (end <= start) return projectionTailRange(count);
   return {
-    start: changedFrom > start && changedFrom < end ? changedFrom : start,
+    start: Math.min(end, Math.max(start, changedFrom)),
     end,
     retain: "start",
     direction: "sync",
@@ -1389,7 +1385,7 @@ function installProjectionState(store, projectionState, range = null, retain = "
   const revisionChanged = previousRevision !== projectionState.revision;
   // Never advance the displayed revision before its replacement messages are ready.
   if (!range && previousMessages.length && count > 0
-      && projectionStateRangeRequest(store, projectionState, true)) return false;
+      && projectionStateRangeRequest(store, projectionState, true, false)) return false;
   let messages = previousMessages;
   let start = previous.start;
   let end = previous.end;
@@ -1529,7 +1525,7 @@ function projectionFollowing() {
   try { return Boolean(transcriptBottomFollower.isFollowing()); } catch (_) { return true; }
 }
 
-async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft) {
+async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft, followTail = null) {
   if (!payload.ui_projection) throw new Error("同步响应未提供会话内容");
   const states = new Map((payload.projection_states || []).map((entry) => [entry.agent_id, entry]));
   const changes = [];
@@ -1547,7 +1543,10 @@ async function synchronizeProjectionBucket(bucket, payload, workspaceId, observe
     const loadingBefore = Boolean(store.projectionLoading);
     const summaryBefore = JSON.stringify(store.summary);
     const selected = bucket === state && meta.id === state.selectedAgent;
-    const request = projectionStateRangeRequest(store, projectionState, selected, selected && projectionFollowing());
+    const request = projectionStateRangeRequest(
+      store, projectionState, selected,
+      followTail ?? (selected && (projectionFollowing() || Boolean(store.pendingPromptSubmission))),
+    );
     const range = selected ? projectionState.range : null;
     if (range && request && (range.start > request.start || range.end < request.end)) {
       throw new Error("会话内容响应不完整");
@@ -1695,7 +1694,6 @@ async function applyBackgroundSyncState(workspace, payload, workspaceId, signal 
     payload,
     workspaceId,
     (meta, store) => observeBackgroundInputDraft(workspace, meta, store),
-    signal,
   );
   workspace.edbCacheInitialized = true;
   workspace.cacheValidated = true;
@@ -2363,6 +2361,9 @@ async function requestHttpSync() {
   const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
     ? `${state.selectedAgent}:${state.view.sessionId}` : null;
   const progressBefore = httpSyncProgressSignature();
+  const projectionStore = usesUiProjection() ? state.stores.get(state.selectedAgent) : null;
+  const projectionBefore = projectionStore?.projection;
+  const followTail = projectionFollowing() || Boolean(projectionStore?.pendingPromptSubmission);
   state.syncInFlight = true;
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   state.syncController = controller;
@@ -2380,7 +2381,7 @@ async function requestHttpSync() {
             id, projection_revision: store.projectionRevision,
             ...(id === state.selectedAgent ? { projection_window: {
               start: store.projectionStart, end: store.projectionEnd, count: store.projectionCount,
-              follow_tail: projectionFollowing() || Boolean(store.pendingPromptSubmission),
+              follow_tail: followTail,
             } } : {}),
           }
           : {
@@ -2398,6 +2399,12 @@ async function requestHttpSync() {
       }),
     }, state.workspaceId);
     if (generation !== state.syncGeneration || state.pageClosing) return;
+    // History browsing may install a different window while this request is in flight.
+    if (projectionStore && (state.stores.get(state.selectedAgent) !== projectionStore
+        || projectionStore.projection !== projectionBefore)) {
+      scheduleHttpSync(0);
+      return;
+    }
     if (!usesUiProjection() && message.cache_metadata_only) {
       await hydrateEdbCache(message.snapshot);
       if (generation !== state.syncGeneration || state.pageClosing) return;
@@ -2406,7 +2413,7 @@ async function requestHttpSync() {
       return;
     }
     try {
-      await applySyncState(message, controller?.signal);
+      await applySyncState(message, controller?.signal, followTail);
     } catch (error) {
       if (generation !== state.syncGeneration || state.pageClosing) return;
       if (error.status === 401 || error.name === "AbortError") throw error;
@@ -2422,8 +2429,8 @@ async function requestHttpSync() {
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
     scheduleHttpSync((message.more_events && madeProgress) || (message.selected_agent ?? null) !== state.selectedAgent ? 0 : delay);
   } catch (error) {
-    state.activeCatchUpPending = true;
     if (generation !== state.syncGeneration || state.pageClosing) return;
+    state.activeCatchUpPending = true;
     if (error.status === 401) return showLogin("登录已失效，请重新登录");
     if (error.status === 409 && error.code === "stale_revision") {
       scheduleHttpSync(0);
@@ -2450,7 +2457,7 @@ function requestHttpSyncNow() {
   if (!state.syncInFlight && connectionCanPoll()) void requestHttpSync();
 }
 
-async function applySyncState(payload, signal = null) {
+async function applySyncState(payload, signal = null, followTail = null) {
   if (!usesUiProjection()) return applyRawSyncState(payload);
   const phaseBefore = state.connectionPhase;
   const generation = state.syncGeneration;
@@ -2464,7 +2471,7 @@ async function applySyncState(payload, signal = null) {
     !== snapshotPresentationSignature(state.snapshot);
   const selectionChanged = reconcileAgents();
   const changes = await synchronizeProjectionBucket(
-    state, payload, state.workspaceId, observeInputDraft, signal,
+    state, payload, state.workspaceId, observeInputDraft, followTail,
   );
   if (generation !== state.syncGeneration || signal?.aborted || !usesUiProjection()) return;
   state.edbCacheInitialized = true;

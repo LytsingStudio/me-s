@@ -827,6 +827,67 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.agentLoadingState("w-one", "pending")).toEqual({ loading: true, percent: null });
   });
 
+  test("shares Rust's bounded sync window contract and advances after accumulated updates", async () => {
+    const cases = JSON.parse(readFileSync(join(import.meta.dir, "fixtures/ui_projection_windows.json"), "utf8"));
+    for (const entry of cases) {
+      const r = loadRuntime("../src/webui/app.js");
+      r.state.workspaceId = "chat"; r.state.selectedAgent = "main";
+      r.state.snapshot = { agents: [{ id: "main" }] };
+      const store = r.createAgentStore({ id: "main" });
+      r.state.stores.set("main", store);
+      const [start, end, count] = entry.window;
+      if (entry.known !== false) {
+        r.installProjectionState(store, uiProjectionState("main", "old", count),
+          uiProjectionRange("main", "old", count, start, end));
+      }
+      const next = uiProjectionState("main", entry.same ? "old" : "new", entry.count, entry.changed);
+      const request = r.projectionStateRangeRequest(store, next, true, entry.follow);
+      expect(request ? [request.start, request.end] : null).toEqual(entry.range);
+      if (entry.range) {
+        next.range = uiProjectionRange("main", next.revision, next.count, ...entry.range);
+        next.range.projections.forEach((part) => { part.content = "updated"; part.revision += 2000; });
+      }
+      // A draft acknowledgement or gesture after sending cannot reinterpret this response.
+      store.pendingPromptSubmission = { content: "pending" };
+      await r.synchronizeProjectionBucket(r.state, {
+        ui_projection: true, projection_states: [next],
+      }, "chat", () => {}, entry.follow);
+      expect(store.projectionRevision).toBe(next.revision);
+      expect(store.projectionLoading).toBe(false);
+      expect(store.projection.messages.length).toBeLessThanOrEqual(192);
+      if (next.range?.projections.length) expect(store.projection.messages.at(-1).content).toBe("updated");
+    }
+  });
+
+  test("rejects malformed range identity, version, bounds and bodies without advancing", async () => {
+    const r = loadRuntime("../src/webui/app.js");
+    r.state.workspaceId = "chat"; r.state.selectedAgent = "main";
+    r.state.snapshot = { agents: [{ id: "main" }] };
+    const store = r.createAgentStore({ id: "main" });
+    r.state.stores.set("main", store);
+    r.installProjectionState(store, uiProjectionState("main", "old", 100),
+      uiProjectionRange("main", "old", 100, 0, 100));
+    const previous = store.projection;
+    const next = uiProjectionState("main", "new", 102);
+    const range = uiProjectionRange("main", "new", 102, 0, 102);
+    for (const patch of [
+      { agent_id: "other" }, { revision: "stale" }, { count: 103 },
+      { start: -1 }, { start: 0.5 }, { end: 103 }, { projections: [] },
+      { start: 38, projections: range.projections.slice(38) },
+    ]) {
+      await expect(r.synchronizeProjectionBucket(r.state, {
+        ui_projection: true, projection_states: [{ ...next, range: { ...range, ...patch } }],
+      }, "chat", () => {}, true)).rejects.toThrow();
+      expect(store.projection).toBe(previous);
+      expect(store.projectionRevision).toBe("old");
+    }
+    await r.synchronizeProjectionBucket(r.state, {
+      ui_projection: true, projection_states: [{ ...next, range }],
+    }, "chat", () => {}, true);
+    expect(store.projectionRevision).toBe("new");
+    expect(store.projectionLoading).toBe(false);
+  });
+
   test("commits progressive streaming bodies atomically without clearing prior display", async () => {
     const r = loadRuntime("../src/webui/app.js");
     r.state.workspaceId = "chat";
@@ -1057,7 +1118,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(store.projection.messages.at(-1).key).toBe("message-871");
 
     store.pendingPromptSubmission = { content: "new", afterEventId: 1 };
-    expect(runtime.projectionStateRangeRequest(store, projectionState, true, false))
+    expect(runtime.projectionStateRangeRequest(store, projectionState, true))
       .toEqual({ start: 936, end: 1_000, retain: "end", direction: "tail" });
     store.pendingPromptSubmission = null;
 

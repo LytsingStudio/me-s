@@ -114,6 +114,7 @@ describe("nonblocking WebUI connection", () => {
 
 function syncHarness() {
   let resolveRequest, resolveApply;
+  const bodies = [], appliedFollowing = [];
   let calls = 0;
   const schedules = [];
   const logins = [];
@@ -123,6 +124,7 @@ function syncHarness() {
     snapshotInitialized: false, apiActivity: {}, connectionPhase: "connected",
   };
   const factory = new Function("state", "api", "applySyncState", "scheduleHttpSync", "showLogin", `
+    const projectionFollowing = () => state.following;
     const HTTP_SYNC_TIMEOUT_MS = 15000, HTTP_SYNC_ACTIVE_MS = 250, HTTP_SYNC_IDLE_MS = 1000;
     const httpSyncProgressSignature = () => "cursor";
     const usesUiProjection = () => true;
@@ -134,10 +136,16 @@ function syncHarness() {
     return requestHttpSync;
   `);
   const request = factory(state,
-    () => { calls++; return new Promise((resolve, reject) => { resolveRequest = { resolve, reject }; }); },
-    () => new Promise((resolve) => { resolveApply = resolve; }),
+    (_path, options) => {
+      calls++; bodies.push(JSON.parse(options.body));
+      return new Promise((resolve, reject) => { resolveRequest = { resolve, reject }; });
+    },
+    (_message, _signal, followTail) => {
+      appliedFollowing.push(followTail);
+      return new Promise((resolve) => { resolveApply = resolve; });
+    },
     (delay) => schedules.push(delay), (message) => logins.push(message));
-  return { state, request, schedules, logins, calls: () => calls,
+  return { state, request, schedules, logins, bodies, appliedFollowing, calls: () => calls,
     response(value) { resolveRequest.resolve(value); }, fail(error) { resolveRequest.reject(error); },
     applied() { resolveApply(); },
   };
@@ -171,6 +179,58 @@ describe("serialized projection synchronization", () => {
     expect(r.state.syncInFlight).toBe(true);
     expect(r.state.syncController).toBe(newer);
     expect(r.schedules).toEqual([]);
+  });
+
+  test("a late failure cannot mark a replacement connection as catching up", async () => {
+    const r = syncHarness();
+    const pending = r.request();
+    r.state.syncGeneration++;
+    r.state.activeCatchUpPending = false;
+    r.fail(Object.assign(new Error("late abort"), { name: "AbortError" }));
+    await pending;
+    expect(r.state.activeCatchUpPending).toBe(false);
+    expect(r.schedules).toEqual([]);
+    expect(r.logins).toEqual([]);
+  });
+
+  test("discards a sync response if history browsing installed a newer window", async () => {
+    for (const replaceStore of [false, true]) {
+      const r = syncHarness();
+      const store = { projection: {}, projectionStart: 936, projectionEnd: 1000, projectionCount: 1000 };
+      r.state.stores.set("main", store);
+      const pending = r.request();
+      if (replaceStore) r.state.stores.set("main", { ...store });
+      else store.projection = { messages: ["new reading window"] };
+      r.response({ selected_agent: "main" });
+      await pending;
+      expect(r.appliedFollowing).toEqual([]);
+      expect(r.schedules).toEqual([0]);
+      expect(r.state.syncInFlight).toBe(false);
+      const next = r.request();
+      r.response({ selected_agent: "main" });
+      await Promise.resolve();
+      r.applied();
+      await next;
+      expect(r.appliedFollowing).toHaveLength(1);
+    }
+  });
+
+  test("applies the follow flag sent with the request, not a later gesture or pending send", async () => {
+    for (const follow of [false, true]) {
+      const r = syncHarness();
+      const store = { projection: {}, projectionStart: 40, projectionEnd: 104, projectionCount: 300 };
+      r.state.stores.set("main", store);
+      r.state.following = follow;
+      const pending = r.request();
+      r.state.following = !follow;
+      store.pendingPromptSubmission = !follow ? {} : null;
+      r.response({ selected_agent: "main" });
+      await Promise.resolve();
+      expect(r.bodies[0].agents[0].projection_window.follow_tail).toBe(follow);
+      expect(r.appliedFollowing).toEqual([follow]);
+      r.applied();
+      await pending;
+    }
   });
 
   test("real authentication expiry still returns to login", async () => {

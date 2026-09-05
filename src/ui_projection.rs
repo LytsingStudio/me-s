@@ -83,7 +83,7 @@ impl UiProjectionWindow {
         if known.is_none()
             || self.start == self.end
             || self.start >= count
-            || (self.follow_tail && self.end < count)
+            || (self.follow_tail && self.end != self.count && self.end < count)
         {
             return tail();
         }
@@ -93,6 +93,8 @@ impl UiProjectionWindow {
         let Some(changed) = state.changed_from else {
             return if self.end > count { tail() } else { None };
         };
+        // An existing tail window uses the same bounded suffix contract as the frontend.
+        // Following must not replace that suffix with a shorter tail when count grows.
         if self.end == self.count {
             let start = changed.min(count);
             return if start >= self.start && count - start <= 192 {
@@ -1995,6 +1997,111 @@ mod tests {
         state.count = 300;
         window.end = usize::MAX;
         assert_eq!(window.range(&state, Some("old")), Some((236, 300)));
+    }
+
+    #[test]
+    fn sync_windows_match_shared_frontend_contract() {
+        let mut edb = EventDataBase::new();
+        edb.append_user_prompt("history").unwrap();
+        let agent = agent(edb.events().to_vec(), 0);
+        let store = UiProjectionStore::new(&agent, None).unwrap();
+        let mut state = store.state(&agent, None);
+        let cases: Value =
+            serde_json::from_str(include_str!("../tests/fixtures/ui_projection_windows.json"))
+                .unwrap();
+        for case in cases.as_array().unwrap() {
+            let bounds: [usize; 3] = serde_json::from_value(case["window"].clone()).unwrap();
+            let window = UiProjectionWindow {
+                start: bounds[0],
+                end: bounds[1],
+                count: bounds[2],
+                follow_tail: case["follow"].as_bool().unwrap(),
+            };
+            state.count = case["count"].as_u64().unwrap() as usize;
+            state.changed_from = case["changed"].as_u64().map(|value| value as usize);
+            let known = if case["known"] == false {
+                None
+            } else if case["same"] == true {
+                Some(state.revision.as_str())
+            } else {
+                Some("old")
+            };
+            let expected: Option<(usize, usize)> =
+                serde_json::from_value(case["range"].clone()).unwrap();
+            assert_eq!(window.range(&state, known), expected, "{}", case["name"]);
+        }
+    }
+
+    #[test]
+    fn sync_retry_rebuild_and_completion_keep_the_entire_changed_suffix() {
+        for failed_text in [false, true] {
+            let mut edb = EventDataBase::new();
+            for _ in 0..99 {
+                edb.append_user_prompt("history").unwrap();
+            }
+            let prompt = edb.append_user_prompt("new user message").unwrap();
+            edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+                .unwrap();
+            let failed = edb.append_api_requesting(prompt).unwrap();
+            if failed_text {
+                edb.append_assist_response(prompt, "failed partial text", false)
+                    .unwrap();
+            }
+            let mut cache = UiProjectionCache::default();
+            let before = cache
+                .states(&snapshot(vec![agent(edb.events().to_vec(), 0)]), &[])
+                .unwrap()
+                .remove(0);
+            let cursor = UiProjectionCursor {
+                agent_id: "main".into(),
+                revision: Some(before.revision),
+                window: Some(UiProjectionWindow {
+                    start: 0,
+                    end: before.count,
+                    count: before.count,
+                    follow_tail: true,
+                }),
+            };
+            // record_api_failure publishes Error before Retrying, even without response text.
+            edb.append_api_state(failed, prompt, ApiState::Error, "transient failure")
+                .unwrap();
+            edb.append_api_retrying(failed, prompt, 1, 5, "transient failure")
+                .unwrap();
+            let retrying = cache
+                .states(
+                    &snapshot(vec![agent(edb.events().to_vec(), 0)]),
+                    &[cursor.clone()],
+                )
+                .unwrap()
+                .remove(0);
+            assert_eq!(retrying.changed_from, Some(0));
+            assert_eq!(retrying.range.as_ref().unwrap().start, 0);
+            let successful = edb.append_api_requesting(prompt).unwrap();
+            edb.append_assist_response(prompt, "final answer", true)
+                .unwrap();
+            edb.append_api_state(successful, prompt, ApiState::Completed, "")
+                .unwrap();
+            edb.append_agent_turn(prompt, prompt, AgentTurnState::Completed, "")
+                .unwrap();
+            let finished = cache
+                .states(&snapshot(vec![agent(edb.events().to_vec(), 0)]), &[cursor])
+                .unwrap()
+                .remove(0);
+            let range = finished.range.as_ref().unwrap();
+            assert_eq!((range.start, range.end), (0, finished.count));
+            assert_eq!(range.revision, finished.revision);
+            assert_eq!(range.projections.len(), finished.count);
+            assert!(
+                !serde_json::to_string(range)
+                    .unwrap()
+                    .contains("failed partial text")
+            );
+            assert!(
+                serde_json::to_string(range)
+                    .unwrap()
+                    .contains("final answer")
+            );
+        }
     }
 
     #[test]
