@@ -504,13 +504,6 @@
       });
   }
 
-  function waitForFirstPaint() {
-    if (typeof globalThis.requestAnimationFrame !== "function") return Promise.resolve();
-    return new Promise((resolve) => {
-      globalThis.requestAnimationFrame(() => globalThis.requestAnimationFrame(resolve));
-    });
-  }
-
   function windowReady() {
     installClientTitleBar();
     if (!windowReadyPromise) {
@@ -519,9 +512,7 @@
       const reveal = clientPlatform() === "ios"
         ? Promise.resolve({ maximized: false, fullscreen: false })
         : refreshWindowState().then(() => invoke("client_window_action", { action: "show" }));
-      windowReadyPromise = reveal
-        .then(applyWindowState)
-        .then((state) => waitForFirstPaint().then(() => state));
+      windowReadyPromise = reveal.then(applyWindowState);
     }
     return windowReadyPromise;
   }

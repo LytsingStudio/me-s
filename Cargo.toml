@@ -1,6 +1,6 @@
 [package]
 name = "me-s"
-version = "0.1.89"
+version = "0.1.90"
 edition = "2024"
 autobins = false
 description = "A lightweight local agent runtime optimized for long-running work"

@@ -405,6 +405,7 @@ describe("WebUI authoritative input draft synchronization", () => {
         ok: true, receipt: { accepted: true, input_draft_revision: 1 },
       })),
     });
+    runtime.state.authenticated = true;
     runtime.state.connected = true;
     runtime.state.connectionPhase = "connected";
     runtime.state.stores.set("main", { inputDraftRevision: 0 });
@@ -445,6 +446,7 @@ describe("WebUI authoritative input draft synchronization", () => {
         }));
       },
     });
+    runtime.state.authenticated = true;
     runtime.state.connected = true;
     runtime.state.connectionPhase = "connected";
     runtime.state.stores.set("main", { inputDraftRevision: 0 });
@@ -477,6 +479,7 @@ describe("WebUI authoritative input draft synchronization", () => {
         throw new Error(`unexpected request: ${path}`);
       },
     });
+    runtime.state.authenticated = true;
     runtime.state.connected = true;
     runtime.state.connectionPhase = "connected";
     runtime.state.stores.set("main", { inputDraftRevision: 4, events: [], mutationRevision: 0 });

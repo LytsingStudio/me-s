@@ -528,7 +528,7 @@ function setRawEdbDecoding(enabled) {
   state.pendingRender = emptyRenderRequest();
   renderAll();
   resetConnectionForInitialSync();
-  if (state.workspaceId && (!state.authRequired || state.authenticated)) startHttpPolling();
+  if (state.workspaceId && state.authenticated) startHttpPolling();
 }
 
 function sendShortcutHint() {
@@ -1018,7 +1018,7 @@ function backgroundSyncRequestBody(workspace) {
 function backgroundSyncCanRun() {
   return !state.pageClosing
     && !state.startupMetadataPending
-    && (!state.authRequired || state.authenticated)
+    && state.authenticated
     && state.connectionPhase === "connected"
     && !state.activeCatchUpPending;
 }
@@ -1963,11 +1963,6 @@ function setLoginBusy(busy) {
   renderLoginDevices();
 }
 
-function markFrontendWindowReady() {
-  const readiness = frontendRuntime.windowReady?.();
-  readiness?.catch?.((error) => console.error("Unable to reveal frontend window", error));
-}
-
 function showLogin(message = "") {
   const alreadyVisible = !state.authenticated
     && !elements.loginScreen.classList.contains("hidden");
@@ -1976,10 +1971,7 @@ function showLogin(message = "") {
   elements.loginError.textContent = message;
   renderLoginDevices();
   synchronizeWindowTitle(null);
-  if (alreadyVisible) {
-    markFrontendWindowReady();
-    return;
-  }
+  if (alreadyVisible) return;
 
   deactivateSessionTerminalView();
   stopHttpPolling();
@@ -1995,7 +1987,6 @@ function showLogin(message = "") {
     : (runtimeCapabilities.targetConfiguration && !frontendRuntime.endpoint
       ? elements.loginEndpoint : elements.loginPassword);
   target?.focus();
-  markFrontendWindowReady();
 }
 
 function showLoginPreservingView(message) {
@@ -2011,7 +2002,6 @@ function showApplication() {
   elements.loginError.textContent = "";
   elements.addAgent.disabled = true;
   synchronizeWindowTitle(null);
-  markFrontendWindowReady();
 }
 
 async function initializeAuthentication() {
@@ -2050,6 +2040,12 @@ async function initializeAuthentication() {
   } catch (error) {
     showLogin(runtimeCapabilities.targetConfiguration
       ? error.message : `无法读取登录状态：${error.message}`);
+  } finally {
+    try {
+      await frontendRuntime.windowReady?.();
+    } catch (error) {
+      console.error("Unable to reveal frontend window", error);
+    }
   }
 }
 
@@ -2149,7 +2145,7 @@ function setConnectionPhase(phase) {
 function connectionCanPoll() {
   return state.connectionPhase !== "failed"
     && !state.pageClosing
-    && (!state.authRequired || state.authenticated);
+    && state.authenticated;
 }
 
 function clearDegradedTimer() {
@@ -2183,7 +2179,7 @@ function resetConnectionForInitialSync() {
 
 
 function startHttpPolling() {
-  if (state.pageClosing || (state.authRequired && !state.authenticated)) return;
+  if (state.pageClosing || !state.authenticated) return;
   if (state.syncInFlight) return;
   clearTimeout(state.reconnectTimer);
   state.reconnectTimer = null;
@@ -2270,7 +2266,7 @@ function handlePollingFailure(error, { timedOut = false } = {}) {
   if (typeof cancelBackgroundWorkspaceSync === "function") {
     cancelBackgroundWorkspaceSync();
   }
-  if (state.pageClosing || (state.authRequired && !state.authenticated) || phase === "failed") return;
+  if (state.pageClosing || !state.authenticated || phase === "failed") return;
   if (!timedOut && state.connectionHadSuccess
       && (phase === "connected" || phase === "degraded")) {
     enterDegraded(error);
@@ -2362,7 +2358,7 @@ function httpSyncProgressSignature() {
 }
 
 async function requestHttpSync() {
-  if (state.syncInFlight || state.pageClosing) return;
+  if (state.syncInFlight || !connectionCanPoll()) return;
   const generation = state.syncGeneration;
   const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
     ? `${state.selectedAgent}:${state.view.sessionId}` : null;
@@ -6410,7 +6406,7 @@ async function runDraftSync(agentId, sync) {
   const workspaceId = sync.workspaceId || state.workspaceId;
   sync.workspaceId = workspaceId;
   const active = workspaceId === state.workspaceId;
-  if (sync.paused || !active || (state.authRequired && !state.authenticated)
+  if (sync.paused || !active || !state.authenticated
       || (sync.retryAfter && Date.now() < sync.retryAfter)) return;
   const bucket = gatewayWorkspaceState(workspaceId);
   sync.sending = true;
@@ -6782,10 +6778,11 @@ window.addEventListener("pagehide", () => {
   deactivateRemoteControlView();
   flushDraftBeforePageCloses();
 });
-window.addEventListener("pageshow", () => {
+window.addEventListener("pageshow", (event) => {
+  if (!event.persisted) return;
   state.pageClosing = false;
   syncUiAnimationScheduler();
-  if ((!state.authRequired || state.authenticated) && !state.connected) startHttpPolling();
+  if (state.authenticated && !state.connected) startHttpPolling();
   scheduleBackgroundWorkspaceSync(0);
   if (state.view.kind === "session-terminal" || state.view.kind === "remote-control") renderTabs();
 });

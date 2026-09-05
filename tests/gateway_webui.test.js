@@ -704,6 +704,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     gateway.state.rawEdbDecoding = true;
     gateway.state.connectionPhase = "connected";
     gateway.state.activeCatchUpPending = false;
+    expect(gateway.backgroundSyncCanRun()).toBe(false);
+    gateway.state.authenticated = true;
     expect(gateway.backgroundSyncCanRun()).toBe(true);
     gateway.state.activeCatchUpPending = true;
     expect(gateway.backgroundSyncCanRun()).toBe(false);

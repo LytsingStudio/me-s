@@ -174,7 +174,8 @@ describe("ME Client native adapter", () => {
     const readyStart = source.indexOf("function windowReady()");
     const readyEnd = source.indexOf("const runtime =", readyStart);
     const readiness = source.slice(readyStart, readyEnd);
-    expect(readiness.indexOf('action: "show"')).toBeLessThan(readiness.indexOf("waitForFirstPaint()"));
+    expect(readiness).not.toContain("requestAnimationFrame");
+    expect(readiness).not.toContain("waitForFirstPaint");
   });
 
   test("uses the document readiness gate without desktop window actions on iOS", async () => {

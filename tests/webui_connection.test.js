@@ -118,7 +118,7 @@ function syncHarness() {
   const schedules = [];
   const logins = [];
   const state = {
-    syncInFlight: false, pageClosing: false, syncGeneration: 1, workspaceId: "chat",
+    syncInFlight: false, pageClosing: false, syncGeneration: 1, workspaceId: "chat", authenticated: true,
     view: { kind: "chat" }, stores: new Map(), selectedAgent: "main",
     snapshotInitialized: false, apiActivity: {}, connectionPhase: "connected",
   };
@@ -129,6 +129,7 @@ function syncHarness() {
     const scheduleBackgroundWorkspaceSync = () => {};
     const failHttpSync = () => { throw new Error("unexpected sync failure"); };
     const handlePollingFailure = failHttpSync;
+    ${source.slice(source.indexOf("function connectionCanPoll()"), source.indexOf("\nfunction clearDegradedTimer"))}
     ${source.slice(source.indexOf("async function requestHttpSync()"), source.indexOf("\nfunction requestHttpSyncNow"))}
     return requestHttpSync;
   `);
