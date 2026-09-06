@@ -93,9 +93,9 @@ impl UiProjectionWindow {
         let Some(changed) = state.changed_from else {
             return if self.end > count { tail() } else { None };
         };
-        // An existing tail window uses the same bounded suffix contract as the frontend.
-        // Following must not replace that suffix with a shorter tail when count grows.
-        if self.end == self.count {
+        // A tail-resident window is not necessarily being followed by the reader.
+        // Only following may advance its bounded suffix as new parts arrive.
+        if self.follow_tail && self.end == self.count {
             let start = changed.min(count);
             return if start >= self.start && count - start <= 192 {
                 Some((start, count))

@@ -199,7 +199,7 @@ function virtualHarness(options = {}) {
     key: (item) => item.key,
     revision: (item) => item.revision ?? 0,
     context: (item) => item.kind ?? "message",
-    estimateHeight: (item) => item.estimate ?? 100,
+    estimateHeight: (item, index, width) => options.estimateHeight?.(item, index, width) ?? item.estimate ?? 100,
     renderRange,
     renderEmpty: (container) => {
       while (container.lastChild) container.lastChild.remove();
@@ -377,6 +377,31 @@ describe("shared WebUI transcript reconciliation", () => {
     subject.controller.noteScroll();
     subject.flushFrames();
     expect(subject.controller.inspect().start).toBeLessThan(5);
+  });
+
+  test("reports the actual visible messages independently from the materialized overscan", () => {
+    const subject = virtualHarness({ scrollTop:250, targetHeight:1000 });
+    subject.controller.update(virtualItems(30), {scopeKey:"main",following:false});
+    const state = subject.controller.inspect();
+    expect([state.start,state.end]).toEqual([0,11]);
+    expect([state.visibleStart,state.visibleEnd]).toEqual([2,5]);
+  });
+
+  test("passes usable content width to image estimates and preserves reading across tail refreshes", () => {
+    const widths = [];
+    const subject = virtualHarness({scrollTop:250,clientWidth:360,estimateHeight:(item,index,width)=>{widths.push(width);return item.height;}});
+    let items = virtualItems(192);
+    items[0] = {...items[0],height:1587};
+    subject.controller.update(items,{scopeKey:"main",following:false});
+    const anchor = subject.controller.windowElement.children[0];
+    const offset = anchor.getBoundingClientRect().top;
+    for(let revision=2;revision<12;revision++) {
+      items = items.map((item,index)=> index===191 ? {...item,revision} : item);
+      subject.controller.update(items,{scopeKey:"main",changedFrom:191,following:false});
+      subject.resize(); subject.flushFrames();
+      expect(anchor.getBoundingClientRect().top).toBe(offset);
+    }
+    expect(widths.every(width=>width===360)).toBe(true);
   });
 
   test("preserves the visible message anchor when a measured height above it changes", () => {

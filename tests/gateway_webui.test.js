@@ -42,6 +42,10 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
   const factory = new Function("globalThis", "document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", "Date", "setTimeout", "clearTimeout", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       requestSelectedProjectionRange,
+      estimateTranscriptMessageHeight,
+      configureViewportTest(inspect, following) {
+        transcriptVirtualizer = { inspect }; projectionFollowing = following;
+      },
       configureRangeTest(request) {
         api = request; renderAgents = () => {}; requestRender = () => {};
         scheduleSelectedProjectionRangeCheck = () => {}; flushPendingRender = () => {};
@@ -234,6 +238,22 @@ function projectionSchedulerHarness(counts = [3, 2]) {
   return { r, requests, timers, payload, advance(ms) { now += ms; }, now: () => now,
     maxRequests: () => maxRequests, sidebarRenders: () => sidebarRenders };
 }
+
+test("a foreground tail response is discarded when the reader scrolls away during the request", async () => {
+  const h = projectionSchedulerHarness([1]);
+  let following = true;
+  h.r.configureViewportTest(() => null, () => following);
+  const store = h.r.state.stores.get("a0");
+  const before = store.projection;
+  const pending = h.r.requestHttpSync();
+  expect(h.requests[0].body.agents[0].projection_window.follow_tail).toBe(true);
+  following = false;
+  h.requests[0].resolve(h.payload(0, {count:1400,changed:1000}));
+  await pending;
+  expect(store.projection).toBe(before);
+  expect(h.r.state.syncInFlight).toBe(false);
+  expect([...h.timers.values()].some(timer=>timer.at===h.now())).toBe(true);
+});
 
 function visibleProjection(projection) {
   return {
@@ -1197,8 +1217,76 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(store.projection.messages[0]._projectionIndex).toBe(808);
     expect(store.projection.messages.at(-1)._projectionIndex).toBe(999);
     expect(runtime.projectionRangeDirectionForViewport(
-      store, { start: 0, end: 60, totalHeight: 8_000 }, false,
+      store, { start: 0, end: 60, visibleStart: 2, visibleEnd: 10, totalHeight: 8_000 }, false,
     )).toEqual({ direction: "before", retain: "start" });
+  });
+
+  test("history browsing retains its full window across appended and rebuilt tails", async () => {
+    const r = loadRuntime("../src/webui/app.js");
+    r.state.selectedAgent = "main";
+    r.state.snapshot.agents = [{ id: "main" }];
+    const store = r.createAgentStore({ id: "main" });
+    r.state.stores.set("main", store);
+    r.installProjectionState(store, uiProjectionState("main", "r1", 192), uiProjectionRange("main", "r1", 192, 0, 192));
+    const first = store.projection.messages[0];
+    const before = store.projection.messages;
+    await r.synchronizeProjectionBucket(r.state, { ui_projection: true,
+      projection_states: [uiProjectionState("main", "r2", 202, 192)],
+    }, "chat", () => {}, false);
+    expect(store.projection.messages).toBe(before);
+    expect(store.projection.messages[0]).toBe(first);
+    expect([store.projectionStart, store.projectionEnd, store.projectionCount]).toEqual([0, 192, 202]);
+    expect(store.projectionLoading).toBe(false);
+    const rebuilt = uiProjectionState("main", "r3", 205, 0);
+    rebuilt.range = uiProjectionRange("main", "r3", 205, 0, 192);
+    await r.synchronizeProjectionBucket(r.state, { ui_projection: true, projection_states: [rebuilt] }, "chat", () => {}, false);
+    expect(store.projection.messages[0].key).toBe(first.key);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([0, 192]);
+    expect(r.projectionStateRangeRequest(store, rebuilt, true, true)).toEqual({start:141,end:205,retain:"end",direction:"tail"});
+  });
+
+  test("adjacent loads use visible rather than materialized edges and never evict visible parts", () => {
+    const r = loadRuntime("../src/webui/app.js");
+    const store = r.createAgentStore({ id: "main" });
+    r.installProjectionState(store, uiProjectionState("main", "r1", 500), uiProjectionRange("main", "r1", 500, 100, 292));
+    const viewport = { start:0, end:192, visibleStart:80, visibleEnd:90, totalHeight:6000 };
+    expect(r.projectionRangeDirectionForViewport(store, viewport, false)).toBeNull();
+    expect(r.projectionRangeDirectionForViewport(store, {...viewport,visibleStart:0,visibleEnd:8}, false)).toEqual({direction:"before",retain:"start"});
+    expect(r.projectionRangeDirectionForViewport(store, {...viewport,visibleStart:184,visibleEnd:192}, false)).toEqual({direction:"after",retain:"end"});
+    expect(r.projectionRangeDirectionForViewport(store, {...viewport,visibleStart:0,visibleEnd:150}, false)).toBeNull();
+    expect(r.projectionRangeDirectionForViewport(store, {...viewport,visibleStart:20,visibleEnd:192}, false)).toBeNull();
+    expect(r.projectionRangeDirectionForViewport(store, viewport, true)).toEqual({direction:"tail",retain:"end"});
+  });
+
+  test("late adjacent and tail replies cannot override a reversed reading gesture", async () => {
+    for (const direction of ["before", "after", "tail"]) {
+      const r = loadRuntime("../src/webui/app.js");
+      r.state.workspaceId = "chat"; r.state.selectedAgent = "main";
+      const store = r.createAgentStore({ id:"main" }); r.state.stores.set("main",store);
+      r.installProjectionState(store, uiProjectionState("main","r1",500),uiProjectionRange("main","r1",500,100,292));
+      let visible = direction === "before" ? {visibleStart:0,visibleEnd:8} : {visibleStart:184,visibleEnd:192};
+      let following = direction === "tail";
+      r.configureViewportTest(() => ({scopeKey:"chat:main",start:0,end:192,totalHeight:6000,...visible}),()=>following);
+      let resolve; r.configureRangeTest(() => new Promise(yes => {resolve=yes;}));
+      const previous = store.projection;
+      const request = r.projectionAdjacentRange(store,direction);
+      const pending = r.requestSelectedProjectionRange(direction);
+      visible = direction === "before" ? {visibleStart:184,visibleEnd:192} : {visibleStart:0,visibleEnd:8};
+      following = false;
+      resolve({ok:true,...uiProjectionRange("main","r1",500,request.start,request.end)});
+      expect(await pending).toBe(false);
+      expect(store.projection).toBe(previous);
+      expect(store.projectionLoading).toBe(false);
+    }
+  });
+
+  test("image height estimates follow the actual one- or two-column gallery layout", () => {
+    const r = loadRuntime("../src/webui/app.js");
+    const message = {kind:"tool",tool:{name:"Image.Send",result:{state:"Succeeded",detail:JSON.stringify({images:Array.from({length:6},()=>({image:{sha256:"a".repeat(64),width:1200,height:800,format:"PNG"}}))})}}};
+    expect(r.estimateTranscriptMessageHeight(message,0,360)).toBe(1587);
+    expect(r.estimateTranscriptMessageHeight(message,0,513)).toBe(1587);
+    expect(r.estimateTranscriptMessageHeight(message,0,514)).toBe(822);
+    expect(r.estimateTranscriptMessageHeight(message,0,1200)).toBe(822);
   });
 
   test("updates unselected summaries without advancing the body cursor", async () => {

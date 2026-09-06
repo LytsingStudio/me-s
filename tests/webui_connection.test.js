@@ -215,7 +215,7 @@ describe("serialized projection synchronization", () => {
     }
   });
 
-  test("applies the follow flag sent with the request, not a later gesture or pending send", async () => {
+  test("reissues sync after a gesture or pending send changes the requested follow mode", async () => {
     for (const follow of [false, true]) {
       const r = syncHarness();
       const store = { projection: {}, projectionStart: 40, projectionEnd: 104, projectionCount: 300 };
@@ -225,11 +225,18 @@ describe("serialized projection synchronization", () => {
       r.state.following = !follow;
       store.pendingPromptSubmission = !follow ? {} : null;
       r.response({ selected_agent: "main" });
-      await Promise.resolve();
-      expect(r.bodies[0].agents[0].projection_window.follow_tail).toBe(follow);
-      expect(r.appliedFollowing).toEqual([follow]);
-      r.applied();
       await pending;
+      expect(r.bodies[0].agents[0].projection_window.follow_tail).toBe(follow);
+      expect(r.appliedFollowing).toEqual([]);
+      expect(r.schedules).toEqual([0]);
+      expect(r.state.syncInFlight).toBe(false);
+      const next = r.request();
+      expect(r.bodies[1].agents[0].projection_window.follow_tail).toBe(!follow);
+      r.response({ selected_agent: "main" });
+      await Promise.resolve();
+      expect(r.appliedFollowing).toEqual([!follow]);
+      r.applied();
+      await next;
     }
   });
 

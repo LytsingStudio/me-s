@@ -1343,8 +1343,8 @@ function projectionStateRangeRequest(store, projectionState, selected, following
   if (changedFrom === null) {
     return previous.end > count ? projectionTailRange(count) : null;
   }
-  // Keep the complete bounded suffix, even while following or confirming a send.
-  if (atTail) {
+  // A resident tail must not advance while the user is reading its older messages.
+  if (following && atTail) {
     const suffixStart = Math.min(changedFrom, count);
     if (suffixStart >= previous.start && count - suffixStart <= PROJECTION_RANGE_LIMIT) {
       return { start: suffixStart, end: count, retain: "end", direction: "sync" };
@@ -1652,13 +1652,16 @@ function projectionRangeDirectionForViewport(store, viewportState, following) {
       && window.start > 0 && window.messages.length < PROJECTION_RANGE_LIMIT) {
     return { direction: "before", retain: "end" };
   }
-  if (!following && viewportState.start <= PROJECTION_RANGE_EDGE_ITEMS && window.start > 0) {
-    return { direction: "before", retain: "start" };
+  const visibleStart = viewportState.visibleStart;
+  const visibleEnd = viewportState.visibleEnd;
+  if (!following && visibleStart <= PROJECTION_RANGE_EDGE_ITEMS && window.start > 0) {
+    const removed = Math.max(0, window.messages.length + Math.min(PROJECTION_RANGE_CHUNK, window.start) - PROJECTION_RANGE_LIMIT);
+    if (visibleEnd <= window.messages.length - removed) return { direction: "before", retain: "start" };
   }
-  if (!following
-      && viewportState.end >= Math.max(0, window.messages.length - PROJECTION_RANGE_EDGE_ITEMS)
+  if (!following && visibleEnd >= Math.max(0, window.messages.length - PROJECTION_RANGE_EDGE_ITEMS)
       && window.end < window.count) {
-    return { direction: "after", retain: "end" };
+    const removed = Math.max(0, window.messages.length + Math.min(PROJECTION_RANGE_CHUNK, window.count - window.end) - PROJECTION_RANGE_LIMIT);
+    if (visibleStart >= removed) return { direction: "after", retain: "end" };
   }
   return null;
 }
@@ -1673,6 +1676,8 @@ async function requestSelectedProjectionRange(direction, retain = null) {
   if (!store || !projectionState) return false;
   const request = projectionAdjacentRange(store, direction, retain);
   if (!request) return false;
+  const previousStart = store.projectionStart;
+  const previousEnd = store.projectionEnd;
   const blocking = direction === "tail"
     && (store.projection.messages.length === 0 || store.projectionEnd < store.projectionCount);
   if (blocking) {
@@ -1688,8 +1693,20 @@ async function requestSelectedProjectionRange(direction, retain = null) {
         || currentStore() !== store || store.projectionRevision !== projectionState.revision) {
       return false;
     }
-    const changed = installProjectionState(store, projectionState, range, request.retain);
     store.projectionLoading = false;
+    const viewport = transcriptVirtualizer?.inspect();
+    const stillNeeded = viewport && viewport.scopeKey === `${workspaceId}:${agentId}`
+      ? projectionRangeDirectionForViewport(store, viewport, projectionFollowing()) : null;
+    if (store.projectionStart !== previousStart || store.projectionEnd !== previousEnd
+        || (direction === "tail" && store.projection.messages.length > 0
+          && !projectionFollowing() && !store.pendingPromptSubmission)
+        || (direction !== "tail" && viewport
+          && (stillNeeded?.direction !== direction || stillNeeded?.retain !== request.retain))) {
+      if (blocking) renderAgents();
+      scheduleSelectedProjectionRangeCheck();
+      return false;
+    }
+    const changed = installProjectionState(store, projectionState, range, request.retain);
     if (changed) {
       requestRender({ currentEvents: true });
       if (!inputHasPriority()) flushPendingRender();
@@ -2514,9 +2531,10 @@ async function requestHttpSync() {
       }),
     }, state.workspaceId);
     if (generation !== state.syncGeneration || state.pageClosing) return;
-    // History browsing may install a different window while this request is in flight.
+    // Browsing may change either the resident window or follow mode during this request.
     if (projectionStore && (state.stores.get(state.selectedAgent) !== projectionStore
-        || projectionStore.projection !== projectionBefore)) {
+        || projectionStore.projection !== projectionBefore
+        || followTail !== (projectionFollowing() || Boolean(projectionStore.pendingPromptSubmission)))) {
       scheduleHttpSync(0);
       return;
     }
@@ -4369,11 +4387,16 @@ function renderEmptyTranscript(container) {
   MeTranscript.reconcileHtmlChildren(container, rendered);
 }
 
-function estimateTranscriptMessageHeight(message) {
+function estimateTranscriptMessageHeight(message, _index, width = elements.transcriptContent?.clientWidth || 742) {
   if (!messageIsVisible(message)) return 0;
   if (message.kind === "tool") {
     const images = MeToolPresenters.imageAttachments(message.tool.name, toolPresentationOutput(message.tool));
-    if (images.length) return 51 + Math.ceil(images.length / 2) * 260;
+    if (images.length) {
+      const galleryWidth = Math.min(720, Math.max(0, width - 22));
+      const columns = Math.max(1, Math.floor((galleryWidth + 12) / 252));
+      const rows = Math.ceil(images.length / columns);
+      return 51 + 18 + rows * 243 + (rows - 1) * 12;
+    }
   }
   if (message.kind === "tool" || message.kind === "worker-activity") return 51;
   if (message.kind === "turn-toolbar") return 40;

@@ -286,11 +286,11 @@
     const keyFor = (item, index) => String(options.key?.(item, index) ?? index);
     const revisionFor = (item, index) => String(options.revision?.(item, index) ?? "");
     const contextFor = (item, index) => options.context?.(item, index) ?? null;
-    const estimateFor = (item, index) => {
-      const estimate = Number(options.estimateHeight?.(item, index) ?? 80);
+    const estimateFor = (item, index, width) => {
+      const estimate = Number(options.estimateHeight?.(item, index, width) ?? 80);
       return Number.isFinite(estimate) ? Math.max(0, estimate) : 80;
     };
-    const viewportWidth = () => Math.max(0, Number(viewport.clientWidth || content.clientWidth) || 0);
+    const viewportWidth = () => Math.max(0, Number(content.clientWidth || viewport.clientWidth) || 0);
     const followingNow = () => Boolean(options.isFollowing?.());
     const scopeFor = (scopeKey) => {
       const normalized = String(scopeKey ?? "");
@@ -338,7 +338,7 @@
     const appendItem = (scope, item, index, previousContext, width) => {
       const key = keyFor(item, index);
       const revision = revisionFor(item, index);
-      const estimate = estimateFor(item, index);
+      const estimate = estimateFor(item, index, width);
       const cached = scope.measurements.get(key);
       const height = estimate === 0 ? 0 : Math.max(estimate, Number(cached?.height) || 0);
       scope.keys.push(key);
@@ -371,7 +371,7 @@
           pruneMeasurements(scope);
           return;
         }
-        const estimate = estimateFor(item, index);
+        const estimate = estimateFor(item, index, width);
         if (estimate === 0) scope.heights.update(index, 0);
         else if (scope.heights.value(index) === 0) scope.heights.update(index, estimate);
         scope.revisions[index] = revisionFor(item, index);
@@ -551,15 +551,26 @@
         preparedScroll = { scrollTop: Math.max(0, Number(scrollTop) || 0), following: Boolean(following) };
       },
       inspect() {
-        return activeScope ? {
+        if (!activeScope) return null;
+        const bounds = viewportRect();
+        const visible = [...windowElement.children].filter((node) => {
+          if (!node.dataset?.messageKey) return false;
+          const rect = node.getBoundingClientRect();
+          return rect.bottom > bounds.top && rect.top < bounds.bottom;
+        });
+        return {
           scopeKey: activeScopeKey, start: activeScope.start, end: activeScope.end,
+          visibleStart: visible.length ? Number(visible[0].dataset.messageIndex)
+            : activeScope.heights.indexAt(Math.max(0, viewport.scrollTop)),
+          visibleEnd: visible.length ? Number(visible[visible.length - 1].dataset.messageIndex) + 1
+            : Math.min(activeScope.items.length, activeScope.heights.indexAt(Math.max(0, viewport.scrollTop) + viewport.clientHeight) + 1),
           totalHeight: activeScope.heights.total(),
           topHeight: activeScope.heights.prefix(activeScope.start),
           bottomHeight: activeScope.heights.total() - activeScope.heights.prefix(activeScope.end),
           materialized: windowElement.children.length,
           retained: activeScope.items.length,
           measurements: activeScope.measurements.size,
-        } : null;
+        };
       },
       destroy() {
         if (frame !== null) cancelFrame(frame);
