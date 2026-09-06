@@ -5,6 +5,8 @@ const HTTP_SYNC_IDLE_MS = 1000;
 const HTTP_SYNC_TIMEOUT_MS = 15000;
 const BACKGROUND_SYNC_IDLE_MS = 5000;
 const BACKGROUND_SYNC_RETRY_MAX_MS = 30000;
+const BACKGROUND_REQUEST_GAP_MS = 1000;
+const BACKGROUND_ACTIVE_GAP_MS = 2000;
 const EVENT_RECOVERY_THRESHOLD = 100;
 const RECONNECT_MAX_MS = 5000;
 const DRAFT_BATCH_MS = 80;
@@ -90,6 +92,7 @@ const state = {
   backgroundSyncDueAt: null,
   backgroundSyncOperation: null,
   backgroundSyncCursor: 0,
+  backgroundNextRequestAt: 0,
   startupMetadataPending: false,
   activeCatchUpPending: true,
   snapshot: {
@@ -737,6 +740,7 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
     projectionRangeLoading: null,
     projectionChanges: null,
     projection: emptyProjection(),
+    backgroundNextSyncAt: 0, backgroundFailures: 0,
     workmap: emptyWorkMap(),
     turnHistory: null,
     summary: projectAgentSummary(events),
@@ -996,12 +1000,18 @@ function backgroundSyncProgressSignature(workspace) {
   });
 }
 
-function backgroundSyncRequestBody(workspace) {
+function backgroundSyncRequestBody(workspace, agentId = null) {
   return {
     snapshot_revision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
     ui_projection: usesUiProjection(),
     agents: [...workspace.stores].map(([id, store]) => usesUiProjection()
-      ? { id, projection_revision: store.projectionRevision }
+      ? {
+        id, projection_revision: store.projectionRevision,
+        ...(id === agentId ? { projection_window: {
+          start: store.projectionStart, end: store.projectionEnd, count: store.projectionCount,
+          follow_tail: true,
+        } } : {}),
+      }
       : {
         id,
         event_count: store.eventCount ?? store.events.length,
@@ -1009,7 +1019,7 @@ function backgroundSyncRequestBody(workspace) {
         cursor_event_hash: workspace.cacheValidated ? null : store.lastEventHash ?? null,
       }),
     cache_metadata_only: !usesUiProjection() && !workspace.edbCacheInitialized,
-    selected_agent: null,
+    selected_agent: usesUiProjection() ? agentId : null,
     terminal_session: null,
     terminal_revision: null,
   };
@@ -1024,9 +1034,16 @@ function backgroundSyncCanRun() {
 }
 
 function backgroundSyncOperationCurrent(operation) {
-  return state.backgroundSyncOperation === operation
-    && !state.pageClosing
-    && state.workspaceId !== operation.workspaceId
+  if (state.backgroundSyncOperation !== operation || operation.cancelled || state.pageClosing) return false;
+  if (operation.projection) {
+    const workspace = operation.workspaceId === state.workspaceId
+      ? state : state.workspaceStates.get(operation.workspaceId);
+    return usesUiProjection() && workspace === operation.workspace
+      && !(operation.workspaceId === state.workspaceId && operation.agentId === state.selectedAgent)
+      && (!operation.store || (operation.workspace.stores.get(operation.agentId) === operation.store
+        && operation.store.projection === operation.projectionBefore));
+  }
+  return state.workspaceId !== operation.workspaceId
     && state.workspaceStates.get(operation.workspaceId) === operation.workspace;
 }
 
@@ -1038,13 +1055,17 @@ function cancelBackgroundWorkspaceSync(workspaceId = null) {
   }
   const operation = state.backgroundSyncOperation;
   if (!operation || (workspaceId !== null && operation.workspaceId !== workspaceId)) return;
-  state.backgroundSyncOperation = null;
+  // Native transports may settle after abort; keep the slot occupied until finally.
+  operation.cancelled = true;
   operation.controller?.abort();
 }
 
 function scheduleBackgroundWorkspaceSync(delay = 0) {
   if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
-  const dueAt = Date.now() + Math.max(0, Number(delay) || 0);
+  const dueAt = Math.max(
+    Date.now() + Math.max(0, Number(delay) || 0),
+    usesUiProjection() ? state.backgroundNextRequestAt : 0,
+  );
   if (state.backgroundSyncTimer !== null && state.backgroundSyncDueAt <= dueAt) return;
   clearTimeout(state.backgroundSyncTimer);
   state.backgroundSyncDueAt = dueAt;
@@ -1078,6 +1099,34 @@ function nextBackgroundWorkspace(now = Date.now()) {
     workspace: null,
     wait: Math.max(0, Number.isFinite(earliest) ? earliest - now : BACKGROUND_SYNC_IDLE_MS),
   };
+}
+
+function nextBackgroundProjection(now = Date.now()) {
+  const candidates = [];
+  for (const { id: workspaceId } of state.gateway.workspaces || []) {
+    const workspace = workspaceUiState(workspaceId);
+    if (!workspace.snapshotInitialized || !workspace.snapshot.agents.length) {
+      if (workspace !== state) candidates.push({ workspaceId, workspace, agentId: null, store: null });
+      continue;
+    }
+    for (const meta of workspace.snapshot.agents) {
+      if (workspace === state && meta.id === state.selectedAgent) continue;
+      candidates.push({ workspaceId, workspace, agentId: meta.id, store: workspace.stores.get(meta.id) });
+    }
+  }
+  let earliest = now + BACKGROUND_SYNC_IDLE_MS;
+  const start = state.backgroundSyncCursor % Math.max(1, candidates.length);
+  for (let offset = 0; offset < candidates.length; offset++) {
+    const index = (start + offset) % candidates.length;
+    const candidate = candidates[index];
+    const nextAt = (candidate.store || candidate.workspace).backgroundNextSyncAt || 0;
+    if (nextAt <= now) {
+      state.backgroundSyncCursor = (index + 1) % candidates.length;
+      return candidate;
+    }
+    earliest = Math.min(earliest, nextAt);
+  }
+  return { wait: Math.max(0, earliest - now) };
 }
 
 function observeBackgroundInputDraft(workspace, meta, store) {
@@ -1525,6 +1574,26 @@ function projectionFollowing() {
   try { return Boolean(transcriptBottomFollower.isFollowing()); } catch (_) { return true; }
 }
 
+function synchronizeProjectionStore(store, projectionState, loadRange, followTail, updateSummary = true) {
+  const loadingBefore = Boolean(store.projectionLoading);
+  const summaryBefore = store.summary;
+  const request = projectionStateRangeRequest(store, projectionState, loadRange, followTail);
+  const range = loadRange ? projectionState.range : null;
+  if (range && request && (range.start > request.start || range.end < request.end)) {
+    throw new Error("会话内容响应不完整");
+  }
+  const changed = loadRange && !(request && !range) ? installProjectionState(
+    store, projectionState, range, request?.retain || "end",
+  ) : false;
+  store.summary = updateSummary ? projectionSummary(projectionState.summary) : summaryBefore;
+  if (loadRange) store.projectionLoading = Boolean(request && !range);
+  return {
+    changed,
+    summaryChanged: JSON.stringify(summaryBefore) !== JSON.stringify(store.summary),
+    loadChanged: loadingBefore !== Boolean(store.projectionLoading),
+  };
+}
+
 async function synchronizeProjectionBucket(bucket, payload, workspaceId, observeDraft, followTail = null) {
   if (!payload.ui_projection) throw new Error("同步响应未提供会话内容");
   const states = new Map((payload.projection_states || []).map((entry) => [entry.agent_id, entry]));
@@ -1540,27 +1609,11 @@ async function synchronizeProjectionBucket(bucket, payload, workspaceId, observe
     store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
     const projectionState = states.get(meta.id);
     if (!projectionState) throw new Error("同步响应缺少会话状态");
-    const loadingBefore = Boolean(store.projectionLoading);
-    const summaryBefore = JSON.stringify(store.summary);
     const selected = bucket === state && meta.id === state.selectedAgent;
-    const request = projectionStateRangeRequest(
+    changes.push({ agentId: meta.id, ...synchronizeProjectionStore(
       store, projectionState, selected,
       followTail ?? (selected && (projectionFollowing() || Boolean(store.pendingPromptSubmission))),
-    );
-    const range = selected ? projectionState.range : null;
-    if (range && request && (range.start > request.start || range.end < request.end)) {
-      throw new Error("会话内容响应不完整");
-    }
-    const changed = request && !range ? false : installProjectionState(
-      store, projectionState, range, request?.retain || "end",
-    );
-    store.summary = projectionSummary(projectionState.summary);
-    store.projectionLoading = Boolean(selected && request && !range);
-    changes.push({
-      agentId: meta.id, changed,
-      summaryChanged: summaryBefore !== JSON.stringify(store.summary),
-      loadChanged: loadingBefore !== Boolean(store.projectionLoading),
-    });
+    ) });
   }
   return changes;
 }
@@ -1719,7 +1772,69 @@ function applyRawBackgroundSyncState(workspace, payload) {
     || eventChanges.some((change) => change.changed || change.summaryChanged || change.loadChanged);
 }
 
+async function requestBackgroundProjectionSync() {
+  if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
+  if (Date.now() < state.backgroundNextRequestAt) {
+    scheduleBackgroundWorkspaceSync(0);
+    return;
+  }
+  const candidate = nextBackgroundProjection();
+  if (!candidate.workspaceId) {
+    scheduleBackgroundWorkspaceSync(candidate.wait);
+    return;
+  }
+  const controller = typeof AbortController === "function" ? new AbortController() : null;
+  const operation = {
+    ...candidate, controller, projection: true, projectionBefore: candidate.store?.projection,
+  };
+  state.backgroundSyncOperation = operation;
+  const cooldown = candidate.store || candidate.workspace;
+  const timeout = setTimeout(() => controller?.abort(), HTTP_SYNC_TIMEOUT_MS);
+  try {
+    // selected_agent chooses this read-only response's window, not the user's selection.
+    const payload = await api("/api/sync", {
+      method: "POST", headers: { "Content-Type": "application/json" }, signal: controller?.signal,
+      body: JSON.stringify(backgroundSyncRequestBody(candidate.workspace, candidate.agentId)),
+    }, candidate.workspaceId);
+    if (!backgroundSyncOperationCurrent(operation)) return;
+    if (controller?.signal.aborted) throw Object.assign(new Error("同步超时"), { name: "AbortError" });
+    if (!payload.ui_projection) throw new Error("同步响应未提供会话内容");
+    let sidebarChanged = false;
+    if (candidate.workspace !== state) {
+      sidebarChanged = await applyBackgroundSyncState(candidate.workspace, payload, candidate.workspaceId);
+      if (!backgroundSyncOperationCurrent(operation)) return;
+    }
+    if (candidate.agentId) {
+      const projectionState = (payload.projection_states || []).find((entry) => entry.agent_id === candidate.agentId);
+      if (!projectionState) throw new Error("同步响应缺少会话状态");
+      // Foreground polls own current-Workspace summaries; a slower background reply cannot roll them back.
+      const change = synchronizeProjectionStore(candidate.store, projectionState, true, true, false);
+      sidebarChanged = sidebarChanged || change.loadChanged;
+    }
+    cooldown.backgroundFailures = 0;
+    cooldown.backgroundNextSyncAt = Date.now() + BACKGROUND_SYNC_IDLE_MS;
+    if (sidebarChanged) renderAgents();
+  } catch (error) {
+    if (!backgroundSyncOperationCurrent(operation)) return;
+    if (error.status === 401) { showLogin("登录已失效，请重新登录"); return; }
+    cooldown.backgroundFailures += 1;
+    cooldown.backgroundNextSyncAt = Date.now() + Math.min(
+      BACKGROUND_SYNC_RETRY_MAX_MS,
+      HTTP_SYNC_IDLE_MS * (2 ** Math.min(cooldown.backgroundFailures - 1, 5)),
+    );
+  } finally {
+    clearTimeout(timeout);
+    if (state.backgroundSyncOperation === operation) {
+      state.backgroundSyncOperation = null;
+      state.backgroundNextRequestAt = Date.now()
+        + (state.apiActivity.active ? BACKGROUND_ACTIVE_GAP_MS : BACKGROUND_REQUEST_GAP_MS);
+      scheduleBackgroundWorkspaceSync(0);
+    }
+  }
+}
+
 async function requestBackgroundWorkspaceSync() {
+  if (usesUiProjection()) return requestBackgroundProjectionSync();
   if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
   const candidate = nextBackgroundWorkspace();
   if (!candidate.workspaceId) {
@@ -3944,6 +4059,7 @@ function selectWorkspaceAgent(workspaceId, agentId) {
 
 function finishAgentSelection(id) {
   cancelActiveHttpSync();
+  cancelBackgroundWorkspaceSync(state.workspaceId);
   closeContextDrawer();
   closeMobileSidebar();
   closeUserMessageMenu();

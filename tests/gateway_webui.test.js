@@ -35,17 +35,24 @@ function loadToolPresenters() {
   return globalThis.MeToolPresenters;
 }
 
-function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime) {
+function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, clock = {}) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
-  const factory = new Function("globalThis", "document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", `${source.slice(0, eventBindings)}
+  const factory = new Function("globalThis", "document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", "Date", "setTimeout", "clearTimeout", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       requestSelectedProjectionRange,
       configureRangeTest(request) {
         api = request; renderAgents = () => {}; requestRender = () => {};
         scheduleSelectedProjectionRangeCheck = () => {}; flushPendingRender = () => {};
         requestHttpSyncNow = () => {}; scheduleHttpSync = () => {};
+      },
+      requestHttpSync, scheduleBackgroundWorkspaceSync, requestBackgroundWorkspaceSync,
+      nextBackgroundProjection, cancelBackgroundWorkspaceSync, updateAgentRow,
+      configureSyncTest(request, onSidebar = () => {}) {
+        api = request; renderAgents = onSidebar; requestRender = () => {};
+        flushPendingRender = () => {}; inputHasPriority = () => false;
+        scheduleSelectedProjectionRangeCheck = () => {};
       },
       projectAgentSummary, updateAgentSummary, sidebarAgentActive,
       emptyWorkMap, projectWorkMap, consumeWorkMapEvents, apiPath: frontendRuntime.apiPath,
@@ -124,6 +131,7 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime) {
     () => ({ matches: false, addEventListener() {} }),
     { reconcileHtmlChildren(container, html) { container.innerHTML = html; } },
     loadToolPresenters(),
+    clock.Date || Date, clock.setTimeout || setTimeout, clock.clearTimeout || clearTimeout,
   );
   runtime.state.snapshot.tool_visibility = {
     hidden_names: ["SetTitle"], hidden_prefixes: ["WorkMap.", "Worker."], activity_names: ["Worker.Wait"],
@@ -172,6 +180,58 @@ function uiProjectionRange(agentId, revision, count, start, end) {
     agent_id: agentId, revision, count, start, end,
     projections: uiProjectionMessages(start, end),
   };
+}
+
+function projectionSchedulerHarness(counts = [3, 2]) {
+  let now = 0, timerId = 0, sidebarRenders = 0, activeRequests = 0, maxRequests = 0;
+  const timers = new Map(), requests = [];
+  const clock = {
+    Date: class extends Date { static now() { return now; } },
+    setTimeout(callback, delay) {
+      const id = ++timerId; timers.set(id, { callback, at: now + delay }); return id;
+    },
+    clearTimeout(id) { timers.delete(id); },
+  };
+  const r = loadRuntime("../src/webui/app.js", globalThis.MeFrontendRuntime, clock);
+  Object.assign(r.state, {
+    workspaceId: "chat", selectedAgent: "a0", authenticated: true, connected: true,
+    connectionPhase: "connected", connectionHadSuccess: true, activeCatchUpPending: false,
+  });
+  r.state.gateway.workspaces = counts.map((_, index) => ({ id: index ? `w${index}` : "chat", builtin: !index }));
+  counts.forEach((count, index) => {
+    const workspaceId = r.state.gateway.workspaces[index].id;
+    const bucket = index ? r.gatewayWorkspaceState(workspaceId) : r.state;
+    bucket.snapshot = { ...r.state.snapshot, revision: 1, environment: { workspace: `/${workspaceId}` },
+      agents: Array.from({ length: count }, (_, i) => ({ id: `a${i}`, event_count: 1000 })) };
+    bucket.snapshotInitialized = true; bucket.edbCacheInitialized = true;
+    for (const meta of bucket.snapshot.agents) bucket.stores.set(meta.id, r.createAgentStore(meta));
+  });
+  const foreground = r.state.stores.get("a0");
+  r.installProjectionState(foreground, uiProjectionState("a0", "initial", 1000),
+    uiProjectionRange("a0", "initial", 1000, 936, 1000));
+  r.configureSyncTest((path, options, workspaceId) => {
+    activeRequests++; maxRequests = Math.max(maxRequests, activeRequests);
+    return new Promise((resolve, reject) => {
+      requests.push({ path, body: JSON.parse(options.body), workspaceId, signal: options.signal,
+        at: now, resolve, reject });
+    }).finally(() => { activeRequests--; });
+  }, () => { sidebarRenders++; });
+  function payload(index, { count = 1000, revision = `r${index}`, changed = 0, active = false, start } = {}) {
+    const request = requests[index];
+    const bucket = request.workspaceId === "chat" ? r.state : r.gatewayWorkspaceState(request.workspaceId);
+    const target = request.body.selected_agent;
+    return {
+      ok: true, ui_projection: true, selected_agent: target, snapshot: bucket.snapshot,
+      api_activity: { agent_id: target, active, received_sse_events: index },
+      projection_states: bucket.snapshot.agents.map((meta) => ({
+        ...uiProjectionState(meta.id, revision, count, changed),
+        summary: { turn_state: active ? "Started" : "Completed" },
+        ...(meta.id === target ? { range: uiProjectionRange(meta.id, revision, count, start ?? Math.max(0, count - 64), count) } : {}),
+      })),
+    };
+  }
+  return { r, requests, timers, payload, advance(ms) { now += ms; }, now: () => now,
+    maxRequests: () => maxRequests, sidebarRenders: () => sidebarRenders };
 }
 
 function visibleProjection(projection) {
@@ -778,7 +838,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     for (const relative of ["../src/webui/app.js"]) {
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
       expect(source).toContain("ui_projection: usesUiProjection()");
-      expect(source).toContain("? { id, projection_revision: store.projectionRevision }");
       expect(source).toContain("const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));");
     }
   });
@@ -1136,7 +1195,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     )).toEqual({ direction: "before", retain: "start" });
   });
 
-  test("keeps inactive Workspace and unselected session projections metadata-only", async () => {
+  test("updates unselected summaries without advancing the body cursor", async () => {
     const runtime = loadRuntime("../src/webui/app.js");
     const workspace = runtime.emptyGatewayWorkspaceState();
     workspace.snapshot = {
@@ -1149,12 +1208,14 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     await runtime.synchronizeProjectionBucket(workspace, {
       ui_projection: true,
       projection_states: [
-        uiProjectionState("one", "one-revision", 500),
+        { ...uiProjectionState("one", "one-revision", 500), summary: { turn_state: "Started" } },
         uiProjectionState("two", "two-revision", 700),
       ],
     }, "inactive", () => {});
-    expect(workspace.stores.get("one").projectionCount).toBe(500);
-    expect(workspace.stores.get("two").projectionCount).toBe(700);
+    expect(workspace.stores.get("one").projectionRevision).toBeNull();
+    expect(workspace.stores.get("two").projectionRevision).toBeNull();
+    expect(workspace.stores.get("one").projectionCount).toBe(0);
+    expect(runtime.sidebarAgentActive(workspace.stores.get("one").summary)).toBe(true);
     expect(workspace.stores.get("one").projection.messages).toEqual([]);
     expect(workspace.stores.get("two").projection.messages).toEqual([]);
     expect(workspace.stores.get("one").projectionLoading).toBe(false);
@@ -1594,5 +1655,232 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       dispose();
       expect(removed.map(([type]) => type)).toEqual(["scroll", "pointermove", "pointerleave"]);
     }
+  });
+});
+
+
+describe("bounded background projection scheduling", () => {
+  test("round-robins every session with one request and a global gap, without selecting it", async () => {
+    const h = projectionSchedulerHarness([26, 25]);
+    const { r, requests } = h;
+    const foreground = r.state.stores.get("a0").projection;
+    const visited = new Set();
+    for (let index = 0; index < 50; index++) {
+      const pending = r.requestBackgroundWorkspaceSync();
+      expect(requests).toHaveLength(index + 1);
+      await r.requestBackgroundWorkspaceSync();
+      expect(requests).toHaveLength(index + 1);
+      const request = requests[index];
+      expect(request.path).toBe("/api/sync");
+      expect(request.body.ui_projection).toBe(true);
+      expect(request.body.agents.filter((a) => a.projection_window)).toHaveLength(1);
+      visited.add(`${request.workspaceId}:${request.body.selected_agent}`);
+      request.resolve(h.payload(index, { active: true }));
+      await pending;
+      expect(r.state.selectedAgent).toBe("a0");
+      expect(r.state.workspaceId).toBe("chat");
+      expect(r.state.stores.get("a0").projection).toBe(foreground);
+      await r.requestBackgroundWorkspaceSync();
+      expect(requests).toHaveLength(index + 1);
+      h.advance(1000);
+    }
+    expect(visited.size).toBe(50);
+    expect(visited.has("chat:a0")).toBe(false);
+    expect(h.maxRequests()).toBe(1);
+    for (const bucket of [r.state, r.gatewayWorkspaceState("w1")]) {
+      for (const store of bucket.stores.values()) {
+        expect(store.projection.messages).toHaveLength(64);
+        expect(store.events).toEqual([]);
+      }
+    }
+    expect(r.sidebarAgentActive(r.gatewayWorkspaceState("w1").stores.get("a0").summary)).toBe(true);
+  });
+
+  test("foreground streaming keeps its own cadence while a background response is delayed", async () => {
+    const h = projectionSchedulerHarness([40, 40]);
+    const { r, requests } = h;
+    const background = r.requestBackgroundWorkspaceSync();
+    const oldSummary = r.state.stores.get("a1").summary;
+    for (let index = 1; index <= 8; index++) {
+      const foreground = r.requestHttpSync();
+      expect(requests).toHaveLength(index + 1);
+      requests[index].resolve(h.payload(index, { active: true, start: 999, changed: 999 }));
+      await foreground;
+      expect(r.state.stores.get("a0").projectionRevision).toBe(`r${index}`);
+      expect(h.timers.get(r.state.syncTimer).at - h.now()).toBe(250);
+      expect(r.state.backgroundSyncOperation).not.toBeNull();
+      h.advance(250);
+    }
+    expect(r.state.stores.get("a1").summary).not.toBe(oldSummary);
+    expect(r.sidebarAgentActive(r.state.stores.get("a1").summary)).toBe(true);
+    const latestSummary = r.state.stores.get("a1").summary;
+    requests[0].resolve(h.payload(0, { active: false }));
+    await background;
+    expect(r.state.stores.get("a1").projection.messages).toHaveLength(64);
+    expect(r.state.stores.get("a1").summary).toBe(latestSummary);
+    expect(r.state.stores.get("a0").projectionRevision).toBe("r8");
+    expect(r.state.backgroundNextRequestAt - h.now()).toBe(2000);
+    expect(h.maxRequests()).toBe(2);
+  });
+
+  test("retains the real background slot after cancellation and promotes selection immediately", async () => {
+    const h = projectionSchedulerHarness([3]);
+    const { r, requests } = h;
+    const background = r.requestBackgroundWorkspaceSync();
+    const operation = r.state.backgroundSyncOperation;
+    r.cancelBackgroundWorkspaceSync("chat");
+    r.state.selectedAgent = "a1";
+    r.state.syncGeneration++;
+    expect(operation.controller.signal.aborted).toBe(true);
+    expect(r.state.backgroundSyncOperation).toBe(operation);
+    h.advance(20000);
+    await r.requestBackgroundWorkspaceSync();
+    expect(requests).toHaveLength(1);
+    const foreground = r.requestHttpSync();
+    expect(requests).toHaveLength(2);
+    requests[1].resolve(h.payload(1, { revision: "new-foreground" }));
+    await foreground;
+    const installed = r.state.stores.get("a1").projection;
+    requests[0].resolve(h.payload(0, { revision: "late-background" }));
+    await background;
+    expect(r.state.stores.get("a1").projection).toBe(installed);
+    expect(r.state.stores.get("a1").projectionRevision).toBe("new-foreground");
+    expect(r.state.backgroundSyncOperation).toBeNull();
+    h.advance(1000);
+    const next = r.requestBackgroundWorkspaceSync();
+    expect(requests[2].body.selected_agent).not.toBe("a1");
+    requests[2].resolve(h.payload(2));
+    await next;
+    expect(h.maxRequests()).toBe(2);
+  });
+
+  test("background updates retain the bounded window through retries and large jumps", async () => {
+    const h = projectionSchedulerHarness([2]);
+    const { r, requests } = h;
+    const store = r.state.stores.get("a1");
+    const first = r.requestBackgroundWorkspaceSync();
+    requests[0].resolve(h.payload(0)); await first;
+    const previous = store.projection;
+    h.advance(5000);
+    const failed = r.requestBackgroundWorkspaceSync();
+    const invalid = h.payload(1);
+    invalid.projection_states.find((s) => s.agent_id === "a1").range.revision = "stale";
+    requests[1].resolve(invalid); await failed;
+    expect(store.projection).toBe(previous);
+    expect(store.backgroundFailures).toBe(1);
+    expect(store.backgroundNextSyncAt - h.now()).toBe(1000);
+    h.advance(1000);
+    const append = r.requestBackgroundWorkspaceSync();
+    requests[2].resolve(h.payload(2, { count: 1100, changed: 1000, start: 1000 })); await append;
+    expect(store.projection.messages).toHaveLength(164);
+    expect(store.projectionRevision).toBe("r2");
+    expect(store.backgroundFailures).toBe(0);
+    h.advance(5000);
+    const jump = r.requestBackgroundWorkspaceSync();
+    requests[3].resolve(h.payload(3, { count: 2000, changed: 1100 })); await jump;
+    expect(store.projection.messages).toHaveLength(64);
+    expect([store.projectionStart, store.projectionEnd]).toEqual([1936, 2000]);
+    expect(r.state.stores.get("a0").projectionRevision).toBe("initial");
+  });
+
+  test("discovers unopened workspaces and lights their sessions before any body is fetched", async () => {
+    const h = projectionSchedulerHarness([1, 2]);
+    const { r, requests } = h;
+    const workspace = r.gatewayWorkspaceState("w1");
+    workspace.snapshotInitialized = false;
+    workspace.stores.clear();
+    const pending = r.requestBackgroundWorkspaceSync();
+    expect(requests[0].body.selected_agent).toBeNull();
+    requests[0].resolve(h.payload(0, { active: true })); await pending;
+    expect(workspace.snapshotInitialized).toBe(true);
+    expect(r.sidebarAgentActive(workspace.stores.get("a0").summary)).toBe(true);
+    expect(workspace.stores.get("a0").projection.messages).toEqual([]);
+    h.advance(1000);
+    const body = r.requestBackgroundWorkspaceSync();
+    requests[1].resolve(h.payload(1, { active: true })); await body;
+    expect(workspace.stores.get(requests[1].body.selected_agent).projection.messages).toHaveLength(64);
+    expect(r.state.workspaceId).toBe("chat");
+  });
+
+  test("renders the active dot from unselected session summaries without a loading mask", async () => {
+    const h = projectionSchedulerHarness([1, 1]);
+    const { r, requests } = h;
+    const pending = r.requestBackgroundWorkspaceSync();
+    requests[0].resolve(h.payload(0, { active: true })); await pending;
+    const nodes = new Map();
+    function node() {
+      const classes = new Set();
+      return { classes, textContent: "", setAttribute() {},
+        classList: { toggle(name, enabled) { if (enabled) classes.add(name); else classes.delete(name); } } };
+    }
+    const row = node();
+    row.querySelector = (selector) => {
+      if (!nodes.has(selector)) nodes.set(selector, node());
+      return nodes.get(selector);
+    };
+    const workspace = r.gatewayWorkspaceState("w1");
+    r.updateAgentRow(row, workspace.snapshot.agents[0], "w1", workspace);
+    expect(nodes.get(".agent-dot").classes.has("active")).toBe(true);
+    expect(nodes.get(".agent-dot").classes.has("loading")).toBe(false);
+    workspace.stores.get("a0").summary = { turnState: "Completed" };
+    r.updateAgentRow(row, workspace.snapshot.agents[0], "w1", workspace);
+    expect(nodes.get(".agent-dot").classes.has("active")).toBe(false);
+  });
+  test("a late response cannot recreate a closed Workspace", async () => {
+    const h = projectionSchedulerHarness([1, 1]);
+    const { r, requests } = h;
+    const pending = r.requestBackgroundWorkspaceSync();
+    const payload = h.payload(0);
+    r.state.gateway.workspaces = [{ id: "chat", builtin: true }];
+    r.state.workspaceStates.delete("w1");
+    requests[0].resolve(payload); await pending;
+    expect(r.state.workspaceStates.has("w1")).toBe(false);
+    expect(r.state.backgroundSyncOperation).toBeNull();
+  });
+
+  test("backs off repeated background failures and pauses when the foreground connection degrades", async () => {
+    const h = projectionSchedulerHarness([2]);
+    const { r, requests } = h;
+    const store = r.state.stores.get("a1");
+    for (let index = 0; index < 7; index++) {
+      const pending = r.requestBackgroundWorkspaceSync();
+      requests[index].reject(new Error("weak network")); await pending;
+      const expected = Math.min(30000, 1000 * (2 ** index));
+      expect(store.backgroundNextSyncAt - h.now()).toBe(expected);
+      expect(store.projectionRevision).toBeNull();
+      h.advance(expected);
+    }
+    r.state.connectionPhase = "degraded";
+    await r.requestBackgroundWorkspaceSync();
+    expect(requests).toHaveLength(7);
+    r.state.connectionPhase = "connected";
+    const recovered = r.requestBackgroundWorkspaceSync();
+    requests[7].resolve(h.payload(7)); await recovered;
+    expect(store.backgroundFailures).toBe(0);
+    expect(store.projectionRevision).toBe("r7");
+    expect(h.maxRequests()).toBe(1);
+  });
+
+  test("global timer spacing is enforced even when many periodic triggers request refresh", async () => {
+    const h = projectionSchedulerHarness([10]);
+    const { r, requests } = h;
+    r.scheduleBackgroundWorkspaceSync();
+    let timer = h.timers.get(r.state.backgroundSyncTimer);
+    expect(timer.at).toBe(0);
+    h.timers.delete(r.state.backgroundSyncTimer);
+    timer.callback();
+    requests[0].resolve(h.payload(0));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    for (let i = 0; i < 20; i++) r.scheduleBackgroundWorkspaceSync(0);
+    expect(h.timers.size).toBe(1);
+    timer = h.timers.get(r.state.backgroundSyncTimer);
+    expect(timer.at).toBe(1000);
+    h.advance(1000);
+    h.timers.delete(r.state.backgroundSyncTimer);
+    timer.callback();
+    expect(requests).toHaveLength(2);
+    requests[1].resolve(h.payload(1));
+    for (let i = 0; i < 10; i++) await Promise.resolve();
+    expect(h.maxRequests()).toBe(1);
   });
 });
