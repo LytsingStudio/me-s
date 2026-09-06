@@ -296,6 +296,7 @@ fn start_with_server(
     )?;
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
+    let codex_usage = Arc::new(crate::codex_usage::CodexUsage::start(managed.is_none())?);
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
@@ -327,6 +328,7 @@ fn start_with_server(
                         let commands = Arc::clone(&commands);
                         let auth = Arc::clone(&auth);
                         let managed = Arc::clone(&managed);
+                        let codex_usage = Arc::clone(&codex_usage);
                         let remote_control = Arc::clone(&worker_remote_control);
                         let session_terminals = Arc::clone(&worker_session_terminals);
                         let host_files = Arc::clone(&worker_host_files);
@@ -338,6 +340,7 @@ fn start_with_server(
                                     backend.as_ref(),
                                     commands.as_ref(),
                                     auth.as_ref(),
+                                    codex_usage.as_ref(),
                                     managed.as_ref().as_ref(),
                                     remote_control.as_ref(),
                                     session_terminals.as_ref(),
@@ -616,6 +619,7 @@ fn serve(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
+    codex_usage: &crate::codex_usage::CodexUsage,
     managed: Option<&ManagedWebAccess>,
     remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
@@ -636,6 +640,7 @@ fn serve(
             backend,
             commands,
             auth,
+            codex_usage,
             remote_control,
             session_terminals,
             host_files,
@@ -780,6 +785,7 @@ fn route(
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
+    codex_usage: &crate::codex_usage::CodexUsage,
     remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
     host_files: &HostFileManager,
@@ -860,6 +866,9 @@ fn route(
     }
     if !auth.authorized_any(request_session_tokens(request, auth.cookie_prefix())) {
         return Ok(unauthorized_response());
+    }
+    if request.method() == &Method::Get && path == "/api/codex/usage" {
+        return Ok(json_response(StatusCode(200), &codex_usage.snapshot()));
     }
     operational_route(
         request,
@@ -4271,6 +4280,14 @@ mod tests {
         assert_eq!(status["authenticated"], false);
         assert_eq!(
             client
+                .get(format!("{address}/api/codex/usage"))
+                .send()
+                .unwrap()
+                .status(),
+            reqwest::StatusCode::UNAUTHORIZED
+        );
+        assert_eq!(
+            client
                 .post(format!("{address}/api/sync"))
                 .json(&json!({
                     "snapshot_revision": null, "agents": [], "selected_agent": null,
@@ -4370,6 +4387,16 @@ mod tests {
             .json()
             .unwrap();
         assert_eq!(authenticated["authenticated"], true);
+        let usage: serde_json::Value = client
+            .get(format!("{address}/api/codex/usage"))
+            .header(reqwest::header::COOKIE, cookie)
+            .send()
+            .unwrap()
+            .json()
+            .unwrap();
+        assert_eq!(usage["status"], "logged_out");
+        assert_eq!(usage["days"], json!([]));
+        assert!(usage.get("account_id").is_none());
         assert!(
             client
                 .get(format!("{address}/api/snapshot"))

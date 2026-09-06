@@ -74,6 +74,7 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
       normalizeWindowBorderStyle: typeof normalizeWindowBorderStyle === "function" ? normalizeWindowBorderStyle : null,
       localPreferenceSettingsHtml: typeof localPreferenceSettingsHtml === "function" ? localPreferenceSettingsHtml : null,
       bindLocalPreferenceSettings,
+      codexUsageHtml, bindCodexUsageSettings,
       setSettingsRequest(request) { api = request; },
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
       backgroundSyncCanRun: typeof backgroundSyncCanRun === "function" ? backgroundSyncCanRun : null,
@@ -1882,5 +1883,85 @@ describe("bounded background projection scheduling", () => {
     requests[1].resolve(h.payload(1));
     for (let i = 0; i < 10; i++) await Promise.resolve();
     expect(h.maxRequests()).toBe(1);
+  });
+});
+
+describe("backend-owned Codex usage settings", () => {
+  const sample = {
+    status: "ready", updated_at: "2026-03-01T12:00:00+08:00",
+    range_start: "2026-01-31", seven_day_start: "2026-02-23", range_end: "2026-03-01",
+    days: [{ start_date: "2026-01-31", tokens: 12 }, { start_date: "2026-02-28", tokens: 123456 }, { start_date: "2026-03-01", tokens: 0 }],
+    total_tokens: 123468,
+  };
+
+  test("shared direct, gateway and client settings show usage only after login", () => {
+    for (const capabilities of [{}, { multipleWorkspaces: true }, { multipleWorkspaces: true, targetConfiguration: true }]) {
+      const runtime = loadRuntime("../src/webui/app.js", { ...globalThis.MeFrontendRuntime, capabilities });
+      runtime.state.authenticated = false;
+      expect(runtime.localPreferenceSettingsHtml()).not.toContain("data-codex-usage");
+      runtime.state.authenticated = true;
+      expect(runtime.localPreferenceSettingsHtml()).toContain("data-codex-usage");
+      expect(runtime.apiPath("/api/codex/usage", "work")).toBe("/api/codex/usage");
+      expect(runtime.codexUsageHtml({ status: "logged_out" })).toBe('<p class="settings-help">Codex 未登录</p>');
+    }
+  });
+
+  test("actual tokens, seven dates, partial thirty-day totals, and missing values stay distinct", () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const html = runtime.codexUsageHtml(sample);
+    expect(html).toContain("123,468");
+    expect(html).toContain("已有 3 天数据");
+    expect(html.match(/class="codex-usage-day"/g)).toHaveLength(7);
+    expect(html).toContain("2026-02-23：暂无数据");
+    expect(html).toContain("2026-03-01：0 tokens");
+    expect(html).toContain("2026-02-28：123,456 tokens");
+    expect(html).toContain("更新于");
+    expect(runtime.codexUsageHtml({ ...sample, status: "error" })).toContain("123,468");
+    expect(runtime.codexUsageHtml({ ...sample, status: "error" })).toContain("暂时无法更新");
+    const empty = runtime.codexUsageHtml({ ...sample, days: [], total_tokens: null });
+    expect(empty).toContain("暂无用量数据");
+    expect(empty).not.toContain("codex-usage-total");
+  });
+
+  test("cache reads are throttled, preserve editor input, and stop on detached settings", async () => {
+    const timers = [];
+    const runtime = loadRuntime("../src/webui/app.js", globalThis.MeFrontendRuntime, {
+      setTimeout(callback, delay) { timers.push({ callback, delay }); return timers.length; },
+    });
+    const target = { isConnected: true, innerHTML: "", querySelector() { return null; } };
+    const input = { value: "unsaved" };
+    const container = { querySelector(selector) { return selector === "[data-codex-usage]" ? target : input; } };
+    let calls = 0;
+    runtime.setSettingsRequest(async (path) => { expect(path).toBe("/api/codex/usage"); calls++; return sample; });
+    runtime.state.authenticated = false;
+    await runtime.bindCodexUsageSettings(container);
+    expect(calls).toBe(0);
+    runtime.state.authenticated = true;
+    await runtime.bindCodexUsageSettings(container);
+    expect(calls).toBe(1);
+    expect(input.value).toBe("unsaved");
+    expect(target.innerHTML).toContain("123,468");
+    expect(timers).toHaveLength(1);
+    expect(timers[0].delay).toBe(60000);
+    runtime.setSettingsRequest(async () => { throw new Error("network"); });
+    await timers.shift().callback();
+    expect(target.innerHTML).toContain("123,468");
+    expect(target.innerHTML).toContain("暂时无法更新");
+    target.isConnected = false;
+    await timers.shift().callback();
+    expect(timers).toHaveLength(0);
+  });
+
+  test("late usage replies do not update a replacement connection", async () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    runtime.state.authenticated = true;
+    const target = { isConnected: true, innerHTML: "untouched", querySelector() { return null; } };
+    let resolve;
+    runtime.setSettingsRequest(() => new Promise((done) => { resolve = done; }));
+    const pending = runtime.bindCodexUsageSettings({ querySelector() { return target; } });
+    runtime.state.syncGeneration++;
+    resolve(sample);
+    await pending;
+    expect(target.innerHTML).toBe("untouched");
   });
 });

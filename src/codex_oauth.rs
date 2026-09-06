@@ -640,6 +640,10 @@ fn oauth_response_detail(body: &str) -> String {
         .unwrap_or_else(|| "OAuth server rejected the request".to_owned())
 }
 
+pub(crate) fn stored_request_credential(path: &Path) -> Result<CodexRequestCredential> {
+    request_credential_from_document(&read_auth(path)?)
+}
+
 fn read_auth(path: &Path) -> Result<Value> {
     let value: Value = serde_json::from_str(&fs::read_to_string(path)?)?;
     if !value.is_object() {

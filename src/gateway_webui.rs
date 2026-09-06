@@ -94,6 +94,7 @@ fn start_from(
     let (server, port) = bind_first_available(first_port)?;
     let address = format!("http://{GATEWAY_BIND_ADDRESS}:{port}");
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
+    let codex_usage = Arc::new(crate::codex_usage::CodexUsage::start(true)?);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
     let worker = thread::Builder::new()
@@ -104,9 +105,10 @@ fn start_from(
                     Ok(Some(request)) => {
                         let gateway = Arc::clone(&gateway);
                         let auth = Arc::clone(&auth);
+                        let codex_usage = Arc::clone(&codex_usage);
                         let _ = thread::Builder::new()
                             .name("me-gateway-request".into())
-                            .spawn(move || serve(request, gateway, auth));
+                            .spawn(move || serve(request, gateway, auth, codex_usage));
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -149,8 +151,18 @@ fn bind_error_kind(error: &(dyn std::error::Error + 'static)) -> Option<std::io:
     None
 }
 
-fn serve(mut request: Request, gateway: Arc<Gateway>, auth: Arc<WebSessionAuth>) {
-    let result = route(&mut request, gateway.as_ref(), auth.as_ref());
+fn serve(
+    mut request: Request,
+    gateway: Arc<Gateway>,
+    auth: Arc<WebSessionAuth>,
+    codex_usage: Arc<crate::codex_usage::CodexUsage>,
+) {
+    let result = route(
+        &mut request,
+        gateway.as_ref(),
+        auth.as_ref(),
+        codex_usage.as_ref(),
+    );
     let response = match result {
         Ok(response) => response,
         Err(error) => {
@@ -166,7 +178,12 @@ fn serve(mut request: Request, gateway: Arc<Gateway>, auth: Arc<WebSessionAuth>)
 
 type HttpResponse = Response<Box<dyn Read + Send>>;
 
-fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Result<HttpResponse> {
+fn route(
+    request: &mut Request,
+    gateway: &Gateway,
+    auth: &WebSessionAuth,
+    codex_usage: &crate::codex_usage::CodexUsage,
+) -> Result<HttpResponse> {
     let url = request.url().to_owned();
     let path = url.split('?').next().unwrap_or(url.as_str()).to_owned();
     if request.method() == &Method::Get
@@ -247,6 +264,9 @@ fn route(request: &mut Request, gateway: &Gateway, auth: &WebSessionAuth) -> Res
     }
 
     match (request.method(), path.as_str()) {
+        (&Method::Get, "/api/codex/usage") => {
+            Ok(json_response(StatusCode(200), &codex_usage.snapshot()))
+        }
         (&Method::Get, "/api/gateway/state") => {
             Ok(json_response(StatusCode(200), &gateway.snapshot()?))
         }

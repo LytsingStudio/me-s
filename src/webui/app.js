@@ -6024,10 +6024,14 @@ function localPreferenceSettingsHtml() {
       ${clientVersion}
       <div class="settings-version-row"><dt>${serviceLabel}</dt><dd data-service-version aria-live="polite">${serviceVersion}</dd></div>
     </dl>
-  </section>`;
+  </section>${state.authenticated ? `<section class="settings-section settings-codex-section">
+    <header class="settings-section-header"><div class="settings-section-heading"><h3>Codex 用量</h3></div></header>
+    <div data-codex-usage aria-live="polite"><p class="settings-help">正在获取…</p></div>
+  </section>` : ""}`;
 }
 
 async function bindLocalPreferenceSettings(container = elements.modalContent) {
+  void bindCodexUsageSettings(container);
   const borderStyle = container.querySelector('[data-local-preference="window-border-style"]');
   borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));
   const rawEdbDecoding = container.querySelector('[data-local-preference="raw-edb-decoding"]');
@@ -6042,6 +6046,63 @@ async function bindLocalPreferenceSettings(container = elements.modalContent) {
   } catch {
     serviceVersion.textContent = "暂时无法获取";
   }
+}
+
+function codexUsageHtml(usage) {
+  if (usage.status === "logged_out") return '<p class="settings-help">Codex 未登录</p>';
+  if (usage.status === "loading") return '<p class="settings-help">等待更新</p>';
+  const days = Array.isArray(usage.days) ? usage.days : [];
+  const formatTokens = (tokens) => Number(tokens).toLocaleString("zh-CN");
+  const updated = usage.updated_at ? `<p class="settings-help">更新于 ${escapeHtml(new Date(usage.updated_at).toLocaleString("zh-CN"))}</p>` : "";
+  const error = usage.status === "error" ? '<p class="codex-usage-error">暂时无法更新</p>' : "";
+  if (!days.length) return `${error}${usage.status === "error" ? "" : '<p class="settings-help">暂无用量数据</p>'}${updated}`;
+  const byDate = new Map(days.map((day) => [day.start_date, day.tokens]));
+  const recent = Array.from({ length: 7 }, (_, index) => {
+    const date = new Date(`${usage.seven_day_start}T00:00:00Z`);
+    date.setUTCDate(date.getUTCDate() + index);
+    const key = date.toISOString().slice(0, 10);
+    return { date: key, tokens: byDate.get(key) };
+  });
+  const maximum = Math.max(1, ...recent.map((day) => day.tokens ?? 0));
+  const chart = recent.map((day) => {
+    const available = day.tokens != null;
+    const value = available ? formatTokens(day.tokens) : "—";
+    const label = `${day.date}：${available ? `${value} tokens` : "暂无数据"}`;
+    return `<div class="codex-usage-day" title="${escapeAttr(label)}" aria-label="${escapeAttr(label)}">
+      <span class="codex-usage-date">${day.date.slice(5).replace("-", "/")}</span>
+      <div class="codex-usage-track"><span class="codex-usage-bar" style="width:${day.tokens > 0 ? Math.max(2, day.tokens / maximum * 100) : 0}%"></span></div>
+      <span class="codex-usage-value">${value}</span>
+    </div>`;
+  }).join("");
+  const rows = days.slice().reverse().map((day) => `<tr><td>${escapeHtml(day.start_date)}</td><td>${formatTokens(day.tokens)}</td></tr>`).join("");
+  return `${error}<div class="codex-usage-total"><span>近 30 天</span><strong>${formatTokens(usage.total_tokens)} <small>tokens</small></strong></div>
+    <p class="settings-help">${escapeHtml(usage.range_start)} — ${escapeHtml(usage.range_end)} · 已有 ${days.length} 天数据</p>
+    <h4 class="codex-usage-heading">近 7 天</h4><div class="codex-usage-chart">${chart}</div>
+    <details class="codex-usage-details"><summary>近 30 天每日用量</summary><table><thead><tr><th>日期</th><th>Tokens</th></tr></thead><tbody>${rows}</tbody></table></details>${updated}`;
+}
+
+async function bindCodexUsageSettings(container) {
+  const target = container.querySelector("[data-codex-usage]");
+  if (!target || !state.authenticated) return;
+  const generation = state.syncGeneration;
+  let previous = null;
+  const current = () => target.isConnected && state.authenticated && generation === state.syncGeneration;
+  const update = async () => {
+    if (!current()) return;
+    try {
+      const usage = await api("/api/codex/usage");
+      if (!current()) return;
+      previous = usage;
+      const expanded = target.querySelector("details")?.open;
+      target.innerHTML = codexUsageHtml(usage);
+      if (expanded && target.querySelector("details")) target.querySelector("details").open = true;
+    } catch {
+      if (!current()) return;
+      target.innerHTML = codexUsageHtml({ ...previous, status: "error" });
+    }
+    if (current()) setTimeout(update, 60000);
+  };
+  await update();
 }
 
 function openLocalSettings() {
