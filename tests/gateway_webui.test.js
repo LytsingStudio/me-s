@@ -749,6 +749,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       .toBe("/api/workspaces/w-one/ui-projections/main/range?start=0&end=1&revision=one");
     expect(gateway.apiPath("/api/session-terminal/main/read", "w-one"))
       .toBe("/api/workspaces/w-one/session-terminal/main/read");
+    for (const operation of ["preview", "original"]) {
+      const path = `/api/images/main/${"a".repeat(64)}/${operation}`;
+      expect(direct.apiPath(path, "w-one")).toBe(path);
+      expect(gateway.apiPath(path, "w-one")).toBe(`/api/workspaces/w-one${path.slice(4)}`);
+    }
     expect(gateway.apiPath("/api/auth/status", "w-one")).toBe("/api/auth/status");
     const first = shared.emptyGatewayWorkspaceState();
     const second = shared.emptyGatewayWorkspaceState();
@@ -1911,6 +1916,8 @@ describe("backend-owned Codex usage settings", () => {
     const html = runtime.codexUsageHtml(sample);
     expect(html).toContain("123,468");
     expect(html).toContain("已有 3 天数据");
+    expect(html).toContain('<span>近 7 天</span><strong>123,456 <small>tokens</small></strong>');
+    expect(html).toContain("2026-02-23 — 2026-03-01 · 已有 2 天数据");
     expect(html.match(/class="codex-usage-day"/g)).toHaveLength(7);
     expect(html).toContain("2026-02-23：暂无数据");
     expect(html).toContain("2026-03-01：0 tokens");
@@ -1921,6 +1928,25 @@ describe("backend-owned Codex usage settings", () => {
     const empty = runtime.codexUsageHtml({ ...sample, days: [], total_tokens: null });
     expect(empty).toContain("暂无用量数据");
     expect(empty).not.toContain("codex-usage-total");
+  });
+
+  test("seven-day totals distinguish absent data from reported zero and include both date boundaries", () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const render = (days) => runtime.codexUsageHtml({ ...sample, days });
+    const absent = render([sample.days[0]]);
+    expect(absent).toContain('<span>近 7 天</span><strong>— <small>tokens</small></strong>');
+    expect(absent).toContain("已有 0 天数据");
+    const zero = render([sample.days[2]]);
+    expect(zero).toContain('<span>近 7 天</span><strong>0 <small>tokens</small></strong>');
+    expect(zero).toContain("已有 1 天数据");
+    const boundary = render([
+      { start_date: "2026-02-22", tokens: 100 },
+      { start_date: "2026-02-23", tokens: 2 },
+      { start_date: "2026-03-01", tokens: 3 },
+    ]);
+    expect(boundary).toContain('<span>近 7 天</span><strong>5 <small>tokens</small></strong>');
+    const css = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
+    expect(css).toContain(".codex-usage-total strong { font-size: 14px; font-weight: 600;");
   });
 
   test("cache reads are throttled, preserve editor input, and stop on detached settings", async () => {

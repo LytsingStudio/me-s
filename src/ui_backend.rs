@@ -174,6 +174,20 @@ pub trait UiBackend: Send + Sync {
         UiProjectionCache::default().hash(&snapshot, agent_id, start, end, expected_revision)
     }
 
+    fn image_content(
+        &self,
+        agent_id: &AgentId,
+        sha256: &str,
+    ) -> Result<Option<crate::event::ImageContentEvent>> {
+        let snapshot = self.snapshot()?;
+        Ok(snapshot.agent(agent_id).and_then(|agent| {
+            agent.events.iter().find_map(|event| match event {
+                Event::ImageContent(image) if image.content_sha256 == sha256 => Some(image.clone()),
+                _ => None,
+            })
+        }))
+    }
+
     fn session_terminal_agent_ids(&self) -> Result<Vec<AgentId>> {
         Ok(self
             .snapshot()?

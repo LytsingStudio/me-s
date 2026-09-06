@@ -3406,10 +3406,13 @@ impl EventDataBase {
             )
             .into());
         }
-        if self.events.iter().any(|event| {
+        let image_count = self.events.iter().filter(|event| {
             matches!(event, Event::ImageContent(existing) if existing.tool_call_id == tool_call_id)
-        }) {
-            return Err(format!("tool call {tool_call_id} already has an ImageContentEvent").into());
+        }).count();
+        if image_count >= crate::image_toolbox::image_content_limit(&call.name, &call.arguments) {
+            return Err(
+                format!("tool call {tool_call_id} has reached its image count limit").into(),
+            );
         }
         let source = source.into();
         let mime_type = mime_type.into();

@@ -8,7 +8,7 @@
     "WorkMap.Read", "WorkMap.ReadHistory", "WorkMap.Start", "WorkMap.UpdatePlanState",
     "WorkMap.AddNote", "WorkMap.ChangePlan", "WorkMap.AddPlan", "WorkMap.CloseObjective",
     "WorkMap.AddMemory", "WorkMap.InvalidateMemory",
-    "Image.Info", "Image.View",
+    "Image.Info", "Image.View", "Image.Send",
     "File.Read", "File.ReadBytes", "File.EditBytes", "File.List", "File.Find", "File.Search",
     "File.Stat", "File.MakeDirectory", "File.Create", "File.Edit", "File.Append", "File.Replace",
     "File.Copy", "File.Move", "File.Delete",
@@ -884,6 +884,30 @@
     output(input, output) { const value = objectValue(resultValue(output)); return [noticeBlock("结果", "图片已加入会话", "success"), ...imageMetadataBlocks(value, true)]; },
   });
 
+  define("Image.Send", {
+    title: "发送图片", icon: "image",
+    summary: (input) => Array.isArray(input.urls) ? `${input.urls.length} 张 · ${preview(input.urls[0], 120)}` : "",
+    input: (input) => [listBlock("图片来源", Array.isArray(input.urls) ? input.urls : [])],
+    output(input, output) {
+      const images = objectValue(resultValue(output)).images;
+      return [noticeBlock("结果", `已发送 ${Array.isArray(images) ? images.length : 0} 张图片`, "success")];
+    },
+  });
+
+  function imageAttachments(name, output) {
+    if (!resultSucceeded(output) || !["Image.View", "Image.Send"].includes(name)) return [];
+    const value = objectValue(resultValue(output));
+    const entries = name === "Image.Send" ? value.images : [value];
+    if (!Array.isArray(entries)) return [];
+    return entries.slice(0, 16).map((entry) => entry?.image).filter((image) => image
+      && /^[0-9a-f]{64}$/.test(image.sha256)
+      && Number.isSafeInteger(image.width) && image.width > 0
+      && Number.isSafeInteger(image.height) && image.height > 0).map((image) => ({
+        sha256: image.sha256, width: image.width, height: image.height,
+        format: typeof image.format === "string" && /^[a-z0-9]{1,10}$/i.test(image.format) ? image.format.toLowerCase() : "img",
+      }));
+  }
+
   define("SetTitle", {
     title: "设置会话标题", icon: "title",
     summary: (input) => input.title || "",
@@ -1127,6 +1151,7 @@
     describe,
     present,
     renderDetails,
+    imageAttachments,
     safeJson,
   });
 })();

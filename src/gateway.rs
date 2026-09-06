@@ -443,7 +443,11 @@ impl Gateway {
         let route = self.process_route(workspace_id)?;
         let mut url = reqwest::Url::parse(&format!("{}/api/{child_path}", route.address))?;
         url.set_query(query);
-        let client = if parse_file_download_content_path(child_path).is_some() {
+        let client = if parse_file_download_content_path(child_path).is_some()
+            || matches!(
+                crate::image_toolbox::parse_image_path(child_path),
+                Some((_, _, "original"))
+            ) {
             &self.download_proxy_client
         } else {
             &self.proxy_client
@@ -771,6 +775,7 @@ fn validate_proxy_path(path: &str) -> Result<()> {
     });
     if !matches!(path, "sync" | "snapshot" | "command")
         && !is_ui_projection_path(path)
+        && crate::image_toolbox::parse_image_path(path).is_none()
         && !deletion_blocker
         && !session_terminal
         && !file_post
@@ -797,6 +802,23 @@ fn parse_file_download_content_path(path: &str) -> Option<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn image_proxy_routes_accept_only_scoped_content_addresses() {
+        for operation in ["preview", "original"] {
+            let path = format!("images/main/{}/{operation}", "a".repeat(64));
+            validate_proxy_request(&path, None).unwrap();
+            assert!(validate_proxy_request(&path, Some("path=/private.png")).is_err());
+            assert!(validate_proxy_path(&format!("{path}/extra")).is_err());
+        }
+        for path in [
+            format!("images/../{}/preview", "a".repeat(64)),
+            format!("images/main/{}/original", "A".repeat(64)),
+            "images/main/source.png/preview".into(),
+        ] {
+            assert!(validate_proxy_path(&path).is_err(), "{path}");
+        }
+    }
 
     #[test]
     fn proxy_allowlist_exposes_only_formal_workspace_routes() {

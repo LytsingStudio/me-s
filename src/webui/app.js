@@ -4371,6 +4371,10 @@ function renderEmptyTranscript(container) {
 
 function estimateTranscriptMessageHeight(message) {
   if (!messageIsVisible(message)) return 0;
+  if (message.kind === "tool") {
+    const images = MeToolPresenters.imageAttachments(message.tool.name, toolPresentationOutput(message.tool));
+    if (images.length) return 51 + Math.ceil(images.length / 2) * 260;
+  }
   if (message.kind === "tool" || message.kind === "worker-activity") return 51;
   if (message.kind === "turn-toolbar") return 40;
   if (message.kind === "user") return 72;
@@ -4700,10 +4704,40 @@ function toolPresentationOutput(tool) {
   };
 }
 
+function toolImageItems(tool) {
+  return MeToolPresenters.imageAttachments(tool.name, toolPresentationOutput(tool)).map((image) => {
+    const path = `/api/images/${encodeURIComponent(state.selectedAgent)}/${image.sha256}`;
+    return {
+      preview: frontendRuntime.apiPath(`${path}/preview`, state.workspaceId),
+      original: frontendRuntime.apiPath(`${path}/original`, state.workspaceId),
+      filename: `image-${image.sha256.slice(0, 12)}.${image.format}`,
+      width: image.width, height: image.height,
+    };
+  });
+}
+
+function toolImageGalleryHtml(tool) {
+  const items = toolImageItems(tool);
+  return items.length ? `<me-image-gallery data-items="${escapeAttr(JSON.stringify(items))}"></me-image-gallery>` : "";
+}
+
+function updateToolImageGallery(node, tool) {
+  const items = toolImageItems(tool);
+  const existing = node.querySelector(":scope > me-image-gallery");
+  if (!items.length) { existing?.remove(); return; }
+  const encoded = JSON.stringify(items);
+  if (existing?.dataset.items === encoded) return;
+  const gallery = document.createElement("me-image-gallery");
+  gallery.dataset.items = encoded;
+  if (existing) existing.replaceWith(gallery);
+  else node.insertBefore(gallery, node.querySelector(":scope > .tool-details"));
+}
+
 function renderToolCard(tool, followsTool = false) {
   const view = toolCardView(tool);
   return `<div class="tool-card ${view.status} ${view.expanded ? "expanded" : ""} ${followsTool ? "follows-tool" : ""}" data-tool-card="${escapeAttr(tool.id)}" role="button" tabindex="0" aria-expanded="${view.expanded}">
     <div class="tool-header"><span class="tool-marker">●</span><span class="tool-name" title="${escapeAttr(tool.name)}">${escapeHtml(view.title)}</span><span class="tool-brief">${escapeHtml(view.brief)}</span><span class="tool-time"${view.runningStarted == null ? "" : ` data-running-started="${view.runningStarted}"`}>${escapeHtml(view.time)}</span></div>
+    ${toolImageGalleryHtml(tool)}
     ${view.details ? MeToolPresenters.renderDetails(view.details) : ""}
   </div>`;
 }
@@ -4737,6 +4771,7 @@ function updateToolCardNode(node, tool, followsTool = node.classList.contains("f
   if (time.textContent !== view.time) time.textContent = view.time;
   if (view.runningStarted == null) delete time.dataset.runningStarted;
   else time.dataset.runningStarted = String(view.runningStarted);
+  updateToolImageGallery(node, tool);
   const details = node.querySelector(":scope > .tool-details");
   if (!view.expanded) {
     details?.remove();
@@ -6063,6 +6098,8 @@ function codexUsageHtml(usage) {
     const key = date.toISOString().slice(0, 10);
     return { date: key, tokens: byDate.get(key) };
   });
+  const recentDays = recent.filter((day) => day.tokens != null);
+  const recentTotal = recentDays.length ? formatTokens(recentDays.reduce((total, day) => total + day.tokens, 0)) : "—";
   const maximum = Math.max(1, ...recent.map((day) => day.tokens ?? 0));
   const chart = recent.map((day) => {
     const available = day.tokens != null;
@@ -6077,7 +6114,9 @@ function codexUsageHtml(usage) {
   const rows = days.slice().reverse().map((day) => `<tr><td>${escapeHtml(day.start_date)}</td><td>${formatTokens(day.tokens)}</td></tr>`).join("");
   return `${error}<div class="codex-usage-total"><span>近 30 天</span><strong>${formatTokens(usage.total_tokens)} <small>tokens</small></strong></div>
     <p class="settings-help">${escapeHtml(usage.range_start)} — ${escapeHtml(usage.range_end)} · 已有 ${days.length} 天数据</p>
-    <h4 class="codex-usage-heading">近 7 天</h4><div class="codex-usage-chart">${chart}</div>
+    <div class="codex-usage-total codex-usage-heading"><span>近 7 天</span><strong>${recentTotal} <small>tokens</small></strong></div>
+    <p class="settings-help">${escapeHtml(usage.seven_day_start)} — ${escapeHtml(usage.range_end)} · 已有 ${recentDays.length} 天数据</p>
+    <div class="codex-usage-chart">${chart}</div>
     <details class="codex-usage-details"><summary>近 30 天每日用量</summary><table><thead><tr><th>日期</th><th>Tokens</th></tr></thead><tbody>${rows}</tbody></table></details>${updated}`;
 }
 

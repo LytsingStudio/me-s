@@ -144,6 +144,10 @@ describe("ME Client native adapter", () => {
     expect(await runtime.configureTarget("https://gateway.example")).toEqual({ endpoint: "https://gateway.example" });
     expect(runtime.apiPath("/api/ui-projections/main/state", "workspace-one"))
       .toBe("/api/workspaces/workspace-one/ui-projections/main/state");
+    for (const operation of ["preview", "original"]) {
+      const path = `/api/images/main/${"a".repeat(64)}/${operation}`;
+      expect(runtime.apiPath(path, "workspace-one")).toBe(`/api/workspaces/workspace-one${path.slice(4)}`);
+    }
     const response = await sandbox.fetch("/api/auth/status", { cache: "no-store" });
     expect(await response.json()).toEqual({ required: true, authenticated: false });
     const request = calls.find((call) => call.command === "gateway_request").payload.request;

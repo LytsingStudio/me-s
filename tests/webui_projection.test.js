@@ -33,6 +33,8 @@ function loadProjectionRuntime() {
       estimateContextBreakdown,
       toolBrief,
       renderToolCard,
+      toolImageItems,
+      updateToolImageGallery,
       renderMessageHtml,
       eventRecoveryBacklog,
       shouldUseBulkEventRecovery,
@@ -82,6 +84,34 @@ function assertIncrementalChatMatchesReplay(runtime, events) {
 }
 
 describe("WebUI incremental event projections", () => {
+  test("View and Send show ordered previews while collapsed and preserve a stable gallery", () => {
+    const runtime = loadProjectionRuntime();
+    runtime.state.selectedAgent = "main";
+    const images = ["a", "b"].map((key) => ({ image_event_id: 12, image: {
+      source: "/private/source.png", sha256: key.repeat(64), format: "PNG", width: 1200, height: 800,
+    } }));
+    for (const name of ["Image.View", "Image.Send"]) {
+      const tool = { id: 7, name, args: {}, started: 1000, output: "", updates: [],
+        result: { state: "Succeeded", finished: 2000, detail: JSON.stringify(name === "Image.View" ? images[0] : { images }) } };
+      const items = runtime.toolImageItems(tool);
+      expect(items).toHaveLength(name === "Image.View" ? 1 : 2);
+      expect(items[0].preview).toBe(`/api/images/main/${"a".repeat(64)}/preview`);
+      if (name === "Image.Send") expect(items[1].original).toContain("b".repeat(64));
+      const html = runtime.renderToolCard(tool);
+      expect(html).toContain("<me-image-gallery");
+      expect(html).not.toContain('class="tool-details"');
+      expect(html).not.toContain("/private/source.png");
+      const existing = { dataset: { items: JSON.stringify(items) } };
+      runtime.updateToolImageGallery({ querySelector: () => existing }, tool);
+      runtime.state.expandedTools.add("main:7");
+      runtime.updateToolImageGallery({ querySelector: () => existing }, tool);
+      runtime.state.expandedTools.clear();
+      for (const result of [null, { ...tool.result, state: "Failed" }]) {
+        expect(runtime.toolImageItems({ ...tool, result })).toEqual([]);
+      }
+    }
+  });
+
   test("renders each ordinary tool as one summary line until clicked open", () => {
     const runtime = loadProjectionRuntime();
     runtime.state.selectedAgent = "main";

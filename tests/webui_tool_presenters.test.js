@@ -17,9 +17,18 @@ function succeeded(value, updates = []) {
 }
 
 describe("shared WebUI tool presenters", () => {
+  test("image attachment metadata tolerates missing or malformed formats without exposing source data", () => {
+    const image = { sha256: "a".repeat(64), width: 2, height: 3, source: "/private.png" };
+    for (const format of [undefined, null, 123, "../../png", "PNG"]) {
+      const [attachment] = presenters.imageAttachments("Image.View", succeeded({ image: { ...image, format } }));
+      expect(attachment).toEqual({ sha256: image.sha256, width: 2, height: 3, format: format === "PNG" ? "png" : "img" });
+    }
+    expect(presenters.imageAttachments("Image.Send", succeeded({ images: [{ image: { ...image, width: 0 } }, { image: { ...image, sha256: "bad" } }] }))).toEqual([]);
+  });
+
   test("explicitly covers every first-party and historical compatibility tool", () => {
-    expect(presenters.KNOWN_TOOLS).toHaveLength(57);
-    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(57);
+    expect(presenters.KNOWN_TOOLS).toHaveLength(58);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(58);
     expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
     for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
   });

@@ -730,6 +730,43 @@ mod tests {
     }
 
     #[test]
+    fn image_original_proxy_preserves_download_headers_and_bytes() {
+        let response = proxy_response(crate::gateway::ProxyResponse {
+            status: 200,
+            content_type: Some("image/png".into()),
+            content_disposition: Some("attachment; filename=\"image-test.png\"".into()),
+            content_encoding: None,
+            accept_ranges: None,
+            content_range: None,
+            vary: None,
+            remote_sequence: None,
+            screen_width: None,
+            screen_height: None,
+            frame_width: None,
+            frame_height: None,
+            content_length: Some(4),
+            body: Box::new(std::io::Cursor::new(vec![0x89, b'P', b'N', b'G'])),
+        });
+        let header = |name: &'static str| {
+            response
+                .headers()
+                .iter()
+                .find(|header| header.field.equiv(name))
+                .map(|header| header.value.as_str())
+        };
+        assert_eq!(header("Content-Type"), Some("image/png"));
+        assert_eq!(
+            header("Content-Disposition"),
+            Some("attachment; filename=\"image-test.png\"")
+        );
+        assert_eq!(header("Cache-Control"), Some("no-store"));
+        assert_eq!(response.data_length(), Some(4));
+        let mut body = Vec::new();
+        std::io::Read::read_to_end(&mut response.into_reader(), &mut body).unwrap();
+        assert_eq!(body, [0x89, b'P', b'N', b'G']);
+    }
+
+    #[test]
     fn remote_frame_proxy_preserves_binary_body_and_geometry_headers() {
         let response = proxy_response(crate::gateway::ProxyResponse {
             status: 200,

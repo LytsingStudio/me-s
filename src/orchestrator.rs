@@ -64,7 +64,7 @@ const BASE_SYSTEM_PROMPT: &str = r#"# Role
 You are MainAgent, a capable and concise general-purpose Agent. Help the user directly: answer straightforward questions without tools, and use the available tools when observation or action is required."#;
 const MANAGER_BASE_SYSTEM_PROMPT: &str = r#"# Role
 
-You are a capable and concise project-level Agent and the primary problem solver for the user's task. Solve the task through your own analysis, design, implementation reasoning, judgment, and acceptance work. Use the dedicated Worker as your default operational interface for observing external state and carrying out concrete actions. Image is directly available for your own visual inspection; other direct low-level tools are a restricted fallback governed by the Manager instructions."#;
+You are a capable and concise project-level Agent and the primary problem solver for the user's task. Solve the task through your own analysis, design, implementation reasoning, judgment, and acceptance work. Use the dedicated Worker as your default operational interface for observing external state and carrying out concrete actions. Image is directly available for your own visual inspection and for presenting images to the user; other direct low-level tools are a restricted fallback governed by the Manager instructions."#;
 const WORKER_BASE_SYSTEM_PROMPT: &str = r#"# Role
 
 You are a faithful operational executor supporting a Manager. Use real tools to observe external state, materialize content already authored by the Manager, perform non-creative mechanical operations, and transmit complete facts and evidence accurately. Never replace the Manager as the author, reviewer, acceptance authority, or problem solver. Never inspect image content; return image sources to the Manager for direct inspection."#;
@@ -83,7 +83,7 @@ The Worker may be much less capable than you and must never be assumed to rememb
 
 Before requesting any modification outside the workspace, personally verify that the actual user explicitly authorized the exact operation and target or precisely bounded target set. Every Worker.Ask that performs such a modification must explicitly state that actual-user authorization and its exact scope. Never treat your ability to instruct the Worker as a substitute for the actual user's authorization.
 
-The Worker's tools are your primary operational ability to observe and act in the execution environment. You are an environment-capable Agent, not a text-only chatbot. Image is also your normal direct visual-inspection toolbox, subject to the current model's image capability. Other non-Agent low-level tools are directly available to you only as a restricted fallback. Their availability does not make direct use the normal path and must not be passed to the user as a reason to bypass the Worker.
+The Worker's tools are your primary operational ability to observe and act in the execution environment. You are an environment-capable Agent, not a text-only chatbot. Image is also directly available for metadata, firsthand visual inspection, and sending images to the user; only Image.View requires the current model to support image input. Other non-Agent low-level tools are directly available to you only as a restricted fallback. Their availability does not make direct use the normal path and must not be passed to the user as a reason to bypass the Worker.
 
 ## User-facing boundary
 
@@ -121,7 +121,7 @@ Before every Worker.Ask, check all of the following:
 ## Tool boundary
 
 - Your normal tools are Worker.Ask, Worker.Wait, Worker.Stop, Worker.ClearContext, WorkMap, Compact, SetTitle, and Image.
-- You may call Image.Info and Image.View directly whenever image metadata or firsthand visual inspection is useful. Image is not subject to the direct-tool fallback restriction.
+- You may call Image.Info and Image.View directly whenever image metadata or firsthand visual inspection is useful. Use Image.Send directly when the user asks to receive or review one or more images; Send does not let you inspect them. Image is not subject to the direct-tool fallback restriction.
 - The remaining non-Agent low-level toolbox sections describe capabilities available both to the Worker and, under the strict fallback rules below, directly to you. Use these definitions to understand what the Worker can do and what evidence it can return.
 - The Agent toolbox is unavailable to you. Use the one dedicated Worker through Worker tools; do not create or control other Agents.
 - A low-level tool other than Image being callable is not permission to use it routinely. Ordinary file, terminal, browser, and other environment operations must go through Worker.Ask.
@@ -142,7 +142,7 @@ If the evidence is insufficient, do not guess and do not ask the Worker to decid
 
 ## Direct-tool fallback
 
-Image.Info and Image.View are normal Manager tools and do not require a fallback condition. Perform all other ordinary operational work through the Worker. You may call another low-level tool yourself only when at least one of these conditions is actually true:
+Image.Info and Image.View are normal Manager tools and do not require a fallback condition. Image.Send is also a normal direct tool for presenting images to the user. Perform all other ordinary operational work through the Worker. You may call another low-level tool yourself only when at least one of these conditions is actually true:
 
 - the Worker remains unavailable because of an unrecoverable failure after reasonable recovery or retry attempts;
 - the user explicitly requires you, rather than the Worker, to perform the operation directly;
@@ -250,7 +250,7 @@ When asked to inspect or research:
 
 When the Manager asks to read code, retrieve and report the relevant code accurately. The Manager, not you, decides its meaning and design.
 
-Never call Image.Info or Image.View and never inspect, describe, classify, compare, or interpret image pixels or visual content. You may collect image evidence when the Manager requests it, including using WebBrowser.Snapshot with screen or both. Return each image's exact path or URL, the specified review or acceptance step that produced it, its source page or resource, and any non-visual metadata already available from the producing tool. The Manager will inspect it directly with Image and make every visual judgment.
+Never call Image tools (Image.Info, Image.View, or Image.Send) and never inspect, describe, classify, compare, or interpret image pixels or visual content. You may collect image evidence when the Manager requests it, including using WebBrowser.Snapshot with screen or both. Return each image's exact path or URL, the specified review or acceptance step that produced it, its source page or resource, and any non-visual metadata already available from the producing tool. The Manager will inspect it directly with Image and make every visual judgment.
 
 ## Applying actions
 
@@ -2655,7 +2655,9 @@ impl MainAgent {
         } else if self.profile == MainAgentProfile::Worker
             && matches!(
                 call.name.as_str(),
-                image_toolbox::INFO_TOOL_NAME | image_toolbox::VIEW_TOOL_NAME
+                image_toolbox::INFO_TOOL_NAME
+                    | image_toolbox::VIEW_TOOL_NAME
+                    | image_toolbox::SEND_TOOL_NAME
             )
         {
             Err(ToolboxExecutionError::Tool {
@@ -2697,6 +2699,28 @@ impl MainAgent {
                     Ok(json!({"image_event_id": image_event_id, "image": metadata}))
                 })
             }
+        } else if call.name == image_toolbox::SEND_TOOL_NAME {
+            image_toolbox::load_send(&call.arguments, &self.workspace).and_then(|images| {
+                let mut sent = Vec::with_capacity(images.len());
+                for loaded in images {
+                    let metadata = image_toolbox::metadata_value(&loaded);
+                    let image_event_id = edb
+                        .append_image_content(
+                            call.id,
+                            loaded.metadata.source,
+                            loaded.metadata.mime_type,
+                            loaded.metadata.format,
+                            loaded.metadata.width,
+                            loaded.metadata.height,
+                            loaded.data,
+                        )
+                        .map_err(|error| ToolboxExecutionError::Protocol(error.to_string()))?;
+                    sent.push(json!({"image_event_id": image_event_id, "image": metadata}));
+                }
+                on_event(edb)
+                    .map_err(|error| ToolboxExecutionError::Protocol(error.to_string()))?;
+                Ok(json!({"images": sent}))
+            })
         } else if agent_toolbox::is_worker_tool(&call.name) {
             if self.profile != MainAgentProfile::Manager {
                 Err(ToolboxExecutionError::Tool {
@@ -5040,6 +5064,7 @@ fn terminal_session_states(
 struct ToolCallState {
     api_call_id: EventId,
     has_output: bool,
+    image_count: usize,
     finished: bool,
 }
 
@@ -5136,6 +5161,7 @@ fn tool_call_states(
                     ToolCallState {
                         api_call_id: call.api_call_id,
                         has_output: false,
+                        image_count: 0,
                         finished: false,
                     },
                 );
@@ -5320,9 +5346,13 @@ fn tool_call_states(
                 let call = calls
                     .get_mut(&image.tool_call_id)
                     .expect("tool call existence was checked above");
-                if call.finished || call.has_output {
+                if call.finished
+                    || (call.has_output && tool_call.name != image_toolbox::SEND_TOOL_NAME)
+                    || call.image_count
+                        >= image_toolbox::image_content_limit(&tool_call.name, &tool_call.arguments)
+                {
                     return Err(format!(
-                        "tool call {} has more than one image or stored an image after result",
+                        "tool call {} exceeds its image count or stored an image after result",
                         image.tool_call_id
                     ));
                 }
@@ -5332,6 +5362,7 @@ fn tool_call_states(
                     image.id,
                     Some(ApiState::Completed),
                 )?;
+                call.image_count += 1;
                 call.has_output = true;
             }
             Event::ToolCallResult(result) => {
@@ -5357,20 +5388,21 @@ fn tool_call_states(
                         result.tool_call_id
                     ));
                 }
-                let requires_image_content = matches!(
-                    edb.get(result.tool_call_id),
-                    Some(Event::ToolCall(tool_call))
-                        if image_toolbox::tool_call_requires_image_content(
-                            &tool_call.name,
-                            &tool_call.arguments,
-                        )
-                );
-                if requires_image_content
+                if let Some(Event::ToolCall(tool_call)) = edb.get(result.tool_call_id)
+                    && image_toolbox::tool_call_requires_image_content(
+                        &tool_call.name,
+                        &tool_call.arguments,
+                    )
                     && result.state == ToolResultState::Succeeded
-                    && !call.has_output
+                    && (call.image_count == 0
+                        || call.image_count
+                            != image_toolbox::image_content_limit(
+                                &tool_call.name,
+                                &tool_call.arguments,
+                            ))
                 {
                     return Err(format!(
-                        "image-producing call {} succeeded without stored image content",
+                        "image-producing call {} succeeded without all stored image content",
                         result.tool_call_id
                     ));
                 }
@@ -6506,7 +6538,10 @@ fn main_model_context_with_toolboxes_and_environment(
                 outputs.entry(info.tool_call_id).or_default().push(update);
             }
             Event::ImageContent(image) => {
-                images.insert(image.tool_call_id, image);
+                if matches!(edb.get(image.tool_call_id), Some(Event::ToolCall(call)) if call.name != image_toolbox::SEND_TOOL_NAME)
+                {
+                    images.insert(image.tool_call_id, image);
+                }
             }
             Event::ToolCallResult(result) => {
                 let Some(Event::ToolCall(call)) = edb.get(result.tool_call_id) else {
@@ -11859,7 +11894,10 @@ data: [DONE]
         assert!(worker_system.contains("Do not repair, complete, or replace it on your own"));
         assert!(worker_system.contains("Do not merely echo raw tool responses"));
         assert!(worker_system.contains("never a review or acceptance verdict"));
-        assert!(worker_system.contains("Never call Image.Info or Image.View"));
+        assert!(
+            worker_system
+                .contains("Never call Image tools (Image.Info, Image.View, or Image.Send)")
+        );
         assert!(worker_system.contains("using WebBrowser.Snapshot with screen or both"));
         assert!(worker_system.contains("specified review or acceptance step"));
         assert!(worker_system.contains("Return each image's exact path or URL"));
@@ -12343,7 +12381,11 @@ for line in sys.stdin:
         );
         assert!(main_error.contains("agent_tool_disabled"));
 
-        for image_tool in [image_toolbox::INFO_TOOL_NAME, image_toolbox::VIEW_TOOL_NAME] {
+        for image_tool in [
+            image_toolbox::INFO_TOOL_NAME,
+            image_toolbox::VIEW_TOOL_NAME,
+            image_toolbox::SEND_TOOL_NAME,
+        ] {
             let worker_image_error = execute_forged(
                 MainAgent::new_manager(None),
                 AgentDefinition::sub_agent("manager", None),
@@ -14067,6 +14109,214 @@ for line in sys.stdin:
                     && result.detail.contains("image_input_unsupported")
         )));
         agent.supports_edb(&edb).unwrap();
+    }
+
+    #[test]
+    fn image_send_persists_multiple_originals_but_never_projects_pixels_even_after_reload() {
+        let root = std::env::temp_dir().join(format!("me-send-context-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let source = image::DynamicImage::new_rgb8(4, 3);
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        source
+            .write_to(&mut encoded, image::ImageFormat::Bmp)
+            .unwrap();
+        let original = encoded.into_inner();
+        std::fs::write(root.join("first.bmp"), &original).unwrap();
+        std::fs::write(root.join("second.bmp"), &original).unwrap();
+        let mut agent = MainAgent::new(None);
+        agent.workspace = root.clone();
+        let text_model = test_model_config("text-only", &[]);
+        let models = ModelRuntime::from(ModelApi::new(text_model.clone()).unwrap());
+        let path = root.join("main.edb");
+        let mut edb = EventDataBase::open(&path).unwrap();
+        agent.initialize(&mut edb, &models).unwrap();
+        let prompt = edb
+            .append_user_prompt("send these images for my review")
+            .unwrap();
+        edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+            .unwrap();
+        let append_call = |edb: &mut EventDataBase, name: &str, arguments: &str| {
+            let api = edb.append_api_requesting(prompt).unwrap();
+            edb.append_api_state(api, prompt, ApiState::Streaming, "")
+                .unwrap();
+            edb.append_assist_response(prompt, "", true).unwrap();
+            let id = edb
+                .append_tool_call(api, prompt, format!("image-{api}"), name, arguments)
+                .unwrap();
+            edb.append_api_state(api, prompt, ApiState::Completed, "")
+                .unwrap();
+            let Event::ToolCall(call) = edb.get(id).cloned().unwrap() else {
+                unreachable!()
+            };
+            call
+        };
+        let call = append_call(
+            &mut edb,
+            image_toolbox::SEND_TOOL_NAME,
+            r#"{"urls":["first.bmp","second.bmp"]}"#,
+        );
+        agent
+            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .unwrap();
+        agent.supports_edb(&edb).unwrap();
+        let images: Vec<_> = edb
+            .events()
+            .iter()
+            .filter_map(|event| match event {
+                Event::ImageContent(image) => Some(image),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(images.len(), 2);
+        assert!(images[0].source.ends_with("first.bmp"));
+        assert!(images[1].source.ends_with("second.bmp"));
+        assert!(
+            images
+                .iter()
+                .all(|image| image.data.as_ref() == original.as_slice())
+        );
+        let result = edb
+            .events()
+            .iter()
+            .find_map(|event| match event {
+                Event::ToolCallResult(result) => Some(result),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(result.state, ToolResultState::Succeeded);
+        assert_eq!(
+            serde_json::from_str::<Value>(&result.detail).unwrap()["images"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        let catalog = agent.visible_catalog(&text_model).unwrap();
+        for image_support in [false, true] {
+            let context = main_model_context_with_toolboxes_and_environment(
+                &edb,
+                &catalog,
+                None,
+                "test",
+                image_support,
+            )
+            .unwrap();
+            assert!(
+                context
+                    .messages
+                    .iter()
+                    .all(|message| message.pointer("/content/1/image_url").is_none())
+            );
+        }
+        let mut vision_model = test_model_config("vision", &[]);
+        vision_model
+            .capabilities
+            .input_modalities
+            .push("image".into());
+        let vision_models = ModelRuntime::from(ModelApi::new(vision_model.clone()).unwrap());
+        let view = append_call(
+            &mut edb,
+            image_toolbox::VIEW_TOOL_NAME,
+            r#"{"url":"first.bmp"}"#,
+        );
+        agent
+            .execute_tool(&mut edb, &view, &vision_models, false, &mut |_| Ok(()))
+            .unwrap();
+        std::fs::remove_file(root.join("first.bmp")).unwrap();
+        std::fs::remove_file(root.join("second.bmp")).unwrap();
+        drop(edb);
+        let mut restored = EventDataBase::open(&path).unwrap();
+        agent.supports_edb(&restored).unwrap();
+        let catalog = agent.visible_catalog(&vision_model).unwrap();
+        let context = main_model_context_with_toolboxes_and_environment(
+            &restored, &catalog, None, "test", true,
+        )
+        .unwrap();
+        assert_eq!(
+            context
+                .messages
+                .iter()
+                .filter(|message| message.pointer("/content/1/image_url").is_some())
+                .count(),
+            1
+        );
+        assert_eq!(
+            restored
+                .events()
+                .iter()
+                .filter(|event| matches!(event, Event::ImageContent(_)))
+                .count(),
+            3
+        );
+        restored.rewind_to_event(prompt).unwrap();
+        agent.supports_edb(&restored).unwrap();
+        assert!(
+            restored
+                .events()
+                .iter()
+                .all(|event| !matches!(event, Event::ImageContent(_)))
+        );
+        drop(restored);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn image_send_source_failure_never_commits_a_partial_batch() {
+        let models =
+            ModelRuntime::from(ModelApi::new(test_model_config("text-only", &[])).unwrap());
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let data = format!(
+            "data:image/png;base64,{}",
+            STANDARD.encode(encoded.into_inner())
+        );
+        let mut edb = main_agent_pending_tool(
+            image_toolbox::SEND_TOOL_NAME,
+            &json!({"urls":[data, "data:image/png;base64,not-valid"]}).to_string(),
+        );
+        let Event::ToolCall(call) = edb.get(11).cloned().unwrap() else {
+            unreachable!()
+        };
+        let mut agent = MainAgent::new(None);
+        agent
+            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .unwrap();
+        assert!(
+            edb.events()
+                .iter()
+                .all(|event| !matches!(event, Event::ImageContent(_)))
+        );
+        assert!(
+            matches!(edb.events().last(), Some(Event::ToolCallResult(result)) if result.state == ToolResultState::Failed)
+        );
+        agent.supports_edb(&edb).unwrap();
+    }
+
+    #[test]
+    fn image_send_success_requires_every_requested_image_and_retains_single_view_limit() {
+        let mut edb = main_agent_pending_tool(
+            image_toolbox::SEND_TOOL_NAME,
+            r#"{"urls":["a.png","b.png"]}"#,
+        );
+        let mut data = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(2, 2)
+            .write_to(&mut data, image::ImageFormat::Png)
+            .unwrap();
+        let data = data.into_inner();
+        edb.append_image_content(11, "a.png", "image/png", "png", 2, 2, data.clone())
+            .unwrap();
+        edb.append_tool_result(11, ToolResultState::Succeeded, None, "{}")
+            .unwrap();
+        assert!(MainAgent::new(None).supports_edb(&edb).is_err());
+        let mut view = main_agent_pending_tool(image_toolbox::VIEW_TOOL_NAME, r#"{"url":"a.png"}"#);
+        view.append_image_content(11, "a.png", "image/png", "png", 2, 2, data.clone())
+            .unwrap();
+        assert!(
+            view.append_image_content(11, "b.png", "image/png", "png", 2, 2, data)
+                .is_err()
+        );
     }
 
     #[test]

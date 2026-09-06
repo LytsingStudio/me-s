@@ -160,6 +160,10 @@ pub(crate) fn shared_katex_font(path: &str) -> Option<&'static [u8]> {
 
 pub(crate) fn shared_webui_component_asset(path: &str) -> Option<(&'static str, &'static str)> {
     match path {
+        "/image-gallery.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("webui/image-gallery.js"),
+        )),
         "/session-terminal.js" => Some(("text/javascript; charset=utf-8", SESSION_TERMINAL_JS)),
         "/remote-control.js" => Some(("text/javascript; charset=utf-8", REMOTE_CONTROL_JS)),
         "/xterm.js" => Some(("text/javascript; charset=utf-8", XTERM_JS)),
@@ -711,6 +715,9 @@ fn route_managed(
             path,
             query,
         ),
+        (&Method::Get, path) if query.is_none() && path.starts_with("/api/images/") => {
+            image_response(backend, path)
+        }
         (&Method::Get, path) if path.starts_with("/api/ui-projections/") => operational_route(
             request,
             backend,
@@ -902,6 +909,9 @@ fn operational_route(
         (&Method::Get, path) if path.starts_with("/api/ui-projections/") => {
             ui_projection_response(request, backend, path, query)
         }
+        (&Method::Get, path) if query.is_none() && path.starts_with("/api/images/") => {
+            image_response(backend, path)
+        }
         (&Method::Get, path) if path.starts_with("/api/api-activity/") => {
             let id = parse_agent_path(path, "/api/api-activity/")?;
             let activity = backend.api_activity(&id)?;
@@ -963,6 +973,62 @@ fn operational_route(
             &json!({"ok": false, "error": "not found"}),
         )),
     }
+}
+
+fn image_response(backend: &dyn UiBackend, path: &str) -> Result<HttpResponse> {
+    let Some((agent, sha, operation)) = path
+        .strip_prefix("/api/")
+        .and_then(crate::image_toolbox::parse_image_path)
+    else {
+        return Ok(json_response(
+            StatusCode(404),
+            &json!({"ok": false, "error": "未找到图片"}),
+        ));
+    };
+    let Some(image) = backend.image_content(&AgentId::new(agent)?, sha)? else {
+        return Ok(json_response(
+            StatusCode(404),
+            &json!({"ok": false, "error": "未找到图片"}),
+        ));
+    };
+    let (bytes, mime) = if operation == "preview" {
+        (crate::image_toolbox::preview_jpeg(&image)?, "image/jpeg")
+    } else {
+        let format = image::guess_format(&image.data)?;
+        (Arc::clone(&image.data), format.to_mime_type())
+    };
+    let mut headers = vec![
+        Header::from_bytes("Content-Type", mime).map_err(|_| "invalid image type")?,
+        Header::from_bytes("Cache-Control", "private, no-store").unwrap(),
+        Header::from_bytes("X-Content-Type-Options", "nosniff").unwrap(),
+    ];
+    if operation == "original" {
+        let extension = image.format.to_ascii_lowercase();
+        let extension = if extension.bytes().all(|byte| byte.is_ascii_alphanumeric()) {
+            extension.as_str()
+        } else {
+            "img"
+        };
+        headers.push(
+            Header::from_bytes(
+                "Content-Disposition",
+                format!(
+                    "attachment; filename=\"image-{}.{}\"",
+                    &sha[..12],
+                    extension
+                ),
+            )
+            .map_err(|_| "invalid image filename")?,
+        );
+    }
+    let length = bytes.len();
+    Ok(Response::new(
+        StatusCode(200),
+        headers,
+        Box::new(std::io::Cursor::new(bytes)),
+        Some(length),
+        None,
+    ))
 }
 
 #[derive(Deserialize)]
@@ -2624,6 +2690,140 @@ mod tests {
             orchestrators: Arc::from([]),
             default_orchestrator: "main-agent".into(),
         })
+    }
+
+    #[test]
+    fn image_http_delivery_authenticates_and_preserves_originals() {
+        use crate::event::{AgentKind, ImageContentEvent};
+        use sha2::{Digest, Sha256};
+        struct NoCommands;
+        impl UiCommandGateway for NoCommands {
+            fn submit(&self, _: UiCommand) -> Result<UiCommandReceipt> {
+                panic!("image requests must not submit commands")
+            }
+        }
+        let directory = workspace();
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(1200, 800)
+            .write_to(&mut encoded, image::ImageFormat::Png)
+            .unwrap();
+        let original = encoded.into_inner();
+        let sha = format!("{:x}", Sha256::digest(&original));
+        let image = ImageContentEvent {
+            id: 12,
+            timestamp_ms: 1,
+            tool_call_id: 11,
+            source: "deleted-source.png".into(),
+            mime_type: "image/png".into(),
+            format: "PNG".into(),
+            width: 1200,
+            height: 800,
+            content_sha256: sha.clone(),
+            data: original.clone().into(),
+        };
+        let mut backend = sync_test_backend_for_orchestrator(
+            vec![Event::ImageContent(image)],
+            0,
+            AgentKind::Primary,
+            "chatbot",
+        );
+        Arc::make_mut(&mut backend.0.environment).workspace = directory.clone();
+        let client = reqwest::blocking::Client::builder()
+            .no_proxy()
+            .build()
+            .unwrap();
+        for managed in [false, true] {
+            let server = if managed {
+                start_managed(
+                    backend.clone(),
+                    NoCommands,
+                    0,
+                    ManagedWebAccess {
+                        token: "image-test-token".into(),
+                        instance_nonce: "image-test".into(),
+                        workspace_path: directory.to_string_lossy().into_owned(),
+                        terminate: Arc::new(AtomicBool::new(false)),
+                    },
+                )
+                .unwrap()
+            } else {
+                start_from(backend.clone(), NoCommands, 0, Some("image-test-passkey")).unwrap()
+            };
+            let address = server
+                .address()
+                .replace("http://0.0.0.0:", "http://127.0.0.1:");
+            for operation in ["preview", "original"] {
+                assert_eq!(
+                    client
+                        .get(format!("{address}/api/images/main/{sha}/{operation}"))
+                        .send()
+                        .unwrap()
+                        .status(),
+                    reqwest::StatusCode::UNAUTHORIZED
+                );
+            }
+            let cookie = if managed {
+                String::new()
+            } else {
+                client
+                    .post(format!("{address}/api/auth/login"))
+                    .json(&json!({"password": "image-test-passkey"}))
+                    .send()
+                    .unwrap()
+                    .headers()["set-cookie"]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
+            let get = |path: &str| {
+                let request = client.get(format!("{address}{path}"));
+                if managed {
+                    request.header(MANAGED_AUTH_HEADER, "Bearer image-test-token")
+                } else {
+                    request.header("Cookie", &cookie)
+                }
+                .send()
+                .unwrap()
+            };
+            let preview = get(&format!("/api/images/main/{sha}/preview"));
+            assert_eq!(preview.status(), reqwest::StatusCode::OK);
+            assert_eq!(preview.headers()["content-type"], "image/jpeg");
+            assert_eq!(preview.headers()["cache-control"], "private, no-store");
+            let preview = image::load_from_memory(&preview.bytes().unwrap()).unwrap();
+            assert_eq!((preview.width(), preview.height()), (640, 427));
+            let download = get(&format!("/api/images/main/{sha}/original"));
+            assert_eq!(download.status(), reqwest::StatusCode::OK);
+            assert_eq!(download.headers()["content-type"], "image/png");
+            assert_eq!(
+                download.headers()["content-disposition"],
+                format!("attachment; filename=\"image-{}.png\"", &sha[..12])
+            );
+            assert_eq!(download.bytes().unwrap().as_ref(), original.as_slice());
+            for path in [
+                format!("/api/images/absent/{sha}/preview"),
+                format!("/api/images/main/{}/original", "0".repeat(64)),
+                format!("/api/images/main/{sha}/preview?x=1"),
+                format!("/api/images/main/{sha}/preview/extra"),
+                format!("/api/images/main/{sha}/unknown"),
+                "/api/images/main/invalid/original".into(),
+            ] {
+                assert_eq!(
+                    get(&path).status(),
+                    reqwest::StatusCode::NOT_FOUND,
+                    "{path}"
+                );
+            }
+            drop(server);
+        }
+        // Even a cached preview requires the image to remain in this agent's history.
+        backend.0.agents[0].events = Arc::from([]);
+        let response =
+            image_response(&backend, &format!("/api/images/main/{sha}/preview")).unwrap();
+        assert_eq!(response.status_code(), StatusCode(404));
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
