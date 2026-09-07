@@ -33,10 +33,15 @@ ditto "$ME_CLIENT_APP" "$ROOT/Applications/ME Client.app"
 install -m 755 "$ME_S" "$ROOT/usr/local/bin/me-s"
 install -m 755 "$ME_GATEWAY" "$ROOT/usr/local/bin/me-gateway"
 
+# Installer must not relocate an upgrade into a developer's build-output copy.
+pkgbuild --analyze --root "$ROOT" "$WORK/components.plist"
+/usr/libexec/PlistBuddy -c 'Set :0:BundleIsRelocatable false' "$WORK/components.plist"
+
 mkdir -p "$(dirname "$OUTPUT")"
 rm -f "$OUTPUT"
 pkgbuild \
     --root "$ROOT" \
+    --component-plist "$WORK/components.plist" \
     --identifier studio.lytsing.me \
     --version "$VERSION" \
     --install-location / \

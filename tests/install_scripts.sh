@@ -135,6 +135,37 @@ trap 'exit 130' HUP INT TERM
 
 VERSION=1.2.3
 
+if [ "$(uname -s)" = Darwin ]; then
+    MAC_APP="$TEST_DIR/source/ME Client.app"
+    mkdir -p "$MAC_APP/Contents/MacOS"
+    cat >"$MAC_APP/Contents/Info.plist" <<'EOF'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+<key>CFBundleIdentifier</key><string>studio.lytsing.me.package-test</string>
+<key>CFBundleExecutable</key><string>me-client</string>
+<key>CFBundlePackageType</key><string>APPL</string>
+<key>CFBundleShortVersionString</key><string>1.2.3</string>
+<key>CFBundleVersion</key><string>1.2.3</string>
+</dict></plist>
+EOF
+    printf 'package fixture\n' >"$MAC_APP/Contents/MacOS/me-client"
+    MAC_OWNER=$(stat -f '%u:%g' "$MAC_APP")
+    for pass in 1 2; do
+        sh "$ROOT_DIR/packaging/macos/build-pkg.sh" "$VERSION" \
+            "$MAC_APP/Contents/MacOS/me-client" "$MAC_APP/Contents/MacOS/me-client" \
+            "$MAC_APP" "$TEST_DIR/test-$pass.pkg"
+        pkgutil --expand "$TEST_DIR/test-$pass.pkg" "$TEST_DIR/expanded-$pass"
+        MAC_INFO="$TEST_DIR/expanded-$pass/PackageInfo"
+        [ "$(xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$MAC_INFO")" = 0 ]
+        [ "$(xmllint --xpath 'string(/pkg-info/@install-location)' "$MAC_INFO")" = / ]
+        [ "$(xmllint --xpath 'string(/pkg-info/bundle/@path)' "$MAC_INFO")" = './Applications/ME Client.app' ]
+        [ "$(stat -f '%u:%g' "$MAC_APP")" = "$MAC_OWNER" ]
+        [ "$(cat "$MAC_APP/Contents/MacOS/me-client")" = 'package fixture' ]
+    done
+    grep -F 'count(/pkg-info/relocate/bundle)' "$VERIFIER" >/dev/null
+fi
+
 write_cli() {
     path=$1
     name=$2

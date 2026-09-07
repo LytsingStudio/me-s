@@ -12,7 +12,7 @@ PACKAGE_ASSETS=(
 )
 EXPECTED_ASSETS=$'BUILD-MANIFEST.json\nME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-setup.exe\nSHA256SUMS'
 
-for command in file lipo node pkgutil shasum tar xcrun; do
+for command in file lipo node pkgutil shasum tar xcrun xmllint; do
     command -v "$command" >/dev/null 2>&1 || { echo "error: missing static verification dependency: $command" >&2; exit 1; }
 done
 if [[ -n "${ME_7Z:-}" ]]; then
@@ -73,6 +73,13 @@ while IFS= read -r path; do
     esac
 done <"$MAC_PAYLOAD"
 pkgutil --expand-full "$MAC_PACKAGE" "$WORK/macos-expanded" >/dev/null
+MAC_PACKAGE_INFO="$WORK/macos-expanded/PackageInfo"
+[[ $(xmllint --xpath 'count(/pkg-info/relocate/bundle)' "$MAC_PACKAGE_INFO") == 0 ]] || {
+    echo "error: macOS pkg must not relocate application bundles" >&2; exit 1;
+}
+[[ $(xmllint --xpath 'string(/pkg-info/@install-location)' "$MAC_PACKAGE_INFO") == / ]] || {
+    echo "error: macOS pkg must install at the filesystem root" >&2; exit 1;
+}
 for binary in \
     "$WORK/macos-expanded/Payload/usr/local/bin/me-s" \
     "$WORK/macos-expanded/Payload/usr/local/bin/me-gateway" \
