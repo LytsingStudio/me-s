@@ -1393,7 +1393,9 @@ function firstProjectionDifference(previous, next) {
     const left = previous[index];
     const right = next[index];
     if (left === right) continue;
-    if (left?.key === right?.key && left?.revision === right?.revision) continue;
+    // Tool updates keep the outer message revision and advance their own revision.
+    if (left?.key === right?.key && left?.revision === right?.revision
+        && left?.tool?.revision === right?.tool?.revision) continue;
     return index;
   }
   return previous.length === next.length ? null : shared;

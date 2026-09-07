@@ -42,6 +42,7 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
   const factory = new Function("globalThis", "document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", "Date", "setTimeout", "clearTimeout", `${source.slice(0, eventBindings)}
     return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
       requestSelectedProjectionRange,
+      toolCardView,
       estimateTranscriptMessageHeight,
       configureViewportTest(inspect, following) {
         transcriptVirtualizer = { inspect }; projectionFollowing = following;
@@ -1066,6 +1067,48 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain("store.events.push(...events);");
   });
 
+
+  test("tool-only projection updates redraw queued, streaming and completed cards without new messages", () => {
+    for (const kind of ["tool", "worker-activity"]) {
+      const runtime = loadRuntime("../src/webui/app.js", globalThis.MeFrontendRuntime, {
+        Date: class extends Date { static now() { return 80_000; } },
+      });
+      const store = runtime.createAgentStore({
+        id: "main", edb_id: "a".repeat(64), event_count: 64, mutation_revision: 0,
+      }, null, { environment: { workspace: "/workspace" } });
+      const initial = uiProjectionRange("main", "r1", 64, 0, 64);
+      const tool = { id: 10, apiCallId: 9, name: "File.Read", args: {}, started: 0, revision: 10, queued: true };
+      initial.projections[63] = { kind, key: "tool:10", revision: 10, timestamp: 0, tool };
+      runtime.installProjectionState(store, uiProjectionState("main", "r1", 64), initial);
+      const anchor = store.projection.messages[0];
+      let updated = tool;
+      for (const [index, patch] of [
+        { queued: false },
+        { output: "partial output", updates: [] },
+        { result: { state: "succeeded", finished: 300 } },
+      ].entries()) {
+        store.projectionChanges = null;
+        updated = { ...updated, ...patch, revision: 11 + index };
+        const revision = `r${index + 2}`;
+        const range = uiProjectionRange("main", revision, 64, 63, 64);
+        range.projections = [{ ...initial.projections[63], tool: updated }];
+        runtime.installProjectionState(store, uiProjectionState("main", revision, 64, 63), range);
+        expect(store.projection.messages[0]).toBe(anchor);
+        expect(store.projection.messages).toHaveLength(64);
+        expect(store.projectionChanges.transcript).toBe(true);
+        expect(store.projectionChanges.transcriptFrom).toBe(63);
+        expect(store.projectionChanges.fullReplay).toBe(false);
+      }
+      expect(runtime.toolCardView(store.projection.messages[63].tool)).toMatchObject({
+        status: "succeeded", time: "300ms", runningStarted: null,
+      });
+      store.projectionChanges = null;
+      const unchanged = uiProjectionRange("main", "r5", 64, 63, 64);
+      unchanged.projections = [{ ...initial.projections[63], tool: { ...updated } }];
+      runtime.installProjectionState(store, uiProjectionState("main", "r5", 64, 63), unchanged);
+      expect(store.projectionChanges.transcript).toBe(false);
+    }
+  });
 
   test("keeps only a bounded revision-bound projection range in the default frontend", () => {
     const runtime = loadRuntime("../src/webui/app.js");

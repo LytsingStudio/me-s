@@ -339,10 +339,22 @@ me-image-gallery figure { min-width: 0; margin: 0; }
 .tool-image-frame img { display: block; width: 100%; height: 100%; object-fit: contain; }
 .tool-image-frame [hidden] { display: none; }
 .tool-image-status { color: var(--dim); font-size: 12px; }
-.tool-image-retry { border: 0; background: transparent; color: var(--accent); font-size: 12px; cursor: pointer; }
-me-image-gallery figcaption { display: flex; justify-content: space-between; flex-wrap: wrap; gap: 8px; padding: 7px 1px 0; color: var(--dim); font-size: 11px; }
-.tool-image-save { color: var(--accent); text-decoration: none; cursor: pointer; }
-.tool-image-save:hover { text-decoration: underline; }
+.tool-image-retry { position: relative; z-index: 1; border: 0; background: transparent; color: var(--accent); font-size: 12px; cursor: pointer; }
+.tool-image-open { position: absolute; inset: 0; width: 100%; border: 0; border-radius: inherit; background: transparent; cursor: zoom-in; }
+.tool-image-open:hover { background: var(--hover-fill-soft); }
+.tool-image-open:focus-visible { outline: 2px solid var(--accent); outline-offset: -3px; }
+me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px; min-height: 23px; padding: 7px 1px 0; color: var(--dim); font-size: 11px; }
+.modal-backdrop.image-viewer-backdrop { z-index: 90; padding: max(12px, env(safe-area-inset-top)) max(12px, env(safe-area-inset-right)) max(12px, env(safe-area-inset-bottom)) max(12px, env(safe-area-inset-left)); backdrop-filter: none; }
+.image-viewer { display: flex; flex-direction: column; width: min(1200px, 100%); height: min(900px, 100%); min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--border-bright); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow); }
+.image-viewer header { display: flex; flex: 0 0 auto; align-items: center; gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+.image-viewer header > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; color: var(--muted); font-size: 12px; }
+.tool-image-save { flex: 0 0 auto; padding: 9px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); font-size: 13px; text-decoration: none; cursor: pointer; }
+.tool-image-save:hover { background: var(--hover-fill); }
+.image-viewer-close { flex: 0 0 auto; width: 40px; height: 40px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--muted); font-size: 26px; cursor: pointer; }
+.image-viewer-close:hover { background: var(--hover-fill); color: var(--text); }
+.image-viewer-stage { display: flex; flex: 1; flex-direction: column; align-items: center; justify-content: center; gap: 12px; min-height: 0; padding: 12px; overflow: hidden; overscroll-behavior: contain; }
+.image-viewer-stage img { display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; }
+.image-viewer [hidden] { display: none; }
 .tool-details { margin: 7px 0 2px 22px; padding: 10px 12px 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--panel); color: var(--muted); cursor: default; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .tool-section + .tool-section { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--border); }
 .tool-section-title { margin-bottom: 8px; color: var(--text); font-family: var(--font-sans); font-size: 12px; font-weight: 750; letter-spacing: .08em; }
