@@ -6137,10 +6137,15 @@ function codexUsageHtml(usage) {
     </div>`;
   }).join("");
   const rows = days.slice().reverse().map((day) => `<tr><td>${escapeHtml(day.start_date)}</td><td>${formatTokens(day.tokens)}</td></tr>`).join("");
-  return `${error}<div class="codex-usage-total"><span>近 30 天</span><strong>${formatTokens(usage.total_tokens)} <small>tokens</small></strong></div>
-    <p class="settings-help">${escapeHtml(usage.range_start)} — ${escapeHtml(usage.range_end)} · 已有 ${days.length} 天数据</p>
-    <div class="codex-usage-total codex-usage-heading"><span>近 7 天</span><strong>${recentTotal} <small>tokens</small></strong></div>
-    <p class="settings-help">${escapeHtml(usage.seven_day_start)} — ${escapeHtml(usage.range_end)} · 已有 ${recentDays.length} 天数据</p>
+  return `${error}<div class="codex-usage-summary">
+      <div class="codex-usage-total"><div class="codex-usage-label"><span>近 30 天</span><small>tokens</small></div><strong>${formatTokens(usage.total_tokens)}</strong>
+        <p class="codex-usage-period">${escapeHtml(usage.range_start)} — ${escapeHtml(usage.range_end)}</p><p class="settings-help">已有 ${days.length} 天数据</p>
+      </div>
+      <div class="codex-usage-total"><div class="codex-usage-label"><span>近 7 天</span><small>tokens</small></div><strong>${recentTotal}</strong>
+        <p class="codex-usage-period">${escapeHtml(usage.seven_day_start)} — ${escapeHtml(usage.range_end)}</p><p class="settings-help">已有 ${recentDays.length} 天数据</p>
+      </div>
+    </div>
+    <div class="codex-usage-heading"><span>近 7 天每日用量</span><small>tokens</small></div>
     <div class="codex-usage-chart">${chart}</div>
     <details class="codex-usage-details"><summary>近 30 天每日用量</summary><table><thead><tr><th>日期</th><th>Tokens</th></tr></thead><tbody>${rows}</tbody></table></details>${updated}`;
 }

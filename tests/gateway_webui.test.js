@@ -2047,8 +2047,11 @@ describe("backend-owned Codex usage settings", () => {
     const html = runtime.codexUsageHtml(sample);
     expect(html).toContain("123,468");
     expect(html).toContain("已有 3 天数据");
-    expect(html).toContain('<span>近 7 天</span><strong>123,456 <small>tokens</small></strong>');
-    expect(html).toContain("2026-02-23 — 2026-03-01 · 已有 2 天数据");
+    expect(html).toContain('<span>近 7 天</span><small>tokens</small></div><strong>123,456</strong>');
+    expect(html).toContain("2026-02-23 — 2026-03-01</p><p class=\"settings-help\">已有 2 天数据");
+    expect(html.match(/class="codex-usage-total"/g)).toHaveLength(2);
+    expect(html).toContain('class="codex-usage-summary"');
+    expect(html).toContain("近 7 天每日用量");
     expect(html.match(/class="codex-usage-day"/g)).toHaveLength(7);
     expect(html).toContain("2026-02-23：暂无数据");
     expect(html).toContain("2026-03-01：0 tokens");
@@ -2065,17 +2068,17 @@ describe("backend-owned Codex usage settings", () => {
     const runtime = loadRuntime("../src/webui/app.js");
     const render = (days) => runtime.codexUsageHtml({ ...sample, days });
     const absent = render([sample.days[0]]);
-    expect(absent).toContain('<span>近 7 天</span><strong>— <small>tokens</small></strong>');
+    expect(absent).toContain('<span>近 7 天</span><small>tokens</small></div><strong>—</strong>');
     expect(absent).toContain("已有 0 天数据");
     const zero = render([sample.days[2]]);
-    expect(zero).toContain('<span>近 7 天</span><strong>0 <small>tokens</small></strong>');
+    expect(zero).toContain('<span>近 7 天</span><small>tokens</small></div><strong>0</strong>');
     expect(zero).toContain("已有 1 天数据");
     const boundary = render([
       { start_date: "2026-02-22", tokens: 100 },
       { start_date: "2026-02-23", tokens: 2 },
       { start_date: "2026-03-01", tokens: 3 },
     ]);
-    expect(boundary).toContain('<span>近 7 天</span><strong>5 <small>tokens</small></strong>');
+    expect(boundary).toContain('<span>近 7 天</span><small>tokens</small></div><strong>5</strong>');
     const css = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     expect(css).toContain(".codex-usage-total strong { font-size: 14px; font-weight: 600;");
   });

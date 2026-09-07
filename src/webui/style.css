@@ -908,21 +908,26 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .settings-section-heading h3 { margin: 0; color: var(--text); font-size: 16px; }
 .settings-section-heading p { margin: 5px 0 0; color: var(--dim); font-size: 12px; line-height: 1.5; }
 .settings-editor .settings-section-action { display: inline-flex; flex: 0 0 auto; align-items: center; gap: 7px; color: var(--muted); font-size: 12px; }
-.codex-usage-total { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 8px; margin-bottom: 6px; font-size: 12px; }
-.codex-usage-total strong { font-size: 14px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
-.codex-usage-total small { color: var(--muted); font-size: 11px; font-weight: normal; }
-.codex-usage-heading { margin: 18px 0 6px; }
-.codex-usage-chart { display: grid; gap: 10px; margin-top: 12px; }
+.settings-codex-section [data-codex-usage] { padding-top: 20px; }
+.codex-usage-summary { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); margin-bottom: 24px; }
+.codex-usage-total { min-width: 0; padding-right: 16px; }
+.codex-usage-total + .codex-usage-total { padding: 0 0 0 16px; border-left: 1px solid var(--border); }
+.codex-usage-label, .codex-usage-heading { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 12px; }
+.codex-usage-total strong { font-size: 14px; font-weight: 600; display: block; margin: 8px 0; color: var(--text); line-height: 1.5; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.codex-usage-label small, .codex-usage-heading small { color: var(--dim); font-size: 10px; font-weight: normal; }
+.codex-usage-period { margin: 0 0 3px; color: var(--dim); font-size: 11px; line-height: 1.6; }
+.codex-usage-heading { padding-top: 18px; border-top: 1px solid var(--border); }
+.codex-usage-chart { display: grid; gap: 14px; margin-top: 16px; }
 .codex-usage-day { display: grid; grid-template-columns: 36px minmax(20px, 1fr) max-content; align-items: center; gap: 12px; min-width: 0; font-variant-numeric: tabular-nums; }
 .codex-usage-value { min-width: 104px; color: var(--text); font-size: 11px; text-align: right; white-space: nowrap; }
-.codex-usage-track { height: 8px; overflow: hidden; border-radius: 4px; background: var(--border); }
+.codex-usage-track { height: 6px; overflow: hidden; border-radius: 3px; background: var(--hover-fill); }
 .codex-usage-bar { display: block; height: 100%; border-radius: inherit; background: var(--accent); opacity: .75; }
 .codex-usage-date { color: var(--muted); font-size: 11px; }
-.codex-usage-error { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
-.codex-usage-details { margin: 18px 0 12px; font-size: 12px; }
+.codex-usage-error { margin: 0 0 16px; color: var(--muted); font-size: 12px; }
+.codex-usage-details { margin: 20px 0 14px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; }
 .codex-usage-details summary { cursor: pointer; color: var(--muted); }
-.codex-usage-details table { width: 100%; margin-top: 10px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-.codex-usage-details th, .codex-usage-details td { padding: 6px 0; border-bottom: 1px solid var(--border); text-align: left; }
+.codex-usage-details table { width: 100%; margin-top: 12px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.codex-usage-details th, .codex-usage-details td { padding: 9px 0; border-bottom: 1px solid var(--border); text-align: left; }
 .codex-usage-details th:last-child, .codex-usage-details td:last-child { text-align: right; }
 .settings-version-list { margin: 0; border-top: 1px solid var(--border); }
 .settings-version-row { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
