@@ -23,6 +23,9 @@ use me::{
     workspace_bootstrap,
 };
 
+#[path = "../src/encrypted_http_test_client.rs"]
+mod encrypted_test_client;
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct TempDirectory(PathBuf);
@@ -96,12 +99,8 @@ fn spawn_managed(
     (child, input, launch)
 }
 
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_millis(500))
-        .build()
-        .unwrap()
+fn client() -> encrypted_test_client::Client {
+    encrypted_test_client::Client::new()
 }
 
 fn wait_until_ready(
@@ -181,16 +180,8 @@ fn managed_child_loads_authenticates_reports_identity_and_shuts_down() {
         reqwest::StatusCode::UNAUTHORIZED
     );
     assert_eq!(
-        client
-            .get(format!("{address}/"))
-            .header(
-                reqwest::header::AUTHORIZATION,
-                bearer_header_value(&launch.token),
-            )
-            .send()
-            .unwrap()
-            .status(),
-        reqwest::StatusCode::NOT_FOUND
+        client.get(format!("{address}/")).send().unwrap().status(),
+        reqwest::StatusCode::UPGRADE_REQUIRED
     );
     for path in [
         "/api/health",

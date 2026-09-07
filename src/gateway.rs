@@ -132,11 +132,15 @@ impl Gateway {
             shutting_down: AtomicBool::new(false),
             proxy_client: reqwest::blocking::Client::builder()
                 .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(2))
                 .timeout(Duration::from_secs(60))
                 .build()?,
             download_proxy_client: reqwest::blocking::Client::builder()
                 .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .retry(reqwest::retry::never())
                 .connect_timeout(Duration::from_secs(2))
                 .build()?,
         });
@@ -452,31 +456,36 @@ impl Gateway {
         } else {
             &self.proxy_client
         };
-        let mut request = client
-            .request(method, url)
-            .header(
-                reqwest::header::AUTHORIZATION,
-                bearer_header_value(&route.token),
-            )
-            .body(body);
-        if let Some(content_type) = content_type {
-            request = request.header(reqwest::header::CONTENT_TYPE, content_type);
+        let mut headers = vec![(
+            "Authorization".to_owned(),
+            bearer_header_value(&route.token),
+        )];
+        if let Some(value) = content_type {
+            headers.push(("Content-Type".into(), value.to_owned()));
         }
-        if let Some(accept_encoding) = accept_encoding {
-            request = request.header(reqwest::header::ACCEPT_ENCODING, accept_encoding);
+        if let Some(value) = accept_encoding {
+            headers.push(("Accept-Encoding".into(), value.to_owned()));
         }
-        if let Some(range) = range {
-            request = request.header(reqwest::header::RANGE, range);
+        if let Some(value) = range {
+            headers.push(("Range".into(), value.to_owned()));
         }
-        let response = request.send().map_err(|_| "工作区请求未能完成")?;
-        let status = response.status().as_u16();
-        let header = |name: reqwest::header::HeaderName| {
-            response
-                .headers()
-                .get(name)
-                .and_then(|value| value.to_str().ok())
-                .map(str::to_owned)
+        let head = me_transport::RequestHead {
+            method: method.as_str().to_owned(),
+            url: format!(
+                "{}{}",
+                url.path(),
+                url.query().map(|q| format!("?{q}")).unwrap_or_default()
+            ),
+            headers,
+            body_length: body.len(),
         };
+        let response = route
+            .transport
+            .request(client, &head, &body)
+            .map_err(|_| "工作区请求未能完成")?;
+        let status = response.head.status;
+        let header =
+            |name: reqwest::header::HeaderName| response.header(name.as_str()).map(str::to_owned);
         let content_type = header(reqwest::header::CONTENT_TYPE);
         let content_encoding = header(reqwest::header::CONTENT_ENCODING);
         let content_disposition = header(reqwest::header::CONTENT_DISPOSITION);
@@ -497,7 +506,8 @@ impl Gateway {
             "x-me-frame-height",
         ));
         let content_length = response
-            .content_length()
+            .head
+            .body_length
             .and_then(|length| usize::try_from(length).ok());
         Ok(ProxyResponse {
             status,
@@ -513,7 +523,7 @@ impl Gateway {
             frame_width,
             frame_height,
             content_length,
-            body: Box::new(response),
+            body: Box::new(response.body),
         })
     }
 

@@ -335,7 +335,7 @@ function getRemoteControlController() {
   if (!remoteControlController) {
     remoteControlController = globalThis.MeRemoteControl.create({
       container: elements.remoteControl,
-      request: (action, options) => fetch(
+      request: (action, options) => frontendRuntime.fetch(
         frontendRuntime.apiPath(`/api/remote-control/${encodeURIComponent(action)}`, "chat"),
         { cache: "no-store", ...options },
       ),
@@ -362,11 +362,10 @@ function getFileManagerController() {
     fileManagerController = globalThis.MeFileManager.create({
       container: elements.fileManager,
       request: (path, options, identity) => api(path, options, identity.workspaceId),
-      downloadUrl: (downloadId, identity) => frontendRuntime.apiPath(`/api/files/downloads/${encodeURIComponent(downloadId)}/content`, identity.workspaceId),
-      downloadFile: runtimeCapabilities.nativeDownload ? (download, identity) => frontendRuntime.downloadFile(
+      downloadFile: (download, identity, options) => frontendRuntime.downloadFile(
         frontendRuntime.apiPath(`/api/files/downloads/${encodeURIComponent(download.download_id)}/content`, identity.workspaceId),
-        download.filename,
-      ) : null,
+        download.filename, options,
+      ),
       onUnauthorized: () => showLogin("登录已失效，请重新登录"),
       writeClipboard: copyTextToClipboard,
       notify: (message, kind) => toast(message, kind === "error"),
@@ -456,7 +455,14 @@ function readSendShortcutPreference() {
     try { return normalizeSendShortcut(devicePreferences.getItem(SEND_SHORTCUT_PREFERENCE)); }
     catch (_) { return SEND_SHORTCUT_MODIFIED_ENTER; }
   }
-  return readSendShortcutCookie(typeof document.cookie === "string" ? document.cookie : "");
+  try {
+    const saved = localStorage.getItem(SEND_SHORTCUT_PREFERENCE);
+    if (saved !== null) return normalizeSendShortcut(saved);
+    const migrated = readSendShortcutCookie(typeof document.cookie === "string" ? document.cookie : "");
+    localStorage.setItem(SEND_SHORTCUT_PREFERENCE, migrated);
+    document.cookie = `${SEND_SHORTCUT_COOKIE}=; Max-Age=0; Path=/; SameSite=Lax`;
+    return migrated;
+  } catch (_) { return SEND_SHORTCUT_MODIFIED_ENTER; }
 }
 
 function persistDevicePreference(key, value) {
@@ -486,7 +492,7 @@ function restoreRuntimeDevicePreferences() {
 function setSendShortcut(value) {
   state.sendShortcut = normalizeSendShortcut(value);
   if (!persistDevicePreference(SEND_SHORTCUT_PREFERENCE, state.sendShortcut)) {
-    document.cookie = `${SEND_SHORTCUT_COOKIE}=${encodeURIComponent(state.sendShortcut)}; Max-Age=31536000; Path=/; SameSite=Lax`;
+    try { localStorage.setItem(SEND_SHORTCUT_PREFERENCE, state.sendShortcut); } catch (_) {}
   }
   renderComposer();
   elements.input.focus();
@@ -846,8 +852,9 @@ function emptyProjection() {
 }
 
 async function api(path, options = {}, workspaceId = state.workspaceId) {
-  const response = await fetch(frontendRuntime.apiPath(path, workspaceId), { cache: "no-store", ...options });
-  const payload = await response.json().catch(() => ({ ok: false, error: `HTTP ${response.status}` }));
+  const response = await frontendRuntime.fetch(frontendRuntime.apiPath(path, workspaceId), { cache: "no-store", ...options });
+  // A failed response stream leaves command execution unknown, even after authenticated HTTP metadata.
+  const payload = await response.json();
   if (!response.ok || payload.ok === false) {
     const error = new Error(payload.error || `HTTP ${response.status}`);
     error.status = response.status;
@@ -1606,6 +1613,7 @@ async function synchronizeProjectionBucket(bucket, payload, workspaceId, observe
       store = createAgentStore(meta, null, bucket.snapshot);
       bucket.stores.set(meta.id, store);
       bucket.drafts.set(meta.id, String(meta.input_draft || ""));
+      if (bucket === state && meta.id === state.selectedAgent) restoreDraft();
     }
     observeDraft(meta, store);
     store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
@@ -6762,11 +6770,10 @@ function flushDraftBeforePageCloses() {
       });
       const url = frontendRuntime.apiPath("/api/command", workspaceId);
       try {
-        const data = typeof Blob === "function" ? new Blob([body], { type: "application/json" }) : null;
-        if (data && navigator.sendBeacon?.(url, data)) continue;
-        void fetch(url, {
+        if (frontendRuntime.sendBeacon(url, body)) continue;
+        void frontendRuntime.fetch(url, {
           method: "POST", headers: { "Content-Type": "application/json" }, body, keepalive: true,
-        });
+        }).catch(() => {});
       } catch (_) {}
     }
   }

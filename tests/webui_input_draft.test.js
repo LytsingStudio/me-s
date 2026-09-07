@@ -17,7 +17,7 @@ function loadDraftRuntime(options = {}) {
     "setTimeout", "clearTimeout",
     `${source.slice(0, eventBindings)}
     return {
-      state, elements, observeInputDraft, saveDraft, beginInputComposition, endInputComposition,
+      api, state, elements, observeInputDraft, saveDraft, beginInputComposition, endInputComposition,
       projectChat, pendingPromptReachedProjection, promptSubmissionBoundary,
       commandResultIsUnknown, cancelPendingPromptSubmission, finishPendingPromptSubmission, sendCommand,
       restoreDraft, flushDraftBeforePageCloses, queueDraftUpdate, runDraftSync, pauseDraftSyncForSubmission,
@@ -72,6 +72,7 @@ function loadDraftRuntime(options = {}) {
     if (options.fetch) return options.fetch(...args);
     return Promise.resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
   };
+  globalThis.MeFrontendRuntime.fetch = fetchFake;
   const runtime = factory(
     {
       querySelector: (selector) => selector === "#prompt-input" ? input
@@ -546,4 +547,17 @@ describe("WebUI authoritative input draft synchronization", () => {
     expect(runtime.elements.inputMirror.value).toBe("");
     expect(runtime.realScrollHeightReads()).toBe(0);
   });
+});
+
+test("an incomplete authenticated response remains an unknown command outcome", async () => {
+  const r = loadDraftRuntime({ fetch: async () => ({
+    ok: true, status: 200, json: async () => { throw new Error("encrypted stream truncated"); },
+  }) });
+  let failure;
+  try { await r.api("/api/command", { method: "POST", body: "{}" }); }
+  catch (error) { failure = error; }
+  expect(failure).toBeDefined();
+  expect(failure.status).toBeUndefined();
+  expect(r.commandResultIsUnknown(failure)).toBe(true);
+  expect(r.fetchCalls).toHaveLength(1);
 });

@@ -18,6 +18,7 @@ struct PythonDistribution {
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
+    verify_browser_transport();
     println!("cargo:rerun-if-env-changed=ME_PYTHON_RUNTIME_ARCHIVE");
     println!("cargo:rerun-if-env-changed=ME_BUILD_OFFLINE");
     let target = env::var("TARGET").expect("Cargo did not provide TARGET");
@@ -67,6 +68,34 @@ fn main() {
         "failed to sign the macOS Camoufox window-control bridge"
     );
     generate_bridge_module(&output);
+}
+
+fn verify_browser_transport() {
+    let manifest = PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap());
+    println!("cargo:rerun-if-changed=transport/wasm.sha256");
+    let checksums = fs::read_to_string(manifest.join("transport/wasm.sha256"))
+        .expect("missing browser transport checksums; run node scripts/build-transport.cjs");
+    for path in [
+        "transport/Cargo.toml",
+        "transport/Cargo.lock",
+        "transport/src/lib.rs",
+        "transport/src/wasm.rs",
+        "src/webui/transport.wasm",
+    ] {
+        println!("cargo:rerun-if-changed={path}");
+        let expected = checksums
+            .lines()
+            .find_map(|line| {
+                let (hash, file) = line.split_once("  ")?;
+                (file == path).then_some(hash)
+            })
+            .expect("incomplete browser transport checksums; run node scripts/build-transport.cjs");
+        assert_eq!(
+            sha256(&manifest.join(path)).as_deref(),
+            Some(expected),
+            "stale browser transport: {path}; run node scripts/build-transport.cjs and include the generated assets"
+        );
+    }
 }
 
 fn generate_bridge_module(dylib: &Path) {

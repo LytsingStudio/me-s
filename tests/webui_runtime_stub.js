@@ -10,6 +10,8 @@ function installDirectFrontendRuntime() {
   globalThis.MeFrontendRuntime = {
     capabilities: {},
     endpoint: "",
+    fetch() { throw new Error("unexpected business request in UI unit test"); },
+    sendBeacon() { return false; },
     apiPath(path) { return String(path || ""); },
     createEdbCache() { return cache; },
     loadCachedSessions(value, _snapshot, scope) { return value.loadScope(scope); },

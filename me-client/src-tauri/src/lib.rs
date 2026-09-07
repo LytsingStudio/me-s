@@ -31,8 +31,8 @@ use objc2_ui_kit::{UIView, UIViewAutoresizing};
 
 use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest, RememberedDevice};
 use gateway::{
-    DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport, LocalDevice,
-    discover_local_device, normalize_endpoint, online_remembered_devices,
+    DownloadProgress, DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport,
+    LocalDevice, discover_local_device, normalize_endpoint, online_remembered_devices,
 };
 use serde::Serialize;
 use tauri::{AppHandle, Manager, State, WebviewWindow};
@@ -786,11 +786,24 @@ fn client_download_directory(app: &AppHandle) -> Result<PathBuf, String> {
 async fn download_file(
     path: String,
     filename: String,
+    progress: tauri::ipc::Channel<DownloadProgress>,
     app: AppHandle,
     state: State<'_, AppState>,
 ) -> Result<DownloadResult, String> {
     let directory = client_download_directory(&app)?;
-    state.gateway.download(&path, &filename, &directory).await
+    state
+        .gateway
+        .download(&path, &filename, &directory, |event| {
+            progress
+                .send(event)
+                .map_err(|_| "下载窗口已关闭".to_owned())
+        })
+        .await
+}
+
+#[tauri::command]
+fn cancel_download(request_id: String, state: State<'_, AppState>) {
+    state.gateway.cancel_download(&request_id);
 }
 
 async fn run_blocking<T: Send + 'static>(
@@ -1028,6 +1041,7 @@ pub fn run() {
             cache_save_batch,
             cache_remove,
             download_file,
+            cancel_download,
         ])
         .build(tauri::generate_context!())
         .expect("error while building ME Client");

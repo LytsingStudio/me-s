@@ -10,6 +10,7 @@ pub mod current_time;
 pub mod desktop_toolbox;
 pub mod diag;
 mod edb_migration;
+mod encrypted_http;
 pub mod event;
 pub mod file_search;
 pub mod gateway;

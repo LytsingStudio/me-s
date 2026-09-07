@@ -27,6 +27,9 @@
       newSessionLabel: "新建聊天",
     }),
     get endpoint() { return ""; },
+    fetch(...args) { return globalThis.MeEncryptedTransport.fetch(...args); },
+    sendBeacon(...args) { return globalThis.MeEncryptedTransport.sendBeacon(...args); },
+    downloadFile(...args) { return globalThis.MeEncryptedTransport.downloadFile(...args); },
     async initialize() {
       document.documentElement.classList.add("me-gateway");
       return { endpoint: "" };

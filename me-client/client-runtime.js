@@ -548,6 +548,11 @@
     }),
     get endpoint() { return endpoint; },
     get clientVersion() { return clientVersion; },
+    fetch: nativeFetch,
+    sendBeacon(input, body) {
+      void nativeFetch(input, { method: "POST", headers: { "Content-Type": "application/json" }, body }).catch(() => {});
+      return true;
+    },
     devicePreferences,
     rememberedDevices,
     async initialize() {
@@ -594,8 +599,25 @@
     cacheKey(_scope, _agentId, edbId) {
       return String(edbId || "");
     },
-    async downloadFile(path, filename) {
-      return invoke("download_file", { path, filename: String(filename || "download") });
+    async downloadFile(path, filename, { signal, onProgress } = {}) {
+      if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+      const progress = new tauri.core.Channel();
+      let requestId = null;
+      const cancel = () => {
+        if (requestId) void invoke("cancel_download", { requestId }).catch(() => {});
+      };
+      progress.onmessage = (event) => {
+        requestId = event.requestId;
+        if (signal?.aborted) cancel();
+        onProgress?.(event.bytes);
+      };
+      signal?.addEventListener("abort", cancel, { once: true });
+      try {
+        return await invoke("download_file", { path, filename: String(filename || "download"), progress });
+      } catch (error) {
+        if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
+        throw error;
+      } finally { signal?.removeEventListener("abort", cancel); }
     },
   };
 

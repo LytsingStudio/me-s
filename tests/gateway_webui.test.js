@@ -286,7 +286,7 @@ const fixture = [
 ];
 
 describe("ME Gateway WebUI semantic compatibility", () => {
-  test("scopes send shortcut cookies to each WebUI page port", () => {
+  test("migrates old send shortcut cookies by port without writing new network cookies", () => {
     for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
       expect(runtime.SEND_SHORTCUT_COOKIE).toBe("me_send_shortcut_p38199");
@@ -297,7 +297,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(runtime.readSendShortcutCookie("me_send_shortcut_p38201=enter"))
         .toBe("modified-enter");
       const source = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(source).toContain("Max-Age=31536000; Path=/; SameSite=Lax");
+      expect(source.includes("localStorage.setItem(SEND_SHORTCUT_PREFERENCE, state.sendShortcut)")).toBe(true);
     }
   });
 
@@ -1330,6 +1330,20 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(r.estimateTranscriptMessageHeight(message,0,513)).toBe(1587);
     expect(r.estimateTranscriptMessageHeight(message,0,514)).toBe(822);
     expect(r.estimateTranscriptMessageHeight(message,0,1200)).toBe(822);
+  });
+
+  test("restores the selected draft when its first projection state arrives", async () => {
+    const r = loadRuntime("../src/webui/app.js");
+    r.state.selectedAgent = "main";
+    r.state.inputResizeFrame = 1;
+    r.elements.input = { value: "" };
+    r.state.snapshot.agents = [{ id: "main", input_draft: "saved draft", input_draft_revision: 3 }];
+    const payload = { ui_projection: true, projection_states: [uiProjectionState("main", "r1", 0)] };
+    await r.synchronizeProjectionBucket(r.state, payload, "chat", () => {});
+    expect(r.elements.input.value).toBe("saved draft");
+    r.elements.input.value = "local edit";
+    await r.synchronizeProjectionBucket(r.state, payload, "chat", () => {});
+    expect(r.elements.input.value).toBe("local edit");
   });
 
   test("updates unselected summaries without advancing the body cursor", async () => {

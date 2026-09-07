@@ -9,11 +9,12 @@ use std::{
     time::Duration,
 };
 
+use crate::encrypted_http::{EncryptedHttp, Request};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
 use flate2::{Compression, write::GzEncoder};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::{
     Result,
@@ -300,6 +301,7 @@ fn start_with_server(
     )?;
     let commands: Arc<dyn UiCommandGateway> = Arc::new(commands);
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
+    let encrypted_http = Arc::new(EncryptedHttp::default());
     let codex_usage = Arc::new(crate::codex_usage::CodexUsage::start(managed.is_none())?);
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
@@ -331,6 +333,7 @@ fn start_with_server(
                         let backend = Arc::clone(&backend);
                         let commands = Arc::clone(&commands);
                         let auth = Arc::clone(&auth);
+                        let encrypted_http = Arc::clone(&encrypted_http);
                         let managed = Arc::clone(&managed);
                         let codex_usage = Arc::clone(&codex_usage);
                         let remote_control = Arc::clone(&worker_remote_control);
@@ -344,6 +347,7 @@ fn start_with_server(
                                     backend.as_ref(),
                                     commands.as_ref(),
                                     auth.as_ref(),
+                                    encrypted_http.as_ref(),
                                     codex_usage.as_ref(),
                                     managed.as_ref().as_ref(),
                                     remote_control.as_ref(),
@@ -619,45 +623,57 @@ fn event_prefix_within_budget(events: &[Event], budget: usize) -> Result<(usize,
 }
 
 fn serve(
-    mut request: Request,
+    request: tiny_http::Request,
     backend: &dyn UiBackend,
     commands: &dyn UiCommandGateway,
     auth: &WebSessionAuth,
+    encrypted_http: &EncryptedHttp,
     codex_usage: &crate::codex_usage::CodexUsage,
     managed: Option<&ManagedWebAccess>,
     remote_control: &RemoteControlRuntime,
     session_terminals: &SessionTerminalRegistry,
     host_files: &HostFileManager,
 ) {
-    let result = match managed {
-        Some(managed) => route_managed(
-            &mut request,
-            backend,
-            commands,
-            managed,
-            remote_control,
-            session_terminals,
-            host_files,
-        ),
-        None => route(
-            &mut request,
-            backend,
-            commands,
-            auth,
-            codex_usage,
-            remote_control,
-            session_terminals,
-            host_files,
-        ),
-    };
-    let response = match result {
-        Ok(response) => response,
-        Err(error) => json_response(
-            StatusCode(500),
-            &json!({"ok": false, "error": error.to_string()}),
-        ),
-    };
-    let _ = request.respond(response);
+    encrypted_http.serve(
+        request,
+        |path| {
+            if managed.is_some() {
+                None
+            } else {
+                public_asset(path)
+            }
+        },
+        |request| {
+            let result = match managed {
+                Some(managed) => route_managed(
+                    request,
+                    backend,
+                    commands,
+                    managed,
+                    remote_control,
+                    session_terminals,
+                    host_files,
+                ),
+                None => route(
+                    request,
+                    backend,
+                    commands,
+                    auth,
+                    codex_usage,
+                    remote_control,
+                    session_terminals,
+                    host_files,
+                ),
+            };
+            match result {
+                Ok(response) => response,
+                Err(error) => json_response(
+                    StatusCode(500),
+                    &json!({"ok": false, "error": error.to_string()}),
+                ),
+            }
+        },
+    );
 }
 
 type HttpResponse = Response<Box<dyn Read + Send>>;
@@ -787,6 +803,49 @@ fn route_managed(
     }
 }
 
+fn public_asset(path: &str) -> Option<HttpResponse> {
+    match path {
+        "/" => Some(text_response("text/html; charset=utf-8", INDEX_HTML)),
+        "/runtime.js" => Some(text_response("text/javascript; charset=utf-8", RUNTIME_JS)),
+        _ => shared_public_asset(path),
+    }
+}
+
+pub(crate) fn shared_public_asset(path: &str) -> Option<HttpResponse> {
+    if path == "/transport.wasm" {
+        return Some(bytes_response(
+            "application/wasm",
+            include_bytes!("webui/transport.wasm"),
+        ));
+    }
+    if let Some(font) = shared_katex_font(path) {
+        return Some(bytes_response("font/woff2", font));
+    }
+    if let Some((content_type, content)) = shared_webui_component_asset(path) {
+        return Some(text_response(content_type, content));
+    }
+    let (content_type, content) = match path {
+        "/transport.js" => (
+            "text/javascript; charset=utf-8",
+            include_str!("webui/transport.js"),
+        ),
+        "/theme.js" => ("text/javascript; charset=utf-8", THEME_JS),
+        "/app.js" => ("text/javascript; charset=utf-8", APP_JS),
+        "/file-manager.js" => ("text/javascript; charset=utf-8", FILE_MANAGER_JS),
+        "/transcript.js" => ("text/javascript; charset=utf-8", TRANSCRIPT_JS),
+        "/tool-presenters.js" => ("text/javascript; charset=utf-8", TOOL_PRESENTERS_JS),
+        "/edb-cache.js" => ("text/javascript; charset=utf-8", EDB_CACHE_JS),
+        "/markdown.js" => ("text/javascript; charset=utf-8", MARKDOWN_JS),
+        "/markdown-it.js" => ("text/javascript; charset=utf-8", MARKDOWN_IT_JS),
+        "/katex.js" => ("text/javascript; charset=utf-8", KATEX_JS),
+        "/katex.css" => ("text/css; charset=utf-8", KATEX_CSS),
+        "/style.css" => ("text/css; charset=utf-8", STYLE_CSS),
+        "/theme.css" => ("text/css; charset=utf-8", THEME_CSS),
+        _ => return None,
+    };
+    Some(text_response(content_type, content))
+}
+
 fn route(
     request: &mut Request,
     backend: &dyn UiBackend,
@@ -799,74 +858,7 @@ fn route(
 ) -> Result<HttpResponse> {
     let url = request.url().to_owned();
     let (path, query) = split_url(&url);
-    if request.method() == &Method::Get
-        && let Some((_, font)) = KATEX_FONTS.iter().find(|(font_path, _)| *font_path == path)
-    {
-        return Ok(bytes_response("font/woff2", font));
-    }
-    if request.method() == &Method::Get
-        && let Some((content_type, content)) = shared_webui_component_asset(path)
-    {
-        return Ok(text_response(content_type, content));
-    }
     match (request.method(), path) {
-        (&Method::Get, "/") => {
-            return Ok(text_response("text/html; charset=utf-8", INDEX_HTML));
-        }
-        (&Method::Get, "/theme.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", THEME_JS));
-        }
-        (&Method::Get, "/app.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
-        }
-        (&Method::Get, "/runtime.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", RUNTIME_JS));
-        }
-        (&Method::Get, "/file-manager.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                FILE_MANAGER_JS,
-            ));
-        }
-        (&Method::Get, "/transcript.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                TRANSCRIPT_JS,
-            ));
-        }
-        (&Method::Get, "/tool-presenters.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                TOOL_PRESENTERS_JS,
-            ));
-        }
-        (&Method::Get, "/edb-cache.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                EDB_CACHE_JS,
-            ));
-        }
-        (&Method::Get, "/markdown.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", MARKDOWN_JS));
-        }
-        (&Method::Get, "/markdown-it.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                MARKDOWN_IT_JS,
-            ));
-        }
-        (&Method::Get, "/katex.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", KATEX_JS));
-        }
-        (&Method::Get, "/katex.css") => {
-            return Ok(text_response("text/css; charset=utf-8", KATEX_CSS));
-        }
-        (&Method::Get, "/style.css") => {
-            return Ok(text_response("text/css; charset=utf-8", STYLE_CSS));
-        }
-        (&Method::Get, "/theme.css") => {
-            return Ok(text_response("text/css; charset=utf-8", THEME_CSS));
-        }
         (&Method::Get, "/api/auth/status") => return auth_status_response(request, auth),
         (&Method::Post, "/api/auth/login") => return login_response(request, auth),
         _ => {}
@@ -2552,7 +2544,16 @@ mod tests {
 
     #[test]
     fn auth_status_reports_running_product_version() {
-        let request = tiny_http::TestRequest::new().into();
+        let request = Request::new(
+            me_transport::RequestHead {
+                method: "GET".into(),
+                url: "/api/auth/status".into(),
+                headers: Vec::new(),
+                body_length: 0,
+            },
+            Vec::new(),
+        )
+        .unwrap();
         let auth = WebSessionAuth::new("me_webui_session", 38199, Some("test")).unwrap();
         let response = auth_status_response(&request, &auth).unwrap();
         let payload: serde_json::Value = serde_json::from_reader(response.into_reader()).unwrap();
@@ -2728,10 +2729,7 @@ mod tests {
             "chatbot",
         );
         Arc::make_mut(&mut backend.0.environment).workspace = directory.clone();
-        let client = reqwest::blocking::Client::builder()
-            .no_proxy()
-            .build()
-            .unwrap();
+        let client = crate::encrypted_http::test_client::Client::new();
         for managed in [false, true] {
             let server = if managed {
                 start_managed(
@@ -2801,7 +2799,7 @@ mod tests {
                 download.headers()["content-disposition"],
                 format!("attachment; filename=\"image-{}.png\"", &sha[..12])
             );
-            assert_eq!(download.bytes().unwrap().as_ref(), original.as_slice());
+            assert_eq!(download.bytes().unwrap().as_slice(), original.as_slice());
             for path in [
                 format!("/api/images/absent/{sha}/preview"),
                 format!("/api/images/main/{}/original", "0".repeat(64)),
@@ -3576,7 +3574,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_offers_a_cookie_backed_send_shortcut_preference() {
+    fn embedded_webui_keeps_send_shortcut_preferences_off_the_wire() {
         assert!(INDEX_HTML.contains("Enter 换行 · Shift/Alt+Enter 发送"));
         assert!(
             APP_JS.contains(
@@ -3584,7 +3582,10 @@ mod tests {
             )
         );
         assert!(APP_JS.contains("protocol === \"https:\" ? \"443\" : \"80\""));
-        assert!(APP_JS.contains("Max-Age=31536000; Path=/; SameSite=Lax"));
+        assert!(
+            APP_JS.contains("localStorage.setItem(SEND_SHORTCUT_PREFERENCE, state.sendShortcut)")
+        );
+        assert!(!APP_JS.contains("Max-Age=31536000; Path=/; SameSite=Lax"));
         assert!(APP_JS.contains("openChoiceDrawer(\"发送设置\""));
         assert!(
             APP_JS.contains("elements.send.addEventListener(\"click\", submitOrOpenSendSettings)")
@@ -3984,8 +3985,9 @@ mod tests {
         assert!(
             APP_JS.contains("if (bucket.stores.get(agentId)?.pendingPromptSubmission) continue;")
         );
-        assert!(APP_JS.contains("navigator.sendBeacon?.(url, data)"));
-        assert!(APP_JS.contains("void fetch(url, {"));
+        assert!(APP_JS.contains("frontendRuntime.sendBeacon(url, body)"));
+        assert!(!APP_JS.contains("navigator.sendBeacon"));
+        assert!(APP_JS.contains("void frontendRuntime.fetch(url, {"));
         assert!(APP_JS.contains("receipt?.prompt_submission_revision"));
         assert!(APP_JS.contains("store.promptSubmissionRevision = Math.max"));
     }
@@ -4368,7 +4370,7 @@ mod tests {
         let address = server
             .address()
             .replace("http://0.0.0.0:", "http://127.0.0.1:");
-        let client = reqwest::blocking::Client::new();
+        let client = crate::encrypted_http::test_client::Client::new();
 
         let UiCommandReceipt::AgentCreated(created) = lifecycle
             .submit(UiCommand::AddAgent {
@@ -4436,7 +4438,7 @@ mod tests {
         let address = server
             .address()
             .replace("http://0.0.0.0:", "http://127.0.0.1:");
-        let client = reqwest::blocking::Client::new();
+        let client = crate::encrypted_http::test_client::Client::new();
 
         assert!(
             client
@@ -4720,7 +4722,7 @@ mod tests {
         let (second_directory, second_server, second_address) = start_instance();
         assert_ne!(first_server.port(), second_server.port());
 
-        let client = reqwest::blocking::Client::new();
+        let client = crate::encrypted_http::test_client::Client::new();
         let login = |address: &str, browser_port: u16| {
             client
                 .post(format!("{address}/api/auth/login"))
@@ -4821,7 +4823,7 @@ mod tests {
         let address = server
             .address()
             .replace("http://0.0.0.0:", "http://127.0.0.1:");
-        let client = reqwest::blocking::Client::new();
+        let client = crate::encrypted_http::test_client::Client::new();
         let state_url = format!("{address}/api/ui-projections/{agent_id}/state");
 
         let state_response = client
@@ -4935,7 +4937,7 @@ mod tests {
             "gzip"
         );
         let compressed_body = compressed.bytes().unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_ref());
+        let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_slice());
         let mut decoded = Vec::new();
         decoder.read_to_end(&mut decoded).unwrap();
         assert_eq!(
@@ -4966,7 +4968,7 @@ mod tests {
         let address = server
             .address()
             .replace("http://0.0.0.0:", "http://127.0.0.1:");
-        let client = reqwest::blocking::Client::new();
+        let client = crate::encrypted_http::test_client::Client::new();
         let request = json!({
             "snapshot_revision": null, "agents": [], "selected_agent": null,
             "terminal_session": null, "terminal_revision": null,
@@ -5012,7 +5014,7 @@ mod tests {
             "Accept-Encoding"
         );
         let compressed_body = compressed.bytes().unwrap();
-        let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_ref());
+        let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_slice());
         let mut decoded = Vec::new();
         decoder.read_to_end(&mut decoded).unwrap();
         assert_eq!(
@@ -5043,8 +5045,9 @@ mod tests {
         let address = server
             .address()
             .replace("http://0.0.0.0:", "http://127.0.0.1:");
-        let client = reqwest::blocking::Client::new();
-        let sync = |client: &reqwest::blocking::Client, body: serde_json::Value| {
+        let client = crate::encrypted_http::test_client::Client::new();
+        let sync = |client: &crate::encrypted_http::test_client::Client,
+                    body: serde_json::Value| {
             client
                 .post(format!("{address}/api/sync"))
                 .json(&body)
@@ -5132,7 +5135,7 @@ mod tests {
         assert_eq!(updated["receipt"]["accepted"], true);
 
         // A new HTTP client resumes entirely from the caller's revision cursors.
-        let reconnected_client = reqwest::blocking::Client::new();
+        let reconnected_client = crate::encrypted_http::test_client::Client::new();
         let recovered = sync(
             &reconnected_client,
             json!({
@@ -5157,7 +5160,7 @@ mod tests {
 
         let recovered_revision = recovered["snapshot"]["revision"].as_u64().unwrap();
         let recovered_draft_revision = recovered_agent["input_draft_revision"].as_u64().unwrap();
-        let observer = reqwest::blocking::Client::new();
+        let observer = crate::encrypted_http::test_client::Client::new();
         let observed_initial = sync(
             &observer,
             json!({
@@ -5233,7 +5236,7 @@ mod tests {
         for _ in 0..6 {
             let address = address.clone();
             clients.push(thread::spawn(move || {
-                reqwest::blocking::Client::new()
+                crate::encrypted_http::test_client::Client::new()
                     .post(format!("{address}/api/command"))
                     .json(&json!({"command": "add_agent", "orchestrator": "chatbot"}))
                     .send()
@@ -5253,18 +5256,20 @@ mod tests {
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(ids.len(), 6);
 
-        let first: serde_json::Value = reqwest::blocking::get(format!("{address}/api/snapshot"))
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .unwrap();
-        let second: serde_json::Value = reqwest::blocking::get(format!("{address}/api/snapshot"))
-            .unwrap()
-            .error_for_status()
-            .unwrap()
-            .json()
-            .unwrap();
+        let first: serde_json::Value =
+            crate::encrypted_http::test_client::get(format!("{address}/api/snapshot"))
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap();
+        let second: serde_json::Value =
+            crate::encrypted_http::test_client::get(format!("{address}/api/snapshot"))
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap();
         assert_eq!(
             first["tool_visibility"],
             json!({
@@ -5293,13 +5298,13 @@ mod tests {
         let id = ids.first().unwrap();
         let other_id = ids.iter().nth(1).unwrap();
         let activity: serde_json::Value =
-            reqwest::blocking::get(format!("{address}/api/api-activity/{id}"))
+            crate::encrypted_http::test_client::get(format!("{address}/api/api-activity/{id}"))
                 .unwrap()
                 .json()
                 .unwrap();
         assert_eq!(activity["active"], false);
         assert_eq!(activity["received_sse_events"], 0);
-        let draft_update: serde_json::Value = reqwest::blocking::Client::new()
+        let draft_update: serde_json::Value = crate::encrypted_http::test_client::Client::new()
             .post(format!("{address}/api/command"))
             .json(&json!({
                 "command": "update_input_draft",
@@ -5318,7 +5323,7 @@ mod tests {
         let draft_revision = draft_update["receipt"]["input_draft_revision"]
             .as_u64()
             .unwrap();
-        let stale_update: serde_json::Value = reqwest::blocking::Client::new()
+        let stale_update: serde_json::Value = crate::encrypted_http::test_client::Client::new()
             .post(format!("{address}/api/command"))
             .json(&json!({
                 "command": "update_input_draft",
@@ -5338,7 +5343,7 @@ mod tests {
             draft_revision
         );
         let reconnected: serde_json::Value =
-            reqwest::blocking::get(format!("{address}/api/snapshot"))
+            crate::encrypted_http::test_client::get(format!("{address}/api/snapshot"))
                 .unwrap()
                 .error_for_status()
                 .unwrap()
@@ -5360,20 +5365,21 @@ mod tests {
         assert!(reconnect_agent["input_draft_revision"].as_u64().unwrap() > 0);
         assert_eq!(isolated_agent["input_draft"], "");
         assert_eq!(isolated_agent["input_draft_revision"], 0);
-        let events: serde_json::Value =
-            reqwest::blocking::get(format!("{address}/api/events/{id}?after=0&mutation=0"))
-                .unwrap()
-                .error_for_status()
-                .unwrap()
-                .json()
-                .unwrap();
+        let events: serde_json::Value = crate::encrypted_http::test_client::get(format!(
+            "{address}/api/events/{id}?after=0&mutation=0"
+        ))
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .unwrap();
         assert!(events["events"].as_array().unwrap().len() >= 3);
         assert_eq!(events["reset"], false);
         assert_eq!(events["turn_history_updated"], true);
         assert_eq!(events["turn_history"], serde_json::Value::Null);
 
         let initial_count = events["event_count"].as_u64().unwrap() as usize;
-        let unchanged: serde_json::Value = reqwest::blocking::get(format!(
+        let unchanged: serde_json::Value = crate::encrypted_http::test_client::get(format!(
             "{address}/api/events/{id}?after={initial_count}&mutation=0"
         ))
         .unwrap()
@@ -5384,7 +5390,7 @@ mod tests {
         assert_eq!(unchanged["turn_history_updated"], false);
         assert_eq!(unchanged["turn_history"], serde_json::Value::Null);
 
-        reqwest::blocking::Client::new()
+        crate::encrypted_http::test_client::Client::new()
             .post(format!("{address}/api/command"))
             .json(&json!({"command": "clear_context", "agent_id": id}))
             .send()
@@ -5393,13 +5399,14 @@ mod tests {
             .unwrap();
         let after_clear = (0..100)
             .find_map(|_| {
-                let snapshot: serde_json::Value =
-                    reqwest::blocking::get(format!("{address}/api/events/{id}?after=0&mutation=0"))
-                        .unwrap()
-                        .error_for_status()
-                        .unwrap()
-                        .json()
-                        .unwrap();
+                let snapshot: serde_json::Value = crate::encrypted_http::test_client::get(format!(
+                    "{address}/api/events/{id}?after=0&mutation=0"
+                ))
+                .unwrap()
+                .error_for_status()
+                .unwrap()
+                .json()
+                .unwrap();
                 if snapshot["event_count"].as_u64()? as usize > initial_count {
                     Some(snapshot)
                 } else {
@@ -5415,7 +5422,7 @@ mod tests {
             .find_map(|event| event.get("ContextCleared"))
             .and_then(|event| event["id"].as_u64())
             .unwrap();
-        reqwest::blocking::Client::new()
+        crate::encrypted_http::test_client::Client::new()
             .post(format!("{address}/api/command"))
             .json(&json!({
                 "command": "rewind_context",
@@ -5428,7 +5435,7 @@ mod tests {
             .unwrap();
         let after_rewind = (0..100)
             .find_map(|_| {
-                let snapshot: serde_json::Value = reqwest::blocking::get(format!(
+                let snapshot: serde_json::Value = crate::encrypted_http::test_client::get(format!(
                     "{address}/api/events/{id}?after={}&mutation=0",
                     initial_count + 1
                 ))

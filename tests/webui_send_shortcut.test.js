@@ -11,10 +11,11 @@ function loadSendShortcutRuntime(cookie = "", location = { protocol: "http:", po
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI send shortcut runtime");
-  const factory = new Function("document", "performance", "matchMedia", `${source.slice(0, eventBindings)}
+  const factory = new Function("document", "performance", "matchMedia", "localStorage", `${source.slice(0, eventBindings)}
     return { state, browserPort, BROWSER_PORT, portScopedCookieName, SEND_SHORTCUT_COOKIE,
       readSendShortcutCookie, sendShortcutHint, sendShortcutPressed };`);
   const input = { value: "", style: {}, scrollHeight: 0 };
+  const storage = new Map();
   return factory(
     {
       cookie, location, querySelector: (selector) => selector === "#prompt-input" ? input : null,
@@ -22,6 +23,7 @@ function loadSendShortcutRuntime(cookie = "", location = { protocol: "http:", po
     },
     { now: () => 0 },
     () => ({ matches: false, addEventListener: () => {} }),
+    { getItem: (key) => storage.get(key) ?? null, setItem: (key, value) => storage.set(key, value) },
   );
 }
 
@@ -39,7 +41,7 @@ describe("WebUI port-local send shortcut preference", () => {
     expect(sendShortcutPressed(key({ altKey: true }), state.sendShortcut)).toBe(true);
   });
 
-  test("derives a distinct cookie name from the page port", () => {
+  test("migrates the matching port's old preference into origin-local storage", () => {
     const first = loadSendShortcutRuntime("me_send_shortcut_p38199=enter");
     const second = loadSendShortcutRuntime(
       "me_send_shortcut_p38199=enter; me_send_shortcut_p38201=modified-enter",
@@ -64,7 +66,7 @@ describe("WebUI port-local send shortcut preference", () => {
     expect(runtime.browserPort({ protocol: "https:", port: "" })).toBe(443);
   });
 
-  test("the cookie can make plain Enter submit and modifiers multiline", () => {
+  test("the migrated preference can make plain Enter submit and modifiers multiline", () => {
     const runtime = loadSendShortcutRuntime("other=value; me_send_shortcut_p38199=enter; session=opaque");
     expect(runtime.state.sendShortcut).toBe("enter");
     expect(runtime.sendShortcutHint()).toBe("Enter 发送 · Shift/Alt+Enter 换行");
@@ -73,7 +75,7 @@ describe("WebUI port-local send shortcut preference", () => {
     expect(runtime.sendShortcutPressed(key({ altKey: true }), "enter")).toBe(false);
   });
 
-  test("unknown cookies fall back safely and writes preserve preference attributes", () => {
+  test("unknown legacy values fall back safely and new preference writes stay off the wire", () => {
     const runtime = loadSendShortcutRuntime("me_send_shortcut_p38199=unknown");
     expect(runtime.state.sendShortcut).toBe("modified-enter");
     expect(runtime.readSendShortcutCookie("me_send_shortcut_p38199=%E0%A4%A"))
@@ -82,6 +84,7 @@ describe("WebUI port-local send shortcut preference", () => {
     expect(runtime.sendShortcutPressed(key({ metaKey: true }), "enter")).toBe(false);
     expect(runtime.sendShortcutPressed({ ...key(), key: "a" }, "enter")).toBe(false);
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    expect(source).toContain("Max-Age=31536000; Path=/; SameSite=Lax");
+    expect(source.includes("localStorage.setItem(SEND_SHORTCUT_PREFERENCE, state.sendShortcut)")).toBe(true);
+    expect(source.includes("Max-Age=31536000; Path=/; SameSite=Lax")).toBe(false);
   });
 });

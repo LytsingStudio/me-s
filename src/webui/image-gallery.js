@@ -28,9 +28,8 @@
     const header = document.createElement("header");
     const title = document.createElement("span");
     title.textContent = `图片 ${index + 1} · ${item.width} × ${item.height}`;
-    const save = document.createElement("a");
-    save.href = item.original;
-    save.download = item.filename;
+    const save = document.createElement("button");
+    save.type = "button";
     save.className = "tool-image-save";
     save.textContent = "保存原图";
     const dismiss = document.createElement("button");
@@ -89,13 +88,22 @@
     };
     save.onclick = async (event) => {
       const runtime = globalThis.MeFrontendRuntime;
-      if (!runtime?.capabilities?.nativeDownload) return;
       event.preventDefault();
       if (saving) return;
       saving = true;
       save.textContent = "正在保存…";
       try {
-        await runtime.downloadFile(item.original, item.filename);
+        if (runtime?.capabilities?.nativeDownload) {
+          await runtime.downloadFile(item.original, item.filename);
+        } else {
+          if (!url) throw new Error("image not ready");
+          const anchor = document.createElement("a");
+          anchor.href = url;
+          anchor.download = item.filename;
+          document.body.append(anchor);
+          anchor.click();
+          anchor.remove();
+        }
         if (active) save.textContent = "已保存原图";
       } catch {
         if (active) save.textContent = "保存失败，重试";
@@ -120,7 +128,7 @@
       controller = new AbortController();
       timeout = setTimeout(() => controller.abort(), 60000);
       try {
-        const response = await fetch(item.original, { signal: controller.signal, cache: "no-store" });
+        const response = await globalThis.MeFrontendRuntime.fetch(item.original, { signal: controller.signal, cache: "no-store" });
         if (!response.ok || !String(response.headers.get("Content-Type")).startsWith("image/")) throw new Error("image unavailable");
         const blob = await response.blob();
         if (!active) return;
@@ -199,7 +207,7 @@
             session.controllers.add(controller);
             const timeout = setTimeout(() => controller.abort(), 15000);
             try {
-              const response = await fetch(item.preview, { signal: controller.signal, cache: "no-store" });
+              const response = await globalThis.MeFrontendRuntime.fetch(item.preview, { signal: controller.signal, cache: "no-store" });
               if (!response.ok || !String(response.headers.get("Content-Type")).startsWith("image/jpeg")) throw new Error("preview unavailable");
               const blob = await response.blob();
               if (!session.active || controller.signal.aborted) return;

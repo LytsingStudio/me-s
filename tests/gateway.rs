@@ -16,6 +16,9 @@ use me::{
     workspace_bootstrap,
 };
 
+#[path = "../src/encrypted_http_test_client.rs"]
+mod encrypted_test_client;
+
 static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
 struct TempDirectory(PathBuf);
@@ -130,12 +133,8 @@ fn spawn_gateway_with_me_s(
     }
 }
 
-fn client() -> reqwest::blocking::Client {
-    reqwest::blocking::Client::builder()
-        .no_proxy()
-        .timeout(Duration::from_secs(5))
-        .build()
-        .unwrap()
+fn client() -> encrypted_test_client::Client {
+    encrypted_test_client::Client::new()
 }
 
 fn login(address: &str) -> String {
@@ -458,7 +457,7 @@ fn gateway_authenticates_manages_persists_and_restores_workspaces() {
         "Accept-Encoding"
     );
     let compressed_body = compressed.bytes().unwrap();
-    let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_ref());
+    let mut decoder = flate2::read::GzDecoder::new(compressed_body.as_slice());
     let mut decoded = Vec::new();
     decoder.read_to_end(&mut decoded).unwrap();
     assert_eq!(

@@ -5,7 +5,7 @@ const { existsSync, readFileSync } = require("node:fs");
 const { execFileSync } = require("node:child_process");
 const { join } = require("node:path");
 
-function loadClientRuntime({ platform = "", userAgent = "" } = {}) {
+function loadClientRuntime({ platform = "", userAgent = "", download = null } = {}) {
   const source = readFileSync(join(import.meta.dir, "../me-client/client-runtime.js"), "utf8");
   const calls = [];
   const browserBeacons = [];
@@ -29,6 +29,7 @@ function loadClientRuntime({ platform = "", userAgent = "" } = {}) {
     addEventListener(type, listener) { nativeWindowListeners.set(type, listener); },
     __TAURI__: {
       core: {
+        Channel: class { onmessage() {} },
         async invoke(command, payload) {
           calls.push({ command, payload });
           if (command === "client_bootstrap") return {
@@ -80,7 +81,12 @@ function loadClientRuntime({ platform = "", userAgent = "" } = {}) {
           if (command === "cache_list") return [{ ...metadata }];
           if (command === "cache_save_batch" || command === "cache_remove"
               || command === "set_device_preference") return null;
-          if (command === "download_file") return { path: "/Downloads/archive.zip", bytes: 12 };
+          if (command === "cancel_download") return null;
+          if (command === "download_file") {
+            if (download) return download(payload);
+            payload.progress.onmessage({ requestId: "test-download", bytes: 12 });
+            return { path: "/Downloads/archive.zip", bytes: 12 };
+          }
           throw new Error(`unexpected command ${command}`);
         },
       },
@@ -621,10 +627,11 @@ describe("ME Client native adapter", () => {
     expect(config).toContain('"frontendDist": "../frontend-dist"');
     for (const server of [directServer, gatewayServer]) {
       expect(server).toContain('include_str!("webui/index.html")');
-      expect(server).toContain('include_str!("webui/app.js")');
-      expect(server).toContain('include_str!("webui/style.css")');
-      expect(server).toContain('(&Method::Get, "/runtime.js")');
+      expect(server.includes('"/runtime.js" =>')).toBe(true);
     }
+    expect(directServer.includes('include_str!("webui/app.js")')).toBe(true);
+    expect(directServer.includes('include_str!("webui/style.css")')).toBe(true);
+    expect(gatewayServer.includes('crate::webui::shared_public_asset(path)')).toBe(true);
     expect(shared).toContain("const frontendRuntime = globalThis.MeFrontendRuntime");
     expect(shared).toContain("store.events.push(...events)");
     expect(shared).toContain("frontendRuntime.windowReady?.()");
@@ -740,4 +747,27 @@ describe("ME Client native adapter", () => {
       expect(source).not.toMatch(/me-(?:s|gateway)-(?:macos|linux|windows)/);
     }
   });
+});
+
+test("native download cancellation waits for registration and forwards progress", async () => {
+  let pending;
+  const { runtime, calls } = loadClientRuntime({ download: (payload) => new Promise((resolve, reject) => { pending = { payload, resolve, reject }; }) });
+  const controller = new AbortController();
+  const progress = [];
+  const running = runtime.downloadFile("/api/files/downloads/test/content", "test.bin", { signal: controller.signal, onProgress: (bytes) => progress.push(bytes) });
+  controller.abort();
+  expect(calls.filter((call) => call.command === "cancel_download")).toHaveLength(0);
+  pending.payload.progress.onmessage({ requestId: "registered-download", bytes: 0 });
+  expect(calls.at(-1)).toEqual({ command: "cancel_download", payload: { requestId: "registered-download" } });
+  pending.reject(new Error("下载已取消"));
+  await expect(running).rejects.toHaveProperty("name", "AbortError");
+  expect(progress).toEqual([0]);
+});
+
+test("a pre-aborted native download never starts a native operation", async () => {
+  const { runtime, calls } = loadClientRuntime();
+  const controller = new AbortController();
+  controller.abort();
+  await expect(runtime.downloadFile("/api/files/downloads/test/content", "test.bin", { signal: controller.signal })).rejects.toHaveProperty("name", "AbortError");
+  expect(calls).toHaveLength(0);
 });

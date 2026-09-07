@@ -20,10 +20,11 @@ function harness(runtime) {
     removeAttribute(name) { delete this[name]; }
     remove() { if (this.parent) this.parent.children = this.parent.children.filter((child) => child !== this); this.parent = null; }
     focus(options) { document.activeElement = this; this.focusOptions = options; }
+    click() { downloads.push({ href: this.href, filename: this.download }); }
     get isConnected() { return this.tag === "body" || Boolean(this.parent?.isConnected); }
   }
   const document = { createElement: (tag) => new Element(tag), body: new Element("body"), activeElement: null };
-  const requests = [], observers = [], revoked = [], timers = new Set();
+  const requests = [], observers = [], revoked = [], downloads = [], timers = new Set();
   let Gallery, nextUrl = 0;
   runInNewContext(source, {
     HTMLElement: Element,
@@ -36,12 +37,14 @@ function harness(runtime) {
       disconnect() { this.targets = []; }
       reveal(target) { this.callback([{ target, isIntersecting: true }]); }
     },
-    fetch: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
     AbortController,
     URL: { createObjectURL: () => `blob:${++nextUrl}`, revokeObjectURL: (url) => revoked.push(url) },
     setTimeout: (callback) => { timers.add(callback); return callback; },
     clearTimeout: (callback) => timers.delete(callback),
-    MeFrontendRuntime: runtime,
+    MeFrontendRuntime: {
+      fetch: (url, options) => new Promise((resolve, reject) => requests.push({ url, options, resolve, reject })),
+      ...runtime,
+    },
   });
   function gallery(items) {
     const gallery = new Gallery();
@@ -63,7 +66,7 @@ function harness(runtime) {
     const [image, status, retry] = viewer.children[1].children;
     return { backdrop, viewer, title, save, dismiss, image, status, retry, opener };
   }
-  return { gallery, requests, observers, revoked, timers, finish, open, document };
+  return { gallery, requests, observers, revoked, downloads, timers, finish, open, document };
 }
 
 test("gallery only requests visible JPEG previews and offers ordered large-image buttons without inline saving", async () => {
@@ -176,19 +179,23 @@ test("viewer loads only the selected original, traps focus and closes without sc
   const g = h.gallery([item(1), item(2)]);
   const v = h.open(g, 1);
   expect(h.requests.map((request) => request.url)).toEqual([item(2).original]);
-  expect(v.save.href).toBe(item(2).original);
-  expect(v.save.download).toBe(item(2).filename);
+  expect(v.save.tag).toBe("button");
+  expect(v.save.href).toBeUndefined();
   expect(v.viewer["aria-modal"]).toBe("true");
   expect(g.inert).toBe(true);
   expect(h.document.activeElement).toBe(v.dismiss);
   expect(v.dismiss.focusOptions).toEqual({ preventScroll: true });
   let prevented = false;
   await v.save.onclick({ preventDefault: () => { prevented = true; } });
-  expect(prevented).toBe(false);
+  expect(prevented).toBe(true);
+  expect(h.downloads).toEqual([]);
   await h.finish(0, "image/png");
   v.image.onload();
   expect(v.image.hidden).toBe(false);
   expect(v.status.hidden).toBe(true);
+  await v.save.onclick({ preventDefault() {} });
+  expect(h.downloads).toEqual([{ href: "blob:1", filename: item(2).filename }]);
+  expect(h.requests).toHaveLength(1);
   v.backdrop.onkeydown({ key: "Tab", stopPropagation() {}, preventDefault() {} });
   expect(h.document.activeElement).toBe(v.save);
   v.backdrop.onkeydown({ key: "Tab", shiftKey: true, stopPropagation() {}, preventDefault() {} });

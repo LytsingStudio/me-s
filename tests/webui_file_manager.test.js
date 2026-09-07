@@ -120,7 +120,8 @@ describe("per-session host file manager", () => {
     expect(controller).toContain('this.call("/api/files/uploads/cancel"');
     expect(controller).toContain("const completedSources = new Set");
     expect(controller).toContain('this.call("/api/files/downloads/create"');
-    expect(controller).toContain("anchor.href = this.downloadUrl(download.download_id, identity)");
+    expect(controller.includes("await this.downloadFile(download, identity, {")).toBe(true);
+    expect(controller.includes("anchor.href = this.downloadUrl")).toBe(false);
     expect(hostFiles).toContain("prepare_archive(worker_record, sources, temp_path, shutdown)");
     expect(hostFiles).toContain("archive.follow_symlinks(false)");
   });

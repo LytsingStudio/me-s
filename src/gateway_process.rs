@@ -4,6 +4,7 @@ use std::{
     net::TcpListener,
     path::{Path, PathBuf},
     process::{Child, ChildStdin, Command, Stdio},
+    sync::Arc,
     thread,
     time::{Duration, Instant},
 };
@@ -28,6 +29,7 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(5);
 pub struct ProcessRoute {
     pub address: String,
     pub token: String,
+    pub transport: Arc<me_transport::blocking::Transport>,
 }
 
 pub struct ManagedProcess {
@@ -95,6 +97,9 @@ impl ManagedProcess {
             route: ProcessRoute {
                 address: format!("http://127.0.0.1:{port}"),
                 token: launch.token,
+                transport: Arc::new(me_transport::blocking::Transport::new(format!(
+                    "http://127.0.0.1:{port}"
+                ))),
             },
             instance_nonce: launch.instance_nonce,
             workspace_path: workspace.to_owned(),
@@ -106,6 +111,8 @@ impl ManagedProcess {
     fn wait_ready(&mut self) -> Result<()> {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_millis(300))
             .timeout(Duration::from_millis(750))
             .build()?;
@@ -113,15 +120,20 @@ impl ManagedProcess {
             if let Some(status) = self.child.try_wait()? {
                 return Err(format!("managed me-s stopped during startup with {status}").into());
             }
-            match client
-                .get(format!("{}{}", self.route.address, MANAGED_READY_PATH))
-                .header(
-                    reqwest::header::AUTHORIZATION,
-                    bearer_header_value(&self.route.token),
-                )
-                .send()
-            {
-                Ok(response) if response.status().is_success() => {
+            match self.route.transport.request(
+                &client,
+                &me_transport::RequestHead {
+                    method: "GET".into(),
+                    url: MANAGED_READY_PATH.into(),
+                    headers: vec![(
+                        "Authorization".into(),
+                        bearer_header_value(&self.route.token),
+                    )],
+                    body_length: 0,
+                },
+                &[],
+            ) {
+                Ok(response) if (200..300).contains(&response.head.status) => {
                     let ready: ManagedReadyResponse = response.json()?;
                     self.verify_ready(&ready)?;
                     return Ok(());
@@ -129,7 +141,7 @@ impl ManagedProcess {
                 Ok(response) => {
                     return Err(format!(
                         "managed me-s readiness returned HTTP {}",
-                        response.status()
+                        response.head.status
                     )
                     .into());
                 }
@@ -178,17 +190,25 @@ impl ManagedProcess {
     pub fn shutdown(&mut self) {
         let client = reqwest::blocking::Client::builder()
             .no_proxy()
+            .redirect(reqwest::redirect::Policy::none())
+            .retry(reqwest::retry::never())
             .connect_timeout(Duration::from_millis(300))
             .timeout(Duration::from_secs(2))
             .build();
         if let Ok(client) = client {
-            let _ = client
-                .post(format!("{}{}", self.route.address, MANAGED_SHUTDOWN_PATH))
-                .header(
-                    reqwest::header::AUTHORIZATION,
-                    bearer_header_value(&self.route.token),
-                )
-                .send();
+            let _ = self.route.transport.request(
+                &client,
+                &me_transport::RequestHead {
+                    method: "POST".into(),
+                    url: MANAGED_SHUTDOWN_PATH.into(),
+                    headers: vec![(
+                        "Authorization".into(),
+                        bearer_header_value(&self.route.token),
+                    )],
+                    body_length: 0,
+                },
+                &[],
+            );
         }
         self.input.take();
         let deadline = Instant::now() + STOP_TIMEOUT;

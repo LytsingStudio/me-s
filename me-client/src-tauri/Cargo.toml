@@ -1,6 +1,6 @@
 [package]
 name = "me-client"
-version = "0.1.97"
+version = "0.1.98"
 description = "Native client for ME Gateway"
 authors = ["Lytsing Studio"]
 license = "MIT"
@@ -17,13 +17,15 @@ tauri-build = { version = "2.6.3", features = [] }
 
 [dependencies]
 base64 = "0.22.1"
+flate2 = "1.1.9"
+me-transport = { path = "../../transport", features = ["async"] }
 log = "0.4"
-reqwest = { version = "0.13.4", default-features = false, features = ["cookies", "gzip", "json", "rustls", "socks", "stream", "system-proxy"] }
+reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls", "socks", "stream", "system-proxy"] }
 rusqlite = { version = "0.40.2", features = ["bundled"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tauri = { version = "2.11.3", features = ["macos-private-api"] }
-tokio = { version = "1.53", features = ["fs", "io-util", "rt-multi-thread", "sync"] }
+tokio = { version = "1.53", features = ["fs", "io-util", "macros", "rt-multi-thread", "sync"] }
 
 [target.'cfg(not(any(target_os = "ios", target_os = "android")))'.dependencies]
 tauri-plugin-log = "2"

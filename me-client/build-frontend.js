@@ -44,6 +44,7 @@ await cp(resolve(vendorRoot, "katex-fonts"), resolve(outputRoot, "fonts"), { rec
 const sourceHtml = await readFile(resolve(webuiRoot, "index.html"), "utf8");
 const html = sourceHtml
   .replace("<title>ME</title>", "<title>ME Client</title>")
+  .replace('  <script src="/transport.js"></script>\n', "")
   .replace("<link rel=\"stylesheet\" href=\"/theme.css\">", "<link rel=\"stylesheet\" href=\"/theme.css\">\n  <link rel=\"stylesheet\" href=\"/client.css\">")
   .replace("      <p>请输入访问密码。</p>", "      <p>输入服务地址和访问密码。</p>");
 if (html === sourceHtml || !html.includes("/runtime.js") || !html.includes("login-endpoint")) {

@@ -9,9 +9,10 @@ use std::{
     time::Duration,
 };
 
+use crate::encrypted_http::{EncryptedHttp, Request};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::json;
-use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
+use tiny_http::{Header, Method, Response, Server, StatusCode};
 
 use crate::{
     Result,
@@ -23,19 +24,11 @@ use crate::{
 pub const DEFAULT_GATEWAY_PORT: u16 = 38200;
 pub const GATEWAY_BIND_ADDRESS: &str = "0.0.0.0";
 const INDEX_HTML: &str = include_str!("webui/index.html");
+#[cfg(test)]
 const APP_JS: &str = include_str!("webui/app.js");
-const STYLE_CSS: &str = include_str!("webui/style.css");
 const RUNTIME_JS: &str = include_str!("gateway_webui/runtime.js");
-const FILE_MANAGER_JS: &str = include_str!("webui/file-manager.js");
-const THEME_JS: &str = include_str!("webui/theme.js");
-const THEME_CSS: &str = include_str!("webui/theme.css");
-const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
-const TOOL_PRESENTERS_JS: &str = include_str!("webui/tool-presenters.js");
+#[cfg(test)]
 const EDB_CACHE_JS: &str = include_str!("webui/edb-cache.js");
-const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
-const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
-const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
-const KATEX_CSS: &str = include_str!("webui/vendor/katex.min.css");
 const SESSION_COOKIE_PREFIX: &str = "me_gateway_session";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
@@ -94,6 +87,7 @@ fn start_from(
     let (server, port) = bind_first_available(first_port)?;
     let address = format!("http://{GATEWAY_BIND_ADDRESS}:{port}");
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
+    let encrypted_http = Arc::new(EncryptedHttp::default());
     let codex_usage = Arc::new(crate::codex_usage::CodexUsage::start(true)?);
     let shutdown = Arc::new(AtomicBool::new(false));
     let worker_shutdown = Arc::clone(&shutdown);
@@ -105,10 +99,13 @@ fn start_from(
                     Ok(Some(request)) => {
                         let gateway = Arc::clone(&gateway);
                         let auth = Arc::clone(&auth);
+                        let encrypted_http = Arc::clone(&encrypted_http);
                         let codex_usage = Arc::clone(&codex_usage);
                         let _ = thread::Builder::new()
                             .name("me-gateway-request".into())
-                            .spawn(move || serve(request, gateway, auth, codex_usage));
+                            .spawn(move || {
+                                serve(request, gateway, auth, codex_usage, encrypted_http)
+                            });
                     }
                     Ok(None) => {}
                     Err(error) => {
@@ -152,31 +149,41 @@ fn bind_error_kind(error: &(dyn std::error::Error + 'static)) -> Option<std::io:
 }
 
 fn serve(
-    mut request: Request,
+    request: tiny_http::Request,
     gateway: Arc<Gateway>,
     auth: Arc<WebSessionAuth>,
     codex_usage: Arc<crate::codex_usage::CodexUsage>,
+    encrypted_http: Arc<EncryptedHttp>,
 ) {
-    let result = route(
-        &mut request,
-        gateway.as_ref(),
-        auth.as_ref(),
-        codex_usage.as_ref(),
-    );
-    let response = match result {
-        Ok(response) => response,
-        Err(error) => {
-            eprintln!("warning: me-gateway request failed: {error}");
-            json_response(
-                StatusCode(500),
-                &json!({"ok": false, "error": "请求未能完成"}),
-            )
+    encrypted_http.serve(request, public_asset, |request| {
+        let result = route(
+            request,
+            gateway.as_ref(),
+            auth.as_ref(),
+            codex_usage.as_ref(),
+        );
+        match result {
+            Ok(response) => response,
+            Err(error) => {
+                eprintln!("warning: me-gateway request failed: {error}");
+                json_response(
+                    StatusCode(500),
+                    &json!({"ok": false, "error": "请求未能完成"}),
+                )
+            }
         }
-    };
-    let _ = request.respond(response);
+    });
 }
 
 type HttpResponse = Response<Box<dyn Read + Send>>;
+
+fn public_asset(path: &str) -> Option<HttpResponse> {
+    match path {
+        "/" => Some(text_response("text/html; charset=utf-8", INDEX_HTML)),
+        "/runtime.js" => Some(text_response("text/javascript; charset=utf-8", RUNTIME_JS)),
+        _ => crate::webui::shared_public_asset(path),
+    }
+}
 
 fn route(
     request: &mut Request,
@@ -186,72 +193,7 @@ fn route(
 ) -> Result<HttpResponse> {
     let url = request.url().to_owned();
     let path = url.split('?').next().unwrap_or(url.as_str()).to_owned();
-    if request.method() == &Method::Get
-        && let Some(font) = crate::webui::shared_katex_font(&path)
-    {
-        return Ok(bytes_response("font/woff2", font));
-    }
-    if request.method() == &Method::Get
-        && let Some((content_type, content)) = crate::webui::shared_webui_component_asset(&path)
-    {
-        return Ok(text_response(content_type, content));
-    }
     match (request.method(), path.as_str()) {
-        (&Method::Get, "/") => return Ok(text_response("text/html; charset=utf-8", INDEX_HTML)),
-        (&Method::Get, "/theme.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", THEME_JS));
-        }
-        (&Method::Get, "/app.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", APP_JS));
-        }
-        (&Method::Get, "/runtime.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", RUNTIME_JS));
-        }
-        (&Method::Get, "/file-manager.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                FILE_MANAGER_JS,
-            ));
-        }
-        (&Method::Get, "/transcript.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                TRANSCRIPT_JS,
-            ));
-        }
-        (&Method::Get, "/tool-presenters.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                TOOL_PRESENTERS_JS,
-            ));
-        }
-        (&Method::Get, "/edb-cache.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                EDB_CACHE_JS,
-            ));
-        }
-        (&Method::Get, "/style.css") => {
-            return Ok(text_response("text/css; charset=utf-8", STYLE_CSS));
-        }
-        (&Method::Get, "/theme.css") => {
-            return Ok(text_response("text/css; charset=utf-8", THEME_CSS));
-        }
-        (&Method::Get, "/markdown.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", MARKDOWN_JS));
-        }
-        (&Method::Get, "/markdown-it.js") => {
-            return Ok(text_response(
-                "text/javascript; charset=utf-8",
-                MARKDOWN_IT_JS,
-            ));
-        }
-        (&Method::Get, "/katex.js") => {
-            return Ok(text_response("text/javascript; charset=utf-8", KATEX_JS));
-        }
-        (&Method::Get, "/katex.css") => {
-            return Ok(text_response("text/css; charset=utf-8", KATEX_CSS));
-        }
         (&Method::Get, "/api/auth/status") => return auth_status(request, auth),
         (&Method::Post, "/api/auth/login") => return login(request, auth),
         _ => {}
@@ -655,14 +597,6 @@ fn text_response(content_type_value: &'static str, content: &'static str) -> Htt
     )
 }
 
-fn bytes_response(content_type_value: &'static str, content: &'static [u8]) -> HttpResponse {
-    data_response(
-        StatusCode(200),
-        content.to_vec(),
-        vec![content_type(content_type_value), no_store()],
-    )
-}
-
 fn data_response(status: StatusCode, body: Vec<u8>, headers: Vec<Header>) -> HttpResponse {
     let length = body.len();
     Response::new(
@@ -688,7 +622,16 @@ mod tests {
 
     #[test]
     fn auth_status_reports_running_product_version() {
-        let request = tiny_http::TestRequest::new().into();
+        let request = Request::new(
+            me_transport::RequestHead {
+                method: "GET".into(),
+                url: "/api/auth/status".into(),
+                headers: Vec::new(),
+                body_length: 0,
+            },
+            Vec::new(),
+        )
+        .unwrap();
         let auth = WebSessionAuth::new("me_gateway_session", 38199, Some("test")).unwrap();
         let response = auth_status(&request, &auth).unwrap();
         let payload: serde_json::Value = serde_json::from_reader(response.into_reader()).unwrap();

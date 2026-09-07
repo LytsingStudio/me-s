@@ -15,8 +15,7 @@
     constructor(options) {
       this.container = options.container;
       this.request = options.request;
-      this.downloadUrl = options.downloadUrl;
-      this.downloadFile = options.downloadFile || null;
+      this.downloadFile = options.downloadFile;
       this.writeClipboard = options.writeClipboard;
       this.onUnauthorized = options.onUnauthorized || (() => {});
       this.notify = options.notify || (() => {});
@@ -700,27 +699,32 @@
           download = await this.call("/api/files/downloads/status", { download_id: download.download_id }, identity);
         }
         if (download.state !== "ready") throw new Error(download.error || "无法准备下载");
-        view.download.done = download.size_bytes || 1;
-        view.download.total = download.size_bytes || 1;
-        if (this.state === view) this.renderTask();
-        if (this.downloadFile) {
-          const saved = await this.downloadFile(download, identity);
-          this.notify(`已保存到 ${saved.path}`, "success");
-        } else {
-          const anchor = document.createElement("a");
-          anchor.href = this.downloadUrl(download.download_id, identity);
-          anchor.download = download.filename;
-          anchor.rel = "noopener";
-          document.body.append(anchor);
-          anchor.click();
-          anchor.remove();
+        if (view.download.cancelled) {
+          await this.call("/api/files/downloads/cancel", { download_id: download.download_id }, identity).catch(() => {});
+          view.download = null;
+          if (this.state === view) this.renderTask();
+          return;
         }
+        const task = view.download;
+        task.label = `正在下载 ${download.filename}`;
+        task.done = 0;
+        task.total = download.size_bytes || 1;
+        task.controller = new AbortController();
+        if (this.state === view) this.renderTask();
+        const saved = await this.downloadFile(download, identity, {
+          signal: task.controller.signal,
+          onProgress: (done) => {
+            task.done = done;
+            if (this.state === view) this.renderTask();
+          },
+        });
+        this.notify(saved?.path ? `已保存到 ${saved.path}` : "下载已就绪", "success");
         view.download = null;
         if (this.state === view) this.renderTask();
       } catch (error) {
         view.download = null;
         if (this.state === view) this.renderTask();
-        this.notify(error.message, "error");
+        if (error.name !== "AbortError") this.notify(error.message, "error");
       }
     }
 
@@ -732,6 +736,7 @@
       }
       if (view.download) {
         view.download.cancelled = true;
+        view.download.controller?.abort();
         return;
       }
       if (view.job?.cancellable) {

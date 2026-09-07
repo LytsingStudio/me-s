@@ -95,6 +95,8 @@ cd me-s
 cargo build --locked --release --bins
 ```
 
+浏览器加密组件已随源码提供。修改 `transport/` 的协议核心后，需使用已安装的 `wasm32-unknown-unknown` Rust target 运行 `node scripts/build-transport.cjs`，离线重新生成组件及校验文件；构建会拒绝与源码不一致的组件。
+
 产物位于 `target/release/me-s` 与 `target/release/me-gateway`。构建桌面客户端还需要 Bun 与 Tauri 的平台依赖：
 
 ```bash
@@ -173,7 +175,11 @@ Gateway 状态保存在启动目录的 `.me-gateway/state.json`。外部工作�
 
 Gateway 的目录浏览器始终浏览运行 `me-gateway` 的宿主电脑，而不是访问 WebUI 的浏览器设备。浏览器可以运行在另一台电脑或手机上，无需安装 ME，也不会上传客户端目录。
 
-`--webui-passkey` 只提供密码访问控制，不提供 TLS。通过局域网或公网访问时，请使用 HTTPS 反向代理、隧道、VPN 或其他适当的安全网络边界。
+WebUI 与 me-client 的业务通信始终加密，密码、会话内容、文件和远控数据都不会以明文发送；加密失败会停止请求，不会降级。仍可使用 IP、端口和访问密码，无需域名或手动安装证书。未设置 `--webui-passkey` 时仍加密，但不会限制谁能访问，请按需设置密码。
+
+这项保护针对只转发、监听流量的中转服务器，**不防止中转主动替换网页、冒充目标服务或篡改连接建立过程**；访问地址、时间和流量大小也仍可见。需要防御主动攻击时，仍应使用可信的 HTTPS 或 VPN 等网络边界。浏览器可能保留 HTTP 页面的通用不安全提示。
+
+服务端与 me-client 请一起更新；旧客户端不支持该连接方式，会被拒绝连接。普通浏览器下载需先完成解密再保存，大文件会占用相应内存。
 
 ### 设置生效
 

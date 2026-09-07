@@ -79,6 +79,7 @@ function startupHarness({ client = true, ios = false, multipleWorkspaces = true,
   };
   if (client) new Function("globalThis", "document", clientSource)(sandbox, document);
   else sandbox.MeFrontendRuntime = {
+    fetch: response,
     capabilities: { multipleWorkspaces }, initialize: () => bootstrap,
     apiPath: (path) => path, createEdbCache: () => ({}),
   };

@@ -178,12 +178,11 @@ describe("shared WebUI themes", () => {
     expect(styles).not.toContain(".brand span");
     expect(styles).toContain(".brand-mark {");
     expect(app).toContain("globalThis.MeTheme.bindControls(elements.themeCycle, elements.themeMode");
-    for (const server of [directServer, gatewayServer]) {
-      expect(server).toContain('include_str!("webui/theme.js")');
-      expect(server).toContain('include_str!("webui/theme.css")');
-      expect(server).toContain('(&Method::Get, "/theme.js")');
-      expect(server).toContain('(&Method::Get, "/theme.css")');
-    }
+    expect(directServer.includes('include_str!("webui/theme.js")')).toBe(true);
+    expect(directServer.includes('include_str!("webui/theme.css")')).toBe(true);
+    expect(directServer.includes('"/theme.js" =>')).toBe(true);
+    expect(directServer.includes('"/theme.css" =>')).toBe(true);
+    expect(gatewayServer.includes('crate::webui::shared_public_asset(path)')).toBe(true);
     for (const palette of theme.THEMES) {
       expect(themeStyles).toContain(`:root[data-theme="${palette.id}"][data-mode="dark"]`);
       expect(themeStyles).toContain(`:root[data-theme="${palette.id}"][data-mode="light"]`);
