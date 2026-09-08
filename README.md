@@ -143,6 +143,14 @@ me-s --no-tui
 me-s --no-tui --webui-passkey "PASSWORD"
 ```
 
+指定固定端口（可与访问密码组合）：
+
+```bash
+me-s --no-tui --webui-port 39001 --webui-passkey "PASSWORD"
+```
+
+指定端口无法使用时会报错退出，不会自动换到其他端口。不指定时保留默认选择方式。
+
 ### 工作区与会话
 
 在项目目录执行 `me-s create` 后，该目录就是一个 me 工作区。每个工作区可以包含多个独立会话，并保留各自的聊天记录、工作进展和设置。
@@ -160,6 +168,8 @@ me-gateway --webui-passkey "PASSWORD"
 ```
 
 CLI 正常启动时只输出实际访问地址及 `warning:`/`error:` 调试诊断，不显示额外的运行说明。Gateway HTTP 服务监听 `0.0.0.0`，默认从端口 `38200` 开始选择可用端口。
+
+也可通过 `me-gateway --webui-port 39002 --webui-passkey "PASSWORD"` 指定固定访问端口；端口无法使用时会报错退出。该选项不改变 Gateway 内部工作区的连接方式。
 
 Gateway WebUI 提供：
 

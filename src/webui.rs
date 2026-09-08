@@ -217,7 +217,16 @@ pub fn start(
     backend: impl UiBackend + 'static,
     commands: impl UiCommandGateway + 'static,
     passkey: Option<&str>,
+    port: Option<u16>,
 ) -> Result<WebUiServer> {
+    if let Some(port) = port {
+        if port == 0 {
+            return Err("WebUI port must be nonzero".into());
+        }
+        let server = Server::http((DEFAULT_BIND_ADDRESS, port))
+            .map_err(|error| format!("failed to bind WebUI port {port}: {error}"))?;
+        return start_with_server(backend, commands, server, port, passkey, None);
+    }
     start_from(backend, commands, DEFAULT_PORT, passkey)
 }
 
@@ -357,8 +366,8 @@ fn start_with_server(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        eprintln!("warning: WebUI request listener stopped: {error}");
-                        break;
+                        eprintln!("warning: WebUI listener error; retrying: {error}");
+                        thread::sleep(Duration::from_millis(100));
                     }
                 }
             }

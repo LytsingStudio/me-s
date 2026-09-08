@@ -57,7 +57,19 @@ impl Drop for GatewayWebUiServer {
     }
 }
 
-pub fn start(gateway: Arc<Gateway>, passkey: Option<&str>) -> Result<GatewayWebUiServer> {
+pub fn start(
+    gateway: Arc<Gateway>,
+    passkey: Option<&str>,
+    port: Option<u16>,
+) -> Result<GatewayWebUiServer> {
+    if let Some(port) = port {
+        if port == 0 {
+            return Err("WebUI port must be nonzero".into());
+        }
+        let server = Server::http((GATEWAY_BIND_ADDRESS, port))
+            .map_err(|error| format!("failed to bind me-gateway port {port}: {error}"))?;
+        return start_with_server(gateway, server, port, passkey);
+    }
     #[cfg(debug_assertions)]
     let first_port = match std::env::var("ME_GATEWAY_TEST_PORT") {
         Ok(value) => {
@@ -83,6 +95,15 @@ fn start_from(
     passkey: Option<&str>,
 ) -> Result<GatewayWebUiServer> {
     let (server, port) = bind_first_available(first_port)?;
+    start_with_server(gateway, server, port, passkey)
+}
+
+fn start_with_server(
+    gateway: Arc<Gateway>,
+    server: Server,
+    port: u16,
+    passkey: Option<&str>,
+) -> Result<GatewayWebUiServer> {
     let address = format!("http://{GATEWAY_BIND_ADDRESS}:{port}");
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
     let encrypted_http = Arc::new(EncryptedHttp::default());
@@ -107,8 +128,8 @@ fn start_from(
                     }
                     Ok(None) => {}
                     Err(error) => {
-                        eprintln!("warning: me-gateway WebUI listener stopped: {error}");
-                        break;
+                        eprintln!("warning: me-gateway WebUI listener error; retrying: {error}");
+                        thread::sleep(Duration::from_millis(100));
                     }
                 }
             }

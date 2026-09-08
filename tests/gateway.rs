@@ -73,16 +73,18 @@ fn spawn_gateway_with_me_s(
     me_s: &Path,
     startup_timeout: Duration,
 ) -> (Child, String) {
+    let reservation = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = reservation.local_addr().unwrap().port();
+    assert_ne!(port, 38200);
+    drop(reservation);
     let mut child = Command::new(env!("CARGO_BIN_EXE_me-gateway"))
         .arg("--webui-passkey")
         .arg("secret")
         .current_dir(root)
         .env("ME_CONFIG_HOME", config_home)
         .env("ME_GATEWAY_ME_S", me_s)
-        .env(
-            "ME_GATEWAY_TEST_PORT",
-            (42_000 + (std::process::id() % 10_000) as u16).to_string(),
-        )
+        .arg("--webui-port")
+        .arg(port.to_string())
         .env("HTTP_PROXY", "http://127.0.0.1:9")
         .env("http_proxy", "http://127.0.0.1:9")
         .env("ALL_PROXY", "http://127.0.0.1:9")
@@ -122,6 +124,10 @@ fn spawn_gateway_with_me_s(
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if let Some(address) = address {
+                    assert!(
+                        address.ends_with(&format!(":{port}")),
+                        "explicit port was not honored: {address}"
+                    );
                     return (child, address);
                 }
             }

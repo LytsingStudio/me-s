@@ -27,6 +27,7 @@ pub mod markdown;
 pub mod model;
 pub mod model_transfer;
 pub mod orchestrator;
+pub mod process_limits;
 mod python_runtime;
 pub mod remote_control;
 pub mod session_terminal;

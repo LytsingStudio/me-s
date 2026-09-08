@@ -39,6 +39,7 @@ enum UiLaunchMode {
 struct UiLaunchOptions {
     mode: UiLaunchMode,
     webui_passkey: Option<String>,
+    webui_port: Option<u16>,
 }
 
 fn main() {
@@ -71,6 +72,7 @@ fn run() -> Result<()> {
         return file_search::run(stdin.lock(), stdout, &workspace);
     }
     if arguments.as_slice() == ["__gateway-child"] {
+        me::process_limits::prepare();
         return managed_child::run(&workspace);
     }
     if is_version_command(&arguments) {
@@ -178,6 +180,7 @@ fn run() -> Result<()> {
     codex_oauth::add_models_if_logged_in(&mut global)?;
 
     if let Some(options) = ui_launch_options(&arguments)? {
+        me::process_limits::prepare();
         let local = {
             let stdin = io::stdin();
             let mut input = stdin.lock();
@@ -270,6 +273,7 @@ fn ui_launch_options(arguments: &[String]) -> Result<Option<UiLaunchOptions>> {
         return Ok(Some(UiLaunchOptions {
             mode: UiLaunchMode::TuiAndWeb,
             webui_passkey: None,
+            webui_port: None,
         }));
     }
     if !arguments.iter().any(|argument| argument.starts_with("--")) {
@@ -279,6 +283,7 @@ fn ui_launch_options(arguments: &[String]) -> Result<Option<UiLaunchOptions>> {
     let mut mode = UiLaunchMode::TuiAndWeb;
     let mut saw_no_tui = false;
     let mut webui_passkey = None;
+    let mut webui_port = None;
     let mut index = 0;
     while index < arguments.len() {
         match arguments[index].as_str() {
@@ -303,12 +308,29 @@ fn ui_launch_options(arguments: &[String]) -> Result<Option<UiLaunchOptions>> {
                 webui_passkey = Some(passkey.clone());
                 index += 2;
             }
+            "--webui-port" => {
+                if webui_port.is_some() {
+                    return Err("--webui-port may only be specified once".into());
+                }
+                let value = arguments
+                    .get(index + 1)
+                    .ok_or("--webui-port requires a port")?;
+                webui_port = Some(
+                    value
+                        .parse::<u16>()
+                        .ok()
+                        .filter(|port| *port != 0)
+                        .ok_or("--webui-port must be an integer from 1 to 65535")?,
+                );
+                index += 2;
+            }
             argument => return Err(format!("unknown UI option: {argument}").into()),
         }
     }
     Ok(Some(UiLaunchOptions {
         mode,
         webui_passkey,
+        webui_port,
     }))
 }
 
@@ -341,13 +363,15 @@ fn run_user_interfaces(
                 ui_backend.clone(),
                 ui_commands.clone(),
                 options.webui_passkey.as_deref(),
+                options.webui_port,
             ) {
                 Ok(server) => {
                     eprintln!("WebUI: {}", server.address());
                     Some(server)
                 }
+                Err(error) if options.webui_port.is_some() => return Err(error),
                 Err(error) => {
-                    eprintln!("warning: WebUI 未启动：{error}");
+                    eprintln!("warning: WebUI failed to start: {error}");
                     None
                 }
             };
@@ -355,7 +379,12 @@ fn run_user_interfaces(
             drop(webui);
         }
         UiLaunchMode::WebOnly => {
-            let server = webui::start(ui_backend, ui_commands, options.webui_passkey.as_deref())?;
+            let server = webui::start(
+                ui_backend,
+                ui_commands,
+                options.webui_passkey.as_deref(),
+                options.webui_port,
+            )?;
             eprintln!("WebUI: {}", server.address());
             eprintln!("WebUI-only mode · press Ctrl+C to stop");
             while !termination.requested() {
@@ -906,7 +935,7 @@ fn reset_workspace(workspace: &Path) -> Result<()> {
 
 fn print_usage() {
     eprintln!(
-        "usage:\n  me-s [--no-tui] [--webui-passkey <password>]\n  me-s init\n  me-s version\n  me-s update\n  me-s create\n  me-s workspace reset\n  me-s codex status\n  me-s codex login\n  me-s codex logout\n  me-s model list\n  me-s model select <name> [effort]\n  me-s model select-default <name>\n  me-s model test <name>\n  me-s model request <prompt>\n  me-s model export <password>\n  me-s model import <file> <password>\n  me-s orch [name]\n  me-s edb [detail]\n  me-s diag upload"
+        "usage:\n  me-s [--no-tui] [--webui-passkey <password>] [--webui-port <port>]\n  me-s init\n  me-s version\n  me-s update\n  me-s create\n  me-s workspace reset\n  me-s codex status\n  me-s codex login\n  me-s codex logout\n  me-s model list\n  me-s model select <name> [effort]\n  me-s model select-default <name>\n  me-s model test <name>\n  me-s model request <prompt>\n  me-s model export <password>\n  me-s model import <file> <password>\n  me-s orch [name]\n  me-s edb [detail]\n  me-s diag upload"
     );
 }
 
@@ -943,6 +972,7 @@ mod tests {
             Some(UiLaunchOptions {
                 mode: UiLaunchMode::TuiAndWeb,
                 webui_passkey: None,
+                webui_port: None,
             })
         );
         assert_eq!(
@@ -950,6 +980,7 @@ mod tests {
             Some(UiLaunchOptions {
                 mode: UiLaunchMode::WebOnly,
                 webui_passkey: None,
+                webui_port: None,
             })
         );
         assert_eq!(
@@ -957,6 +988,7 @@ mod tests {
             Some(UiLaunchOptions {
                 mode: UiLaunchMode::TuiAndWeb,
                 webui_passkey: Some("secret".into()),
+                webui_port: None,
             })
         );
         assert_eq!(
@@ -965,12 +997,39 @@ mod tests {
             Some(UiLaunchOptions {
                 mode: UiLaunchMode::WebOnly,
                 webui_passkey: Some("secret".into()),
+                webui_port: None,
             })
         );
         assert!(ui_launch_options(&["--webui-passkey".into()]).is_err());
         assert!(ui_launch_options(&["--webui-passkey".into(), String::new()]).is_err());
         assert!(ui_launch_options(&["--no-tui".into(), "--no-tui".into()]).is_err());
         assert!(ui_launch_options(&["create".into()]).unwrap().is_none());
+    }
+
+    #[test]
+    fn ui_port_is_explicit_nonzero_and_composable() {
+        let args = [
+            "--webui-port",
+            "65535",
+            "--no-tui",
+            "--webui-passkey",
+            "secret",
+        ]
+        .map(String::from);
+        let options = ui_launch_options(&args).unwrap().unwrap();
+        assert_eq!(options.webui_port, Some(65535));
+        assert_eq!(options.mode, UiLaunchMode::WebOnly);
+        assert_eq!(options.webui_passkey.as_deref(), Some("secret"));
+        for value in ["0", "65536", "-1", "abc", ""] {
+            assert!(ui_launch_options(&["--webui-port".into(), value.into()]).is_err());
+        }
+        assert!(ui_launch_options(&["--webui-port".into()]).is_err());
+        assert!(
+            ui_launch_options(
+                &["--webui-port", "39001", "--webui-port", "39002"].map(String::from)
+            )
+            .is_err()
+        );
     }
 
     #[test]
