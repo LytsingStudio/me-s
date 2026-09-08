@@ -11,20 +11,6 @@ function loadClientRuntime({ platform = "", userAgent = "", download = null } = 
   const browserBeacons = [];
   const nativeWindowListeners = new Map();
   const nativeDocumentListeners = new Map();
-  const edbId = "a".repeat(64);
-  const cachedEvents = [
-    { EdbIdGeneration: { edb_id: edbId } },
-    { UserPrompt: { content: "cached" } },
-  ];
-  const metadata = {
-    key: edbId,
-    edbId,
-    mutationRevision: 0,
-    lastEventHash: "hash-2",
-    eventCount: 2,
-    byteSize: 128,
-    updatedAt: 1,
-  };
   const sandbox = {
     addEventListener(type, listener) { nativeWindowListeners.set(type, listener); },
     __TAURI__: {
@@ -60,27 +46,7 @@ function loadClientRuntime({ platform = "", userAgent = "", download = null } = 
             bodyText: JSON.stringify({ required: true, authenticated: false }),
             bodyBase64: null,
           };
-          if (command === "cache_load_metadata") {
-            return payload.edbIds.includes(edbId) ? [{ ...metadata }] : [];
-          }
-          if (command === "cache_load_chunk") {
-            const start = payload.startOrder;
-            const events = start < cachedEvents.length ? [cachedEvents[start]] : [];
-            const next = start + events.length;
-            return {
-              edbId,
-              startOrder: start,
-              nextOrder: next,
-              totalCount: cachedEvents.length,
-              mutationRevision: 0,
-              lastEventHash: "hash-2",
-              events,
-              done: next === cachedEvents.length,
-            };
-          }
-          if (command === "cache_list") return [{ ...metadata }];
-          if (command === "cache_save_batch" || command === "cache_remove"
-              || command === "set_device_preference") return null;
+          if (command === "set_device_preference") return null;
           if (command === "cancel_download") return null;
           if (command === "download_file") {
             if (download) return download(payload);
@@ -100,9 +66,6 @@ function loadClientRuntime({ platform = "", userAgent = "", download = null } = 
       },
     },
     fetch: async () => new Response("browser"),
-    MeEdbCache: {
-      create() { return { renderManager() {} }; },
-    },
   };
   const initialViewportContent = "width=device-width,initial-scale=1,viewport-fit=cover,interactive-widget=resizes-content";
   const viewportMeta = {
@@ -132,7 +95,7 @@ function loadClientRuntime({ platform = "", userAgent = "", download = null } = 
     DOMException, TextEncoder, atob, btoa,
   );
   return {
-    runtime, sandbox, calls, browserBeacons, edbId, cachedEvents, documentValue, viewportMeta,
+    runtime, sandbox, calls, browserBeacons, documentValue, viewportMeta,
     nativeWindowListeners, nativeDocumentListeners,
   };
 }
@@ -432,7 +395,7 @@ describe("ME Client native adapter", () => {
     expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("light");
     expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("enter");
     expect(runtime.devicePreferences.getItem("me-window-border-style")).toBe("theme");
-    expect(runtime.devicePreferences.getItem("me-raw-edb-decoding")).toBe("false");
+    expect(runtime.devicePreferences.getItem("me-raw-edb-decoding")).toBeNull();
     expect(runtime.capabilities.windowBorderStyle).toBe(true);
 
     await runtime.devicePreferences.setItem("me-theme", "obsidian");
@@ -446,14 +409,13 @@ describe("ME Client native adapter", () => {
     expect(runtime.devicePreferences.getItem("me-color-mode")).toBe("dark");
     expect(runtime.devicePreferences.getItem("me-send-shortcut")).toBe("modified-enter");
     expect(runtime.devicePreferences.getItem("me-window-border-style")).toBe("default");
-    expect(runtime.devicePreferences.getItem("me-raw-edb-decoding")).toBe("true");
+    expect(runtime.devicePreferences.getItem("me-raw-edb-decoding")).toBeNull();
     expect(calls.filter((call) => call.command === "set_device_preference").map((call) => call.payload))
       .toEqual([
         { key: "me-theme", value: "obsidian" },
         { key: "me-color-mode", value: "dark" },
         { key: "me-send-shortcut", value: "modified-enter" },
         { key: "me-window-border-style", value: "default" },
-        { key: "me-raw-edb-decoding", value: "true" },
       ]);
 
     const ios = loadClientRuntime({ platform: "iPhone", userAgent: "Mozilla/5.0 (iPhone)" });
@@ -463,9 +425,9 @@ describe("ME Client native adapter", () => {
     const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
     expect(clientRuntime).not.toMatch(/document\.cookie|localStorage|globalThis\.indexedDB/);
     expect(clientRuntime).toContain('"me-theme", "me-color-mode", "me-send-shortcut", "me-window-border-style"');
-    expect(clientRuntime).toContain('"me-raw-edb-decoding"');
-    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 5]');
-    expect(nativeRuntime).toContain('run_blocking(move || cache.set_setting(&key, &value)).await');
+    expect(clientRuntime).not.toContain('"me-raw-edb-decoding"');
+    expect(nativeRuntime).toContain('const DEVICE_PREFERENCE_KEYS: [&str; 4]');
+    expect(nativeRuntime).toContain('run_blocking(move || database.set_setting(&key, &value)).await');
     expect(nativeRuntime).toContain('device_preferences: BTreeMap<String, String>');
   });
 
@@ -494,10 +456,10 @@ describe("ME Client native adapter", () => {
     });
 
     const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
-    const nativeCache = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/cache.rs"), "utf8");
+    const nativeStorage = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/storage.rs"), "utf8");
     const nativeGateway = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/gateway.rs"), "utf8");
     expect(nativeRuntime).toContain("remembered_devices: Vec<RememberedDeviceStatus>");
-    expect(nativeCache).toContain("CREATE TABLE IF NOT EXISTS remembered_devices");
+    expect(nativeStorage).toContain("CREATE TABLE IF NOT EXISTS remembered_devices");
     expect(nativeGateway).toContain("const LOCAL_GATEWAY_FIRST_PORT: u16 = 38200");
     expect(nativeGateway).toContain("const LOCAL_GATEWAY_LAST_PORT: u16 = 38231");
     expect(nativeGateway).toContain("pub async fn online_remembered_devices");
@@ -505,7 +467,7 @@ describe("ME Client native adapter", () => {
 
   test("restores the existing macOS window unless New Window is explicitly selected", () => {
     const nativeRuntime = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
-    const nativeCache = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/cache.rs"), "utf8");
+    const nativeStorage = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/storage.rs"), "utf8");
     const reopenStart = nativeRuntime.indexOf("if let tauri::RunEvent::Reopen");
     const reopenHandler = nativeRuntime.slice(reopenStart, nativeRuntime.indexOf("\n    });", reopenStart));
     const newWindowStart = nativeRuntime.indexOf("extern \"C-unwind\" fn new_me_client_window");
@@ -540,8 +502,8 @@ describe("ME Client native adapter", () => {
     expect(nativeRuntime).toContain("window.set_focus()?");
     expect(nativeRuntime).toContain("env::current_exe()?");
     expect(nativeRuntime).toContain("Command::new(executable)");
-    expect(nativeCache).toContain("const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);");
-    expect(nativeCache).toContain(".busy_timeout(DATABASE_BUSY_TIMEOUT)");
+    expect(nativeStorage).toContain("const DATABASE_BUSY_TIMEOUT: Duration = Duration::from_secs(5);");
+    expect(nativeStorage).toContain(".busy_timeout(DATABASE_BUSY_TIMEOUT)");
   });
 
   test("routes page-close JSON beacons as text through the native transport", async () => {
@@ -560,56 +522,15 @@ describe("ME Client native adapter", () => {
     expect(browserBeacons).toHaveLength(1);
   });
 
-  test("queues only ordered incremental EDB batches keyed by EDB_ID", async () => {
-    const { runtime, calls, edbId } = loadClientRuntime();
-    const cache = runtime.createEdbCache();
-    cache.saveSession({
-      edbId, mutationRevision: 0, lastEventHash: "hash-1",
-      gatewayLabel: "Gateway", workspaceLabel: "Workspace", sessionLabel: "Session",
-      events: [{ "must-not-cross-native-ipc": true }],
-      delta: {
-        startOrder: 0, eventCount: 2, expectedEventCount: 0,
-        expectedMutationRevision: null, reset: false,
-        events: [{ EdbIdGeneration: { edb_id: edbId } }],
-      },
-    });
-    cache.saveSession({
-      edbId, mutationRevision: 0, lastEventHash: "hash-2",
-      gatewayLabel: "Gateway", workspaceLabel: "Workspace", sessionLabel: "Session",
-      events: [{ "must-not-cross-native-ipc": true }, { "must-not-cross-native-ipc": true }],
-      delta: {
-        startOrder: 1, eventCount: 2, expectedEventCount: 1,
-        expectedMutationRevision: 0, reset: false,
-        events: [{ UserPrompt: {} }],
-      },
-    });
-    await cache.flush();
-    const writes = calls.filter((call) => call.command === "cache_save_batch");
-    expect(writes).toHaveLength(2);
-    expect(writes.map((write) => write.payload.session.startOrder)).toEqual([0, 1]);
-    expect(writes.map((write) => write.payload.session.events.length)).toEqual([1, 1]);
-    expect(writes.every((write) => write.payload.session.edbId === edbId)).toBe(true);
-    await cache.removeSession(edbId);
-    expect(calls.find((call) => call.command === "cache_remove").payload.edbId).toBe(edbId);
-  });
-
-  test("loads every native cached Session and lists metadata without raw Events", async () => {
-    const { runtime, calls, edbId, cachedEvents } = loadClientRuntime();
-    const cache = runtime.createEdbCache();
-    const snapshot = { agents: [{ id: "main", edb_id: edbId }] };
-
-    const entries = await runtime.loadCachedSessions(cache, snapshot, "/workspace");
-    expect(entries).toHaveLength(1);
-    expect(entries[0]).toMatchObject({ key: edbId, agentId: "main", scope: "/workspace" });
-    expect(entries[0].events).toEqual(cachedEvents);
-    expect(calls.filter((call) => call.command === "cache_load_metadata").at(-1).payload.edbIds).toEqual([edbId]);
-    const chunks = calls.filter((call) => call.command === "cache_load_chunk");
-    expect(chunks).toHaveLength(2);
-    expect(chunks.map((call) => call.payload.startOrder)).toEqual([0, 1]);
-    expect(chunks.every((call) => call.payload.byteLimit === 1024 * 1024)).toBe(true);
-
-    const listed = await cache.listSessions();
-    expect(listed[0].events).toBeUndefined();
+  test("sync requests go directly to the native transport without cache IPC", async () => {
+    const { runtime, calls } = loadClientRuntime();
+    await runtime.fetch("/api/workspaces/chat/sync", { method: "POST", body: JSON.stringify({ ui_projection: true }) });
+    expect(calls.map((call) => call.command)).toEqual(["gateway_request"]);
+    expect(JSON.parse(calls[0].payload.request.bodyText)).toEqual({ ui_projection: true });
+    const native = readFileSync(join(import.meta.dir, "../me-client/src-tauri/src/lib.rs"), "utf8");
+    for (const command of ["cache_load_metadata", "cache_load_chunk", "cache_list", "cache_save_batch", "cache_remove"]) {
+      expect(native).not.toContain(command);
+    }
   });
 
   test("assembles the one authoritative frontend core with a client adapter", () => {
@@ -633,7 +554,8 @@ describe("ME Client native adapter", () => {
     expect(directServer.includes('include_str!("webui/style.css")')).toBe(true);
     expect(gatewayServer.includes('crate::webui::shared_public_asset(path)')).toBe(true);
     expect(shared).toContain("const frontendRuntime = globalThis.MeFrontendRuntime");
-    expect(shared).toContain("store.events.push(...events)");
+    expect(shared).toContain("ui_projection: true");
+    expect(shared).not.toContain("store.events");
     expect(shared).toContain("frontendRuntime.windowReady?.()");
     expect(shared).not.toContain("materializeClientAgentStore");
     expect(shared).not.toContain("releaseClientAgentStore");
@@ -674,6 +596,7 @@ describe("ME Client native adapter", () => {
     const packageAssets = [
       "ME-macos-universal.pkg",
       "ME-windows-x86_64-setup.exe",
+      "ME-windows-x86_64-portable.zip",
       "ME-linux-x86_64.run",
       "ME-linux-arm64.run",
     ];
@@ -684,7 +607,8 @@ describe("ME Client native adapter", () => {
       expect(build).toContain(asset);
       expect(release).toContain(asset);
       expect(verifier).toContain(asset);
-      expect(updater).toContain(asset);
+      expect(manifest).toContain(asset);
+      if (!asset.endsWith("setup.exe")) expect(updater).toContain(asset);
     }
     expect(build).toContain("cargo xwin build");
     expect(build).toContain("packaging/linux/build-container.sh");
@@ -740,7 +664,11 @@ describe("ME Client native adapter", () => {
     expect(verifier).toContain("Nullsoft Installer self-extracting archive");
     expect(verifier).toContain("file format coff-x86-64");
     expect(runBuilder).not.toMatch(/\$OUTPUT["']?\s+--(?:version|extract-dir)/);
-    expect(release).toContain("ME-linux-arm64.run\\nME-linux-x86_64.run\\nME-macos-universal.pkg\\nME-windows-x86_64-setup.exe\\nSHA256SUMS");
+    expect(release).toContain("ME-linux-arm64.run\\nME-linux-x86_64.run\\nME-macos-universal.pkg\\nME-windows-x86_64-portable.zip\\nME-windows-x86_64-setup.exe\\nSHA256SUMS");
+    expect(build).toContain('-tzip -mm=Deflate -mx=9');
+    expect(verifier).toContain('cmp "$WORK/windows/$binary" "$WORK/windows-portable/$binary"');
+    expect(updater).not.toContain("powershell.exe");
+    expect(updater).not.toContain("ME-windows-x86_64-setup.exe");
     expect(unixInstall).toContain("ME-macos-universal.pkg");
     expect(windowsInstall).toContain("ME-windows-x86_64-setup.exe");
     for (const source of [release, unixInstall, windowsInstall, updater]) {

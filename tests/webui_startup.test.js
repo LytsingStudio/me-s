@@ -57,7 +57,7 @@ function startupHarness({ client = true, ios = false, multipleWorkspaces = true,
     return new Response(JSON.stringify({ ok: false, error: "not authenticated" }), { status: 401 });
   };
   const sandbox = {
-    document, MeTheme: theme, MeEdbCache: { create() { return { renderManager() {} }; } },
+    document, MeTheme: theme,
     navigator: { platform: ios ? "iPhone" : "MacIntel", userAgent: ios ? "iPhone" : "" },
     addEventListener(type, callback) { listeners.set(type, callback); },
     matchMedia: () => ({ matches: false, addEventListener() {} }),
@@ -81,7 +81,7 @@ function startupHarness({ client = true, ios = false, multipleWorkspaces = true,
   else sandbox.MeFrontendRuntime = {
     fetch: response,
     capabilities: { multipleWorkspaces }, initialize: () => bootstrap,
-    apiPath: (path) => path, createEdbCache: () => ({}),
+    apiPath: (path) => path,
   };
   const runtime = sandbox.MeFrontendRuntime;
   theme.initialize(sandbox);

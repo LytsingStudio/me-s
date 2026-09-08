@@ -4,7 +4,6 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
-require("../src/webui/edb-cache.js");
 globalThis.MeMarkdown = require("../src/webui/markdown.js");
 
 globalThis.MeFrontendRuntime = {
@@ -16,14 +15,6 @@ globalThis.MeFrontendRuntime = {
       || path.startsWith("/api/files/");
     return child ? `/api/workspaces/${workspaceId}${path.slice(4)}` : path;
   },
-  createEdbCache() {
-    return {
-      loadScope: async () => [],
-      discardSession: async () => {}, saveSession() {}, renderManager() {},
-    };
-  },
-  loadCachedSessions(cache, _snapshot, scope) { return cache.loadScope(scope); },
-  cacheKey(scope, agentId) { return `${scope}::${agentId}`; },
   persistSelection() { return Promise.resolve(); },
   loadGatewayState() { return Promise.resolve({ workspaces: [] }); },
   get endpoint() { return ""; },
@@ -40,7 +31,7 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error(`could not isolate ${relative}`);
   const factory = new Function("globalThis", "document", "performance", "matchMedia", "MeTranscript", "MeToolPresenters", "Date", "setTimeout", "clearTimeout", `${source.slice(0, eventBindings)}
-    return { state, emptyProjection, projectChat, consumeChatEvents, chatAppendNeedsReplay,
+    return { state, emptyProjection,
       requestSelectedProjectionRange,
       toolCardView,
       estimateTranscriptMessageHeight,
@@ -52,28 +43,20 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
         scheduleSelectedProjectionRangeCheck = () => {}; flushPendingRender = () => {};
         requestHttpSyncNow = () => {}; scheduleHttpSync = () => {};
       },
-      requestHttpSync, scheduleBackgroundWorkspaceSync, requestBackgroundWorkspaceSync,
+      requestHttpSync, scheduleBackgroundWorkspaceSync, requestBackgroundProjectionSync,
       nextBackgroundProjection, cancelBackgroundWorkspaceSync, updateAgentRow,
       configureSyncTest(request, onSidebar = () => {}) {
         api = request; renderAgents = onSidebar; requestRender = () => {};
         flushPendingRender = () => {}; inputHasPriority = () => false;
         scheduleSelectedProjectionRangeCheck = () => {};
       },
-      projectAgentSummary, updateAgentSummary, sidebarAgentActive,
-      emptyWorkMap, projectWorkMap, consumeWorkMapEvents, apiPath: frontendRuntime.apiPath,
-      eventRecoveryBacklog, shouldUseBulkEventRecovery, createEventRecovery, eventRecoveryProgress,
-      eventRecoveryMatches, selectedEventRecoveryReady, httpSyncProgressSignature, isIosWebKit,
-      createAgentLoadProgress: typeof createAgentLoadProgress === "function" ? createAgentLoadProgress : null,
-      prepareAgentLoadProgress: typeof prepareAgentLoadProgress === "function" ? prepareAgentLoadProgress : null,
-      settleAgentLoadProgress: typeof settleAgentLoadProgress === "function" ? settleAgentLoadProgress : null,
+      sidebarAgentActive, emptyWorkMap, apiPath: frontendRuntime.apiPath, isIosWebKit,
       agentLoadingState: typeof agentLoadingState === "function" ? agentLoadingState : null,
       workspaceMetadataReady: typeof workspaceMetadataReady === "function" ? workspaceMetadataReady : null,
       applyGatewayStartupMetadata: typeof applyGatewayStartupMetadata === "function" ? applyGatewayStartupMetadata : null,
       emptyGatewayWorkspaceState: typeof emptyGatewayWorkspaceState === "function" ? emptyGatewayWorkspaceState : null,
       gatewayWorkspaceState: typeof gatewayWorkspaceState === "function" ? gatewayWorkspaceState : null,
       createAgentStore: typeof createAgentStore === "function" ? createAgentStore : null,
-      resetProjectionSourceBucket: typeof resetProjectionSourceBucket === "function" ? resetProjectionSourceBucket : null,
-      usesUiProjection: typeof usesUiProjection === "function" ? usesUiProjection : null,
       installProjectionState: typeof installProjectionState === "function" ? installProjectionState : null,
       advanceCurrentProjection: typeof advanceCurrentProjection === "function" ? advanceCurrentProjection : null,
       normalizeWindowBorderStyle: typeof normalizeWindowBorderStyle === "function" ? normalizeWindowBorderStyle : null,
@@ -83,15 +66,12 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
       setSettingsRequest(request) { api = request; },
       backgroundSyncRequestBody: typeof backgroundSyncRequestBody === "function" ? backgroundSyncRequestBody : null,
       backgroundSyncCanRun: typeof backgroundSyncCanRun === "function" ? backgroundSyncCanRun : null,
-      nextBackgroundWorkspace: typeof nextBackgroundWorkspace === "function" ? nextBackgroundWorkspace : null,
       applyBackgroundSyncState: typeof applyBackgroundSyncState === "function" ? applyBackgroundSyncState : null,
       projectionStateRangeRequest: typeof projectionStateRangeRequest === "function" ? projectionStateRangeRequest : null,
       projectionAdjacentRange: typeof projectionAdjacentRange === "function" ? projectionAdjacentRange : null,
       projectionRangeDirectionForViewport: typeof projectionRangeDirectionForViewport === "function" ? projectionRangeDirectionForViewport : null,
       projectionRangePath: typeof projectionRangePath === "function" ? projectionRangePath : null,
       synchronizeProjectionBucket: typeof synchronizeProjectionBucket === "function" ? synchronizeProjectionBucket : null,
-      prepareSelectedEventRecovery: typeof prepareSelectedEventRecovery === "function" ? prepareSelectedEventRecovery : null,
-      bulkEventRecoveryActive: typeof bulkEventRecoveryActive === "function" ? bulkEventRecoveryActive : null,
       readWorkspaceDisclosure: typeof readWorkspaceDisclosure === "function" ? readWorkspaceDisclosure : null,
       persistWorkspaceDisclosure: typeof persistWorkspaceDisclosure === "function" ? persistWorkspaceDisclosure : null,
       workspaceExpanded: typeof workspaceExpanded === "function" ? workspaceExpanded : null,
@@ -147,12 +127,7 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
 
 function loadFrontendAdapter(relative) {
   const source = readFileSync(join(import.meta.dir, relative), "utf8");
-  const sandbox = {
-    MeEdbCache: {
-      create() { return {}; },
-      sessionKey(scope, agentId) { return `${scope}::${agentId}`; },
-    },
-  };
+  const sandbox = {};
   const documentValue = { documentElement: { classList: { add() {} } } };
   new Function("globalThis", "document", source)(sandbox, documentValue);
   return sandbox.MeFrontendRuntime;
@@ -209,7 +184,7 @@ function projectionSchedulerHarness(counts = [3, 2]) {
     const bucket = index ? r.gatewayWorkspaceState(workspaceId) : r.state;
     bucket.snapshot = { ...r.state.snapshot, revision: 1, environment: { workspace: `/${workspaceId}` },
       agents: Array.from({ length: count }, (_, i) => ({ id: `a${i}`, event_count: 1000 })) };
-    bucket.snapshotInitialized = true; bucket.edbCacheInitialized = true;
+    bucket.snapshotInitialized = true;
     for (const meta of bucket.snapshot.agents) bucket.stores.set(meta.id, r.createAgentStore(meta));
   });
   const foreground = r.state.stores.get("a0");
@@ -256,35 +231,6 @@ test("a foreground tail response is discarded when the reader scrolls away durin
   expect([...h.timers.values()].some(timer=>timer.at===h.now())).toBe(true);
 });
 
-function visibleProjection(projection) {
-  return {
-    messages: projection.messages,
-    apiState: projection.apiState,
-    apiUsage: projection.apiUsage,
-    model: projection.model,
-    effort: projection.effort,
-    turnState: projection.turnState,
-  };
-}
-
-const fixture = [
-  event("ModelChanged", 1, { model: "model-a", cause: "Initial" }),
-  event("ReasoningEffortChanged", 2, { effort: "high", cause: "Initial" }),
-  event("UserPrompt", 3, { content: "hello" }),
-  event("ApiStateUpdate", 4, { api_call_id: "api-1", prompt_id: 3, state: "Requesting" }),
-  event("AssistResponse", 5, { prompt_id: 3, content: "I will check.\n", finished: false }),
-  event("ToolCall", 6, { id: 6, api_call_id: "api-1", prompt_id: 3, name: "Terminal.Create", arguments: "{}" }),
-  event("ToolInfoUpdate", 7, { tool_call_id: 6, content: { kind: "text", value: "ready\n" } }),
-  event("ToolCallResult", 8, { tool_call_id: 6, state: "Succeeded", exit_code: 0, detail: "{}" }),
-  event("AssistResponse", 9, { prompt_id: 3, content: "done", finished: true }),
-  event("ApiStateUpdate", 10, { api_call_id: "api-1", prompt_id: 3, state: "Completed", usage: { input_tokens: 20, output_tokens: 8, total_tokens: 28 } }),
-  event("AgentTurn", 11, { turn_id: 1, prompt_id: 3, state: "Completed" }),
-  event("WorkMapMutation", 12, { mutation: { records: [
-    { kind: "objective", record: { id: "objective-1", title: "Ship", state: "active", created_at_ms: 1 } },
-    { kind: "plan", record: { id: "plan-1", objective_id: "objective-1", title: "Build", state: "active", order: 0 } },
-  ] } }),
-];
-
 describe("ME Gateway WebUI semantic compatibility", () => {
   test("migrates old send shortcut cookies by port without writing new network cookies", () => {
     for (const relative of ["../src/webui/app.js"]) {
@@ -301,62 +247,34 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
-  test("projects the same EDB fixture deterministically from the shared core", () => {
-    const first = loadRuntime("../src/webui/app.js");
-    const second = loadRuntime("../src/webui/app.js");
-    expect(visibleProjection(second.projectChat(fixture)))
-      .toEqual(visibleProjection(first.projectChat(fixture)));
-    const secondWorkMap = second.projectWorkMap(fixture);
-    const firstWorkMap = first.projectWorkMap(fixture);
-    expect({ ...secondWorkMap, _records: undefined })
-      .toEqual({ ...firstWorkMap, _records: undefined });
-  });
-
-  test("projects complete Chatbot prompt-change notices symmetrically", () => {
-    const events = [
-      event("SystemStaticPromptChange", 1, { mode: "Custom", content: "# Persona\n\n完整多行内容。" }),
-      event("SystemStaticPromptChange", 2, { mode: "Default", content: null }),
-    ];
+  test("reads saved prompt projections while preserving dirty local drafts", () => {
     for (const relative of ["../src/webui/app.js"]) {
       const runtime = loadRuntime(relative);
-      expect(runtime.projectChat(events).messages.map((message) => message.content)).toEqual([
-        "系统提示词已更新\n# Persona\n\n完整多行内容。",
-        "系统提示词已恢复默认",
-      ]);
-    }
-  });
-
-  test("derives saved prompt state from raw EDB while preserving dirty local drafts", () => {
-    for (const relative of ["../src/webui/app.js"]) {
-      const runtime = loadRuntime(relative);
-      runtime.state.rawEdbDecoding = true;
       runtime.state.snapshot.chatbot_default_static_prompt = "内置默认提示";
       runtime.state.snapshot.agents = [{ id: "chat", orchestrator: "chatbot" }];
       runtime.state.selectedAgent = "chat";
-      runtime.state.stores.set("chat", { events: [] });
+      const store = runtime.createAgentStore({ id: "chat" });
+      runtime.state.stores.set("chat", store);
+      const setPrompt = (mode, content, id) => {
+        store.projectionState = { system_prompt: { mode, content, event_id: id, changes: [{ mode, content, id }] } };
+      };
       expect(runtime.latestSystemPromptState("chat")).toEqual({
         mode: "Default", content: "内置默认提示", eventId: null,
       });
-      runtime.state.stores.get("chat").events.push(
-        event("SystemStaticPromptChange", 5, { mode: "Custom", content: "custom-one" }),
-      );
+      setPrompt("Custom", "custom-one", 5);
       expect(runtime.latestSystemPromptState("chat")).toEqual({
         mode: "Custom", content: "custom-one", eventId: 5,
       });
       const editor = runtime.systemPromptEditorState("chat");
       editor.draft.content = "本页尚未应用的草稿";
       editor.draft.dirty = true;
-      runtime.state.stores.get("chat").events.push(
-        event("SystemStaticPromptChange", 8, { mode: "Custom", content: "remote-custom" }),
-      );
+      setPrompt("Custom", "remote-custom", 8);
       expect(runtime.systemPromptEditorState("chat").draft.content).toBe("本页尚未应用的草稿");
-      runtime.state.stores.get("chat").events.push(
-        event("SystemStaticPromptChange", 9, { mode: "Default", content: null }),
-      );
+      setPrompt("Default", null, 9);
       expect(runtime.latestSystemPromptState("chat")).toEqual({
         mode: "Default", content: "内置默认提示", eventId: 9,
       });
-      runtime.state.stores.get("chat").events.pop();
+      setPrompt("Custom", "remote-custom", 8);
       expect(runtime.latestSystemPromptState("chat").content).toBe("remote-custom");
       expect(runtime.systemPromptChangeMatches(
         { mode: "Custom", content: "精确内容" },
@@ -463,109 +381,34 @@ describe("ME Gateway WebUI semantic compatibility", () => {
         expect(runtime.renderMessageHtml(message, false, false)).toContain(expectedHtml);
       }
 
-      const historicalFinal = runtime.projectChat([
-        event("UserPrompt", 1, { content: "old prompt" }),
-        event("AssistResponse", 2, { prompt_id: 1, content: "\u200b", finished: true }),
-        event("AgentTurn", 3, { turn_id: 1, prompt_id: 1, state: "Completed" }),
-      ]);
-      expect(historicalFinal.messages.map((message) => message.kind)).toEqual(["user", "assistant"]);
-      expect(historicalFinal.messages[1].content).toBe("\u200b");
-      expect(runtime.renderMessageHtml(historicalFinal.messages[1], false, false)).not.toContain("block-marker");
-
-      const toolLoopReplay = runtime.projectChat([
-        event("UserPrompt", 1, { content: "old tool loop" }),
-        event("AssistResponse", 2, { prompt_id: 1, content: "\u200b", finished: true }),
-        event("ToolCall", 3, { id: 3, api_call_id: "api-1", prompt_id: 1, name: "Terminal.Create", arguments: "{}" }),
-        event("ToolCallResult", 4, { tool_call_id: 3, state: "Succeeded", detail: "{}" }),
-        event("AssistResponse", 5, { prompt_id: 1, content: "\u200b正文", finished: true }),
-        event("AgentTurn", 6, { turn_id: 1, prompt_id: 1, state: "Completed" }),
-      ]);
-      expect(toolLoopReplay.messages.map((message) => message.kind))
-        .toEqual(["user", "assistant", "tool", "assistant", "turn-toolbar"]);
-      expect(toolLoopReplay.messages.filter(runtime.messageIsVisible).map((message) => message.kind))
+      const messages = [
+        { kind: "user", key: "user:1", eventId: 1, content: "old tool loop" },
+        { kind: "assistant", key: "assistant:1:2", content: "\u200b" },
+        { kind: "tool", key: "tool:3", tool: { id: 3, name: "Terminal.Create", result: { state: "Succeeded" } } },
+        { kind: "assistant", key: "assistant:1:5", content: "\u200b正文" },
+        { kind: "turn-toolbar", key: "turn-toolbar:1" },
+      ];
+      expect(messages.filter(runtime.messageIsVisible).map((message) => message.kind))
         .toEqual(["user", "tool", "assistant", "turn-toolbar"]);
-      expect(toolLoopReplay.messages[1].content).toBe("\u200b");
-      expect(toolLoopReplay.messages[3].content).toBe("\u200b正文");
+      expect(runtime.renderMessageHtml(messages[1], false, false)).not.toContain("block-marker");
+      expect(messages[1].content).toBe("\u200b");
+      expect(messages[3].content).toBe("\u200b正文");
     }
   });
 
-  test("keeps sidebar activity open across API loops until the Agent turn closes", () => {
-    for (const relative of ["../src/webui/app.js"]) {
-      const runtime = loadRuntime(relative);
-      const summary = runtime.projectAgentSummary([
-        event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" }),
-        event("ApiStateUpdate", 2, { api_call_id: "api-1", prompt_id: 1, state: "Requesting" }),
-      ]);
-      expect(summary).toEqual({ turnState: "Started" });
-      expect(runtime.sidebarAgentActive(summary)).toBe(true);
-
-      runtime.updateAgentSummary(summary, [
-        event("ApiStateUpdate", 3, { api_call_id: "api-1", prompt_id: 1, state: "Completed" }),
-        event("ApiStateUpdate", 4, { api_call_id: "api-2", prompt_id: 1, state: "Requesting" }),
-        event("ApiStateUpdate", 5, { api_call_id: "api-2", prompt_id: 1, state: "Error" }),
-      ]);
-      expect(summary).toEqual({ turnState: "Started" });
-      expect(runtime.sidebarAgentActive(summary)).toBe(true);
-
-      for (const stateName of ["Completed", "Interrupted", "Failed"]) {
-        const terminal = { ...summary };
-        runtime.updateAgentSummary(terminal, [
-          event("AgentTurn", 6, { turn_id: 1, prompt_id: 1, state: stateName }),
-        ]);
-        expect(runtime.sidebarAgentActive(terminal)).toBe(false);
-      }
+  test("reads sidebar activity from turn summary rather than transient API activity", () => {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const store = runtime.createAgentStore({ id: "main" });
+    for (const apiState of ["Requesting", "Streaming", "Completed", "Error", "Retrying"]) {
+      const state = { ...uiProjectionState("main", apiState, 0), api_state: apiState, summary: { turn_state: "Started" } };
+      runtime.installProjectionState(store, state);
+      expect(runtime.sidebarAgentActive(store.summary)).toBe(true);
+    }
+    for (const turnState of ["Completed", "Interrupted", "Failed"]) {
+      runtime.installProjectionState(store, { ...uiProjectionState("main", turnState, 0), summary: { turn_state: turnState } });
+      expect(runtime.sidebarAgentActive(store.summary)).toBe(false);
     }
   });
-
-  test("keeps bulk recovery current-session scoped and exposes progress on its session row", () => {
-    for (const relative of ["../src/webui/app.js"]) {
-      const runtime = loadRuntime(relative);
-      expect(runtime.shouldUseBulkEventRecovery(99, 0)).toBe(false);
-      expect(runtime.shouldUseBulkEventRecovery(100, 0)).toBe(false);
-      expect(runtime.shouldUseBulkEventRecovery(101, 0)).toBe(true);
-      const recovery = runtime.createEventRecovery("main", 4, 101, 0);
-      expect(runtime.eventRecoveryProgress(recovery, 0)).toBe(0);
-      expect(runtime.eventRecoveryProgress(recovery, 50)).toBe(50 / 101);
-      expect(runtime.eventRecoveryProgress(recovery, 101)).toBe(1);
-      expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 100)).toBe(false);
-      expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 101)).toBe(true);
-      expect(runtime.selectedEventRecoveryReady(recovery, "main", 4, 140)).toBe(true);
-      expect(runtime.eventRecoveryMatches(recovery, "other", 4)).toBe(false);
-      expect(runtime.eventRecoveryMatches(recovery, "main", 5)).toBe(false);
-
-      const source = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(source).toContain("restoreDraft();\n  const meta = state.snapshot.agents.find((agent) => agent.id === id);");
-      expect(source).toContain('const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";');
-      expect(source).toContain("startingRecoveryCycle || selectionChanged || Boolean(selectedUpdate?.reset)");
-      expect(source).toContain("const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(");
-      expect(source).toContain("const bulkRecoveryPending = bulkEventRecoveryActive();");
-      expect(source).toContain("currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged");
-      expect(source).toContain("workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged");
-      expect(source).toContain("if (bulkRecoveryPending) suppressBulkEventRecoveryRender();");
-      expect(source).toContain(`if (recoveryReady) {
-    store.projectedOrder = 0;
-    store.needsReplay = true;
-    state.eventRecovery = null;
-    forceRecoveredReplay = true;
-  }`);
-      expect(source).toContain("full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged)");
-      expect(source).toContain("if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();");
-      expect(source).toContain("if (bulkEventRecoveryActive()) return emptyProjectionChanges();");
-      expect(source).toContain("loadProgress: raw ? createAgentLoadProgress(meta, eventCount, mutationRevision) : null");
-      expect(source).toContain("percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100)");
-      expect(source).not.toContain("showEventRecoveryOverlay");
-      expect(source).not.toContain("eventRecoveryProgressFill");
-    }
-    const gateway = loadRuntime("../src/webui/app.js");
-    const first = gateway.emptyGatewayWorkspaceState();
-    const second = gateway.emptyGatewayWorkspaceState();
-    first.eventRecovery = { agentId: "main", mutationRevision: 1, startEventCount: 0, targetEventCount: 101 };
-    expect(second.eventRecovery).toBeNull();
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    expect(gatewaySource).toContain("eventRecovery: state.eventRecovery");
-    expect(gatewaySource).toContain("state.eventRecovery = workspace.eventRecovery;");
-  });
-
 
   test("keeps draft, message, paint, and connection stability policies aligned across both WebUIs", () => {
     const sources = [
@@ -585,7 +428,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(source).toContain("state.uiAnimationTimer = setTimeout(refreshUiAnimation, UI_ANIMATION_INTERVAL_MS)");
       expect(source).toContain('document.addEventListener("visibilitychange"');
       expect(source).not.toContain("setInterval(refreshRunningToolElapsed");
-      expect(source).toContain("scheduleHttpSync((message.more_events && madeProgress)");
+      expect(source).toContain("scheduleHttpSync(state.activeCatchUpPending ? 0 : delay)");
       const objectiveToggleStart = source.indexOf("function toggleObjectiveDisclosure");
       const objectiveToggleEnd = source.indexOf("\nfunction renderWorkMap", objectiveToggleStart);
       expect(source.slice(objectiveToggleStart, objectiveToggleEnd))
@@ -638,25 +481,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     }
   });
 
-  test("keeps zero-delay event catch-up conditional on a changed sync cursor", () => {
-    for (const relative of ["../src/webui/app.js"]) {
-      const runtime = loadRuntime(relative);
-      runtime.state.rawEdbDecoding = true;
-      runtime.state.snapshotInitialized = true;
-      runtime.state.snapshot.revision = 3;
-      runtime.state.selectedAgent = "main";
-      runtime.state.stores.set("main", { events: [], mutationRevision: 7 });
-      const initial = runtime.httpSyncProgressSignature();
-      expect(runtime.httpSyncProgressSignature()).toBe(initial);
-      runtime.state.stores.get("main").events.push({});
-      expect(runtime.httpSyncProgressSignature()).not.toBe(initial);
-
-      const source = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(source).toContain("const madeProgress = progressBefore !== httpSyncProgressSignature()");
-      expect(source).toContain("|| message.more_events || state.apiActivity.active");
-      expect(source).toContain("scheduleHttpSync((message.more_events && madeProgress)");
-    }
-  });
   test("closes the portrait sidebar before selecting any Gateway session", () => {
     const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(gatewaySource).toContain(`function selectWorkspaceAgent(workspaceId, agentId) {
@@ -783,12 +607,11 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(second.stores.has("main")).toBe(false);
     expect(second.drafts.has("main")).toBe(false);
     expect(first.terminalFrames).not.toBe(second.terminalFrames);
-    expect(first.workerActivityIndexes).not.toBe(second.workerActivityIndexes);
+    expect(first.expandedTools).not.toBe(second.expandedTools);
   });
 
-  test("background-syncs every inactive Workspace while retaining complete raw Events", async () => {
+  test("background metadata and drafts stay isolated while requests use projection revisions", async () => {
     const gateway = loadRuntime("../src/webui/app.js");
-    gateway.state.rawEdbDecoding = true;
     gateway.state.connectionPhase = "connected";
     gateway.state.activeCatchUpPending = false;
     expect(gateway.backgroundSyncCanRun()).toBe(false);
@@ -796,122 +619,29 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.backgroundSyncCanRun()).toBe(true);
     gateway.state.activeCatchUpPending = true;
     expect(gateway.backgroundSyncCanRun()).toBe(false);
-    gateway.state.activeCatchUpPending = false;
-
-    const meta = {
-      id: "main", title: "Main", kind: "primary", parent_agent_id: null, orchestrator: "main-agent",
-      event_count: 1, mutation_revision: 0, prompt_submission_revision: 2,
-      input_draft: "remote draft", input_draft_revision: 3,
-    };
-    const snapshot = {
-      revision: 4, environment: { workspace: "/workspace-one" }, agents: [meta],
-      models: [], orchestrators: [], default_orchestrator: null,
-      tool_visibility: { hidden_names: [], hidden_prefixes: [], activity_names: [] },
-    };
-    const requestWorkspace = gateway.emptyGatewayWorkspaceState();
-    requestWorkspace.snapshot = snapshot;
-    requestWorkspace.snapshotInitialized = true;
-    requestWorkspace.edbCacheInitialized = true;
-    requestWorkspace.stores.set("main", {
-      events: [], mutationRevision: 0, lastEventHash: "prefix-hash",
-    });
-    const validating = gateway.backgroundSyncRequestBody(requestWorkspace);
-    expect(validating.agents).toEqual([{
-      id: "main", event_count: 0, mutation_revision: 0, cursor_event_hash: "prefix-hash",
-    }]);
-    expect(validating.selected_agent).toBeNull();
-    expect(validating.terminal_session).toBeNull();
-    expect(validating.terminal_revision).toBeNull();
-    requestWorkspace.cacheValidated = true;
-    expect(gateway.backgroundSyncRequestBody(requestWorkspace).agents[0].cursor_event_hash).toBeNull();
-
+    const meta = { id: "main", title: "Main", input_draft: "remote draft", input_draft_revision: 3 };
     const workspace = gateway.emptyGatewayWorkspaceState();
     const changed = await gateway.applyBackgroundSyncState(workspace, {
-      snapshot,
-      event_updates: [{
-        agent_id: "main", reset: false, mutation_revision: 0, cursor_event_hash: "event-hash",
-        events: [event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" })],
-      }],
-    });
+      ui_projection: true, snapshot: { revision: 4, agents: [meta] },
+      projection_states: [{ ...uiProjectionState("main", "rev", 1000), summary: { turn_state: "Started" } }],
+    }, "other");
     expect(changed).toBe(true);
-    const backgroundStore = workspace.stores.get("main");
-    expect(backgroundStore.events).toEqual([
-      event("AgentTurn", 1, { turn_id: 1, prompt_id: 1, state: "Started" }),
-    ]);
-    expect(backgroundStore.eventCount).toBe(1);
-    expect(backgroundStore.mutationRevision).toBe(0);
-    expect(backgroundStore.lastEventHash).toBe("event-hash");
-    expect(backgroundStore.summary).toEqual({ turnState: "Started" });
-    expect(backgroundStore.projection.messages).toEqual([]);
-    expect(backgroundStore.turnHistory).toBeNull();
+    const store = workspace.stores.get("main");
+    expect(store.summary).toEqual({ turnState: "Started" });
+    expect(store.projection.messages).toEqual([]);
+    expect(store).not.toHaveProperty("events");
     expect(workspace.drafts.get("main")).toBe("remote draft");
-
-    gateway.state.gateway.workspaces = [{ id: "chat" }, { id: "w-one" }, { id: "w-two" }];
-    gateway.state.workspaceId = "chat";
-    expect(gateway.nextBackgroundWorkspace(10).workspaceId).toBe("w-one");
-    expect(gateway.nextBackgroundWorkspace(10).workspaceId).toBe("w-two");
-
-    const gatewaySource = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    const applyStart = gatewaySource.indexOf("function applyBackgroundSyncState");
-    const applyEnd = gatewaySource.indexOf("\nasync function requestBackgroundWorkspaceSync", applyStart);
-    const backgroundApply = gatewaySource.slice(applyStart, applyEnd);
-    expect(backgroundApply).not.toContain("renderAll(");
-    expect(backgroundApply).not.toContain("applySyncState(");
-    expect(backgroundApply).not.toContain("renderConnectionOverlayForPhase(");
-    expect(gatewaySource).not.toContain("refreshWorkspaceSummaries");
-    expect(gatewaySource).toContain("if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;");
-    expect(gatewaySource).toContain("state.connectionPhase === \"connected\"");
-
-    for (const relative of ["../src/webui/app.js"]) {
-      const source = readFileSync(join(import.meta.dir, relative), "utf8");
-      expect(source).toContain("ui_projection: usesUiProjection()");
-      expect(source).toContain("const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));");
-    }
+    const request = gateway.backgroundSyncRequestBody(workspace, "main");
+    expect(request.ui_projection).toBe(true);
+    expect(request.agents).toEqual([{ id: "main", projection_revision: null,
+      projection_window: { start: 0, end: 0, count: 0, follow_tail: true } }]);
+    expect(request.selected_agent).toBe("main");
+    expect(request.terminal_session).toBeNull();
+    expect(request.terminal_revision).toBeNull();
+    expect(gateway.state.selectedAgent).toBeNull();
+    expect(gateway.state.drafts.size).toBe(0);
   });
 
-  test("tracks cache restoration and catch-up independently for each session", () => {
-    const gateway = loadRuntime("../src/webui/app.js");
-    gateway.state.rawEdbDecoding = true;
-    const readyMeta = {
-      id: "ready", edb_id: "a".repeat(64), event_count: 2, mutation_revision: 1,
-      prompt_submission_revision: 0, input_draft_revision: 0,
-    };
-    const pendingMeta = {
-      id: "pending", edb_id: "b".repeat(64), event_count: 6, mutation_revision: 1,
-      prompt_submission_revision: 0, input_draft_revision: 0,
-    };
-    gateway.state.workspaceId = "chat";
-    gateway.state.snapshot = { environment: { workspace: "/chat" }, agents: [readyMeta, pendingMeta] };
-    gateway.state.edbCacheInitialized = true;
-    const cached = [event("AgentTurn", 1, { state: "Completed" }), event("AgentTurn", 2, { state: "Completed" })];
-    gateway.state.stores.set("ready", gateway.createAgentStore(readyMeta, {
-      events: cached, eventCount: 2, mutationRevision: 1, lastEventHash: "ready-hash",
-    }));
-    const pending = gateway.createAgentStore(pendingMeta, {
-      events: cached, eventCount: 2, mutationRevision: 1, lastEventHash: "pending-hash",
-    });
-    gateway.state.stores.set("pending", pending);
-    expect(gateway.agentLoadingState("chat", "ready")).toEqual({ loading: false, percent: null });
-    expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 0 });
-    pending.eventCount = 4;
-    expect(gateway.agentLoadingState("chat", "pending")).toEqual({ loading: true, percent: 50 });
-    pending.eventCount = 6;
-    gateway.settleAgentLoadProgress(pending);
-    expect(gateway.agentLoadingState("chat", "pending").loading).toBe(false);
-    expect(pending.loadProgress).toBeNull();
-    gateway.prepareAgentLoadProgress(
-      pending, { ...pendingMeta, event_count: 10 }, null, pending.eventCount, pending.mutationRevision,
-    );
-    expect(pending.loadProgress).toEqual({
-      mutationRevision: 1, startEventCount: 6, targetEventCount: 10,
-    });
-    expect(gateway.agentLoadingState("chat", "pending").loading).toBe(true);
-
-    const inactive = gateway.emptyGatewayWorkspaceState();
-    inactive.snapshot = { environment: { workspace: "/other" }, agents: [pendingMeta] };
-    gateway.state.workspaceStates.set("w-one", inactive);
-    expect(gateway.agentLoadingState("w-one", "pending")).toEqual({ loading: true, percent: null });
-  });
 
   test("shares Rust's bounded sync window contract and advances after accumulated updates", async () => {
     const cases = JSON.parse(readFileSync(join(import.meta.dir, "fixtures/ui_projection_windows.json"), "utf8"));
@@ -1013,7 +743,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
   });
 
   test("pending, failed and late range replies cannot erase or overwrite the visible window", async () => {
-    for (const scenario of ["network", "stale", "workspace", "agent", "source", "generation"]) {
+    for (const scenario of ["network", "stale", "workspace", "agent", "store", "generation"]) {
       const r = loadRuntime("../src/webui/app.js");
       r.state.workspaceId = "chat"; r.state.selectedAgent = "main";
       const store = r.createAgentStore({ id: "main" });
@@ -1027,7 +757,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect(store.projection).toBe(previous);
       if (scenario === "workspace") r.state.workspaceId = "other";
       if (scenario === "agent") r.state.selectedAgent = "other";
-      if (scenario === "source") r.state.rawEdbDecoding = true;
+      if (scenario === "store") r.state.stores.set("main", r.createAgentStore({ id: "main" }));
       if (scenario === "generation") r.state.syncGeneration++;
       if (scenario === "network") reject(new Error("offline"));
       else if (scenario === "stale") reject(Object.assign(new Error("stale"), { status: 409, code: "stale_revision" }));
@@ -1037,36 +767,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       expect([store.projectionStart, store.projectionEnd]).toEqual([20, 84]);
     }
   });
-
-  test("restores complete cached Events into resident Session stores", () => {
-    const gateway = loadRuntime("../src/webui/app.js");
-    gateway.state.rawEdbDecoding = true;
-    const edbId = "f".repeat(64);
-    const snapshot = { environment: { workspace: "/workspace" }, agents: [] };
-    gateway.state.snapshot = snapshot;
-
-    const cachedEvents = [{ EdbIdGeneration: { edb_id: edbId } }, { UserPrompt: { content: "cached" } }];
-    const cached = {
-      key: edbId, agentId: "retained", edbId, events: cachedEvents,
-      eventCount: cachedEvents.length, mutationRevision: 2, lastEventHash: "hash-2",
-    };
-    const meta = {
-      id: "retained", edb_id: edbId, event_count: 2, mutation_revision: 2,
-      prompt_submission_revision: 0, input_draft_revision: 0,
-    };
-    const store = gateway.createAgentStore(meta, cached, snapshot);
-    expect(store.events).toBe(cachedEvents);
-    expect(store.eventCount).toBe(2);
-    expect(store.cacheKey).toBe(edbId);
-    expect(store.summary).toEqual(gateway.projectAgentSummary(cachedEvents));
-    expect(store.needsReplay).toBe(true);
-
-    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
-    expect(source).toContain("return frontendRuntime.loadCachedSessions(edbCache, snapshot, scope);");
-    expect(source).toContain("store.events = events;");
-    expect(source).toContain("store.events.push(...events);");
-  });
-
 
   test("tool-only projection updates redraw queued, streaming and completed cards without new messages", () => {
     for (const kind of ["tool", "worker-activity"]) {
@@ -1112,17 +812,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
 
   test("keeps only a bounded revision-bound projection range in the default frontend", () => {
     const runtime = loadRuntime("../src/webui/app.js");
-    const cachedEvents = [event("UserPrompt", 1, { content: "cached raw" })];
     const meta = {
       id: "main", edb_id: "a".repeat(64), event_count: 1_000, mutation_revision: 0,
       prompt_submission_revision: 0, input_draft_revision: 0,
     };
-    expect(runtime.usesUiProjection()).toBe(true);
-    const store = runtime.createAgentStore(meta, {
-      events: cachedEvents, eventCount: 1, mutationRevision: 0, lastEventHash: "raw-hash",
-    }, { environment: { workspace: "/workspace" } });
-    expect(store.events).toEqual([]);
-    expect(store.needsReplay).toBe(false);
+    const store = runtime.createAgentStore(meta);
+    expect(store).not.toHaveProperty("events");
     expect(store.projectionLoading).toBe(false);
     expect([store.projectionStart, store.projectionEnd]).toEqual([0, 0]);
 
@@ -1135,7 +830,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     runtime.installProjectionState(
       store, firstState, uiProjectionRange("main", "revision-one", 1_000, 936, 1_000),
     );
-    expect(store.events).toEqual([]);
+    expect(store).not.toHaveProperty("events");
     expect(store.projection.messages).toHaveLength(64);
     expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_000]);
     expect(store.projection.messages[0]._projectionIndex).toBe(936);
@@ -1173,32 +868,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect([store.projectionStart, store.projectionEnd]).toEqual([936, 1_002]);
     expect(store.projection.messages).toHaveLength(66);
 
-    const bucket = runtime.emptyGatewayWorkspaceState();
-    const drafts = bucket.drafts;
-    const draftSync = bucket.draftSync;
-    const previousStores = bucket.stores;
-    bucket.stores.set("main", store);
-    bucket.promptDrafts.set("main", { dirty: true });
-    bucket.workerActivityIndexes.set("worker", { marker: true });
-    runtime.resetProjectionSourceBucket(bucket);
-    expect(bucket.stores).not.toBe(previousStores);
-    expect(bucket.stores.size).toBe(0);
-    expect(bucket.promptDrafts.size).toBe(0);
-    expect(bucket.workerActivityIndexes.size).toBe(0);
-    expect(bucket.drafts).toBe(drafts);
-    expect(bucket.draftSync).toBe(draftSync);
-
-    runtime.state.rawEdbDecoding = true;
-    expect(runtime.usesUiProjection()).toBe(false);
-    const rawStore = runtime.createAgentStore(meta, {
-      events: cachedEvents, eventCount: 1, mutationRevision: 0, lastEventHash: "raw-hash",
-    }, { environment: { workspace: "/workspace" } });
-    expect(rawStore.events).toBe(cachedEvents);
-    expect(rawStore.needsReplay).toBe(true);
-    expect(rawStore.projectionLoading).toBe(false);
   });
 
-  test("keeps raw EDB recovery from suppressing the first bounded projection render", () => {
+  test("immediately reports the first bounded projection for rendering", () => {
     const runtime = loadRuntime("../src/webui/app.js");
     const meta = {
       id: "main", edb_id: "a".repeat(64), event_count: 1_000, mutation_revision: 0,
@@ -1207,17 +879,12 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     runtime.state.workspaceId = "chat";
     runtime.state.selectedAgent = "main";
     runtime.state.snapshot = { environment: { workspace: "/workspace" }, agents: [meta] };
-    const store = runtime.createAgentStore(meta, null, runtime.state.snapshot);
+    const store = runtime.createAgentStore(meta);
     runtime.state.stores.set("main", store);
-    expect(runtime.prepareSelectedEventRecovery(meta, null, true)).toBe(false);
-    expect(runtime.state.eventRecovery).toBeNull();
-
     const projectionState = uiProjectionState("main", "revision-one", 1_000);
     runtime.installProjectionState(
       store, projectionState, uiProjectionRange("main", "revision-one", 1_000, 936, 1_000),
     );
-    runtime.state.eventRecovery = runtime.createEventRecovery("main", 0, 1_000, 0);
-    expect(runtime.bulkEventRecoveryActive()).toBe(true);
     const changes = runtime.advanceCurrentProjection();
     expect(changes.transcript).toBe(true);
     expect(store.projectionChanges).toBeNull();
@@ -1372,7 +1039,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(workspace.stores.get("one").projectionLoading).toBe(false);
     expect(workspace.stores.get("two").projectionLoading).toBe(false);
   });
-  test("stores lightweight Gateway session metadata before raw EDB hydration", () => {
+  test("stores lightweight Gateway session metadata before projection loading", () => {
     const gateway = loadRuntime("../src/webui/app.js");
     const workspace = gateway.emptyGatewayWorkspaceState();
     gateway.state.workspaceStates.set("w-one", workspace);
@@ -1385,7 +1052,9 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(workspace.snapshot).toBe(snapshot);
     expect(workspace.selectedAgent).toBe("main");
     expect(workspace.snapshotInitialized).toBe(false);
-    expect(workspace.edbCacheInitialized).toBe(false);
+    workspace.snapshotInitialized = true;
+    gateway.applyGatewayStartupMetadata("w-one", { ...snapshot, revision: 6 });
+    expect(workspace.snapshot).toBe(snapshot);
   });
   test("keeps Gateway Workspace disclosure as an origin-local browser preference", () => {
     const gateway = loadRuntime("../src/webui/app.js");
@@ -1518,8 +1187,8 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(gateway.normalizeWindowBorderStyle("theme")).toBe("theme");
     expect(gateway.normalizeWindowBorderStyle("invalid")).toBe("default");
     const localHtml = gateway.localPreferenceSettingsHtml();
-    expect(localHtml).toContain("兼容渲染模式");
-    expect(localHtml).toContain('data-local-preference="raw-edb-decoding"');
+    expect(localHtml).not.toContain("兼容渲染模式");
+    expect(localHtml).not.toContain('data-local-preference="raw-edb-decoding"');
     expect(localHtml).not.toContain("边框样式");
 
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
@@ -1531,7 +1200,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).not.toContain('class="settings-section-icon"');
     expect(source).toContain('const WINDOW_BORDER_STYLE_PREFERENCE = "me-window-border-style";');
     expect(source).toContain("const borderStyle = runtimeCapabilities.windowBorderStyle ?");
-    expect(source).toContain('const RAW_EDB_DECODING_PREFERENCE = "me-raw-edb-decoding";');
     expect(source).toContain("<strong>边框样式</strong>");
     expect(source).toContain(">默认</option>");
     expect(source).toContain(">主题</option>");
@@ -1540,7 +1208,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain('elements.loginSettings?.classList.toggle("hidden", !runtimeCapabilities.windowBorderStyle);');
     expect(source).toContain('elements.loginSettings?.addEventListener("click", openLocalSettings)');
     const loginStart = source.indexOf("function openLocalSettings()");
-    const loginEnd = source.indexOf("\nfunction renderGatewayEdbCacheSettings", loginStart);
+    const loginEnd = source.indexOf("\nfunction renderSettingsModal", loginStart);
     const loginSettings = source.slice(loginStart, loginEnd);
     expect(loginSettings).toContain("localPreferenceSettingsHtml()");
     expect(loginSettings).not.toContain("/api/");
@@ -1718,7 +1386,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain('class="agent-label"></span>');
     expect(source).toContain('class="agent-delete"');
     expect(source).toContain('void openDeleteAgent(agent.id)');
-    expect(source).toContain('if (kind === "AgentTurn") summary.turnState = value.state;');
+    expect(source).toContain("return { turnState: value?.turn_state ?? null };");
     expect(source).toContain("const active = !loadingState.loading && sidebarAgentActive(summary);");
     expect(source).not.toContain("const active = API_ACTIVE.has(summary?.apiState);");
     expect(source).not.toContain("startupPending: true");
@@ -1726,7 +1394,6 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).not.toContain("sessionSelectionAllowed");
     expect(source).not.toContain("node.inert = loading;");
     expect(source).toContain('row.classList.toggle("session-loading", loadingState.loading)');
-    expect(source).toContain('class="agent-load-progress hidden"');
     expect(source).not.toContain("item.disabled = loadingState.loading");
     expect(source).not.toContain("deleteButton.disabled = loadingState.loading");
     expect(styles).toContain(".agent-label { display: block; min-width: 0; flex: 1; overflow: hidden; font-size: 13px; font-weight: 700;");
@@ -1817,9 +1484,9 @@ describe("bounded background projection scheduling", () => {
     const foreground = r.state.stores.get("a0").projection;
     const visited = new Set();
     for (let index = 0; index < 50; index++) {
-      const pending = r.requestBackgroundWorkspaceSync();
+      const pending = r.requestBackgroundProjectionSync();
       expect(requests).toHaveLength(index + 1);
-      await r.requestBackgroundWorkspaceSync();
+      await r.requestBackgroundProjectionSync();
       expect(requests).toHaveLength(index + 1);
       const request = requests[index];
       expect(request.path).toBe("/api/sync");
@@ -1831,7 +1498,7 @@ describe("bounded background projection scheduling", () => {
       expect(r.state.selectedAgent).toBe("a0");
       expect(r.state.workspaceId).toBe("chat");
       expect(r.state.stores.get("a0").projection).toBe(foreground);
-      await r.requestBackgroundWorkspaceSync();
+      await r.requestBackgroundProjectionSync();
       expect(requests).toHaveLength(index + 1);
       h.advance(1000);
     }
@@ -1841,7 +1508,7 @@ describe("bounded background projection scheduling", () => {
     for (const bucket of [r.state, r.gatewayWorkspaceState("w1")]) {
       for (const store of bucket.stores.values()) {
         expect(store.projection.messages).toHaveLength(64);
-        expect(store.events).toEqual([]);
+        expect(store).not.toHaveProperty("events");
       }
     }
     expect(r.sidebarAgentActive(r.gatewayWorkspaceState("w1").stores.get("a0").summary)).toBe(true);
@@ -1850,7 +1517,7 @@ describe("bounded background projection scheduling", () => {
   test("foreground streaming keeps its own cadence while a background response is delayed", async () => {
     const h = projectionSchedulerHarness([40, 40]);
     const { r, requests } = h;
-    const background = r.requestBackgroundWorkspaceSync();
+    const background = r.requestBackgroundProjectionSync();
     const oldSummary = r.state.stores.get("a1").summary;
     for (let index = 1; index <= 8; index++) {
       const foreground = r.requestHttpSync();
@@ -1877,7 +1544,7 @@ describe("bounded background projection scheduling", () => {
   test("retains the real background slot after cancellation and promotes selection immediately", async () => {
     const h = projectionSchedulerHarness([3]);
     const { r, requests } = h;
-    const background = r.requestBackgroundWorkspaceSync();
+    const background = r.requestBackgroundProjectionSync();
     const operation = r.state.backgroundSyncOperation;
     r.cancelBackgroundWorkspaceSync("chat");
     r.state.selectedAgent = "a1";
@@ -1885,7 +1552,7 @@ describe("bounded background projection scheduling", () => {
     expect(operation.controller.signal.aborted).toBe(true);
     expect(r.state.backgroundSyncOperation).toBe(operation);
     h.advance(20000);
-    await r.requestBackgroundWorkspaceSync();
+    await r.requestBackgroundProjectionSync();
     expect(requests).toHaveLength(1);
     const foreground = r.requestHttpSync();
     expect(requests).toHaveLength(2);
@@ -1898,7 +1565,7 @@ describe("bounded background projection scheduling", () => {
     expect(r.state.stores.get("a1").projectionRevision).toBe("new-foreground");
     expect(r.state.backgroundSyncOperation).toBeNull();
     h.advance(1000);
-    const next = r.requestBackgroundWorkspaceSync();
+    const next = r.requestBackgroundProjectionSync();
     expect(requests[2].body.selected_agent).not.toBe("a1");
     requests[2].resolve(h.payload(2));
     await next;
@@ -1909,11 +1576,11 @@ describe("bounded background projection scheduling", () => {
     const h = projectionSchedulerHarness([2]);
     const { r, requests } = h;
     const store = r.state.stores.get("a1");
-    const first = r.requestBackgroundWorkspaceSync();
+    const first = r.requestBackgroundProjectionSync();
     requests[0].resolve(h.payload(0)); await first;
     const previous = store.projection;
     h.advance(5000);
-    const failed = r.requestBackgroundWorkspaceSync();
+    const failed = r.requestBackgroundProjectionSync();
     const invalid = h.payload(1);
     invalid.projection_states.find((s) => s.agent_id === "a1").range.revision = "stale";
     requests[1].resolve(invalid); await failed;
@@ -1921,13 +1588,13 @@ describe("bounded background projection scheduling", () => {
     expect(store.backgroundFailures).toBe(1);
     expect(store.backgroundNextSyncAt - h.now()).toBe(1000);
     h.advance(1000);
-    const append = r.requestBackgroundWorkspaceSync();
+    const append = r.requestBackgroundProjectionSync();
     requests[2].resolve(h.payload(2, { count: 1100, changed: 1000, start: 1000 })); await append;
     expect(store.projection.messages).toHaveLength(164);
     expect(store.projectionRevision).toBe("r2");
     expect(store.backgroundFailures).toBe(0);
     h.advance(5000);
-    const jump = r.requestBackgroundWorkspaceSync();
+    const jump = r.requestBackgroundProjectionSync();
     requests[3].resolve(h.payload(3, { count: 2000, changed: 1100 })); await jump;
     expect(store.projection.messages).toHaveLength(64);
     expect([store.projectionStart, store.projectionEnd]).toEqual([1936, 2000]);
@@ -1940,14 +1607,14 @@ describe("bounded background projection scheduling", () => {
     const workspace = r.gatewayWorkspaceState("w1");
     workspace.snapshotInitialized = false;
     workspace.stores.clear();
-    const pending = r.requestBackgroundWorkspaceSync();
+    const pending = r.requestBackgroundProjectionSync();
     expect(requests[0].body.selected_agent).toBeNull();
     requests[0].resolve(h.payload(0, { active: true })); await pending;
     expect(workspace.snapshotInitialized).toBe(true);
     expect(r.sidebarAgentActive(workspace.stores.get("a0").summary)).toBe(true);
     expect(workspace.stores.get("a0").projection.messages).toEqual([]);
     h.advance(1000);
-    const body = r.requestBackgroundWorkspaceSync();
+    const body = r.requestBackgroundProjectionSync();
     requests[1].resolve(h.payload(1, { active: true })); await body;
     expect(workspace.stores.get(requests[1].body.selected_agent).projection.messages).toHaveLength(64);
     expect(r.state.workspaceId).toBe("chat");
@@ -1956,7 +1623,7 @@ describe("bounded background projection scheduling", () => {
   test("renders the active dot from unselected session summaries without a loading mask", async () => {
     const h = projectionSchedulerHarness([1, 1]);
     const { r, requests } = h;
-    const pending = r.requestBackgroundWorkspaceSync();
+    const pending = r.requestBackgroundProjectionSync();
     requests[0].resolve(h.payload(0, { active: true })); await pending;
     const nodes = new Map();
     function node() {
@@ -1980,7 +1647,7 @@ describe("bounded background projection scheduling", () => {
   test("a late response cannot recreate a closed Workspace", async () => {
     const h = projectionSchedulerHarness([1, 1]);
     const { r, requests } = h;
-    const pending = r.requestBackgroundWorkspaceSync();
+    const pending = r.requestBackgroundProjectionSync();
     const payload = h.payload(0);
     r.state.gateway.workspaces = [{ id: "chat", builtin: true }];
     r.state.workspaceStates.delete("w1");
@@ -1994,7 +1661,7 @@ describe("bounded background projection scheduling", () => {
     const { r, requests } = h;
     const store = r.state.stores.get("a1");
     for (let index = 0; index < 7; index++) {
-      const pending = r.requestBackgroundWorkspaceSync();
+      const pending = r.requestBackgroundProjectionSync();
       requests[index].reject(new Error("weak network")); await pending;
       const expected = Math.min(30000, 1000 * (2 ** index));
       expect(store.backgroundNextSyncAt - h.now()).toBe(expected);
@@ -2002,10 +1669,10 @@ describe("bounded background projection scheduling", () => {
       h.advance(expected);
     }
     r.state.connectionPhase = "degraded";
-    await r.requestBackgroundWorkspaceSync();
+    await r.requestBackgroundProjectionSync();
     expect(requests).toHaveLength(7);
     r.state.connectionPhase = "connected";
-    const recovered = r.requestBackgroundWorkspaceSync();
+    const recovered = r.requestBackgroundProjectionSync();
     requests[7].resolve(h.payload(7)); await recovered;
     expect(store.backgroundFailures).toBe(0);
     expect(store.projectionRevision).toBe("r7");

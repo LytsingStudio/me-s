@@ -22,7 +22,6 @@
       nativeDownload: false,
       pageTitle: "ME",
       brandTitle: "ME",
-      cacheStorageLabel: "当前浏览器",
       sessionSectionTitle: "聊天",
       newSessionLabel: "新建聊天",
     }),
@@ -44,15 +43,6 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspace_id: workspaceId, agent_id: agentId }),
       });
-    },
-    createEdbCache() {
-      return globalThis.MeEdbCache.create();
-    },
-    loadCachedSessions(cache, _snapshot, scope) {
-      return cache.loadScope(scope);
-    },
-    cacheKey(scope, agentId) {
-      return globalThis.MeEdbCache.sessionKey(scope, agentId);
     },
   };
 

@@ -82,6 +82,7 @@ WINDOWS_TARGET=x86_64-pc-windows-msvc
 PACKAGE_ASSETS=(
     ME-macos-universal.pkg
     ME-windows-x86_64-setup.exe
+    ME-windows-x86_64-portable.zip
     ME-linux-x86_64.run
     ME-linux-arm64.run
 )
@@ -229,6 +230,16 @@ packaging/windows/build-installer.sh \
     "target/$WINDOWS_TARGET/release/me-gateway.exe" \
     "me-client/src-tauri/target/$WINDOWS_TARGET/release/me-client.exe" \
     "$STAGING_DIST/ME-windows-x86_64-setup.exe"
+
+mkdir -p "$BUILD_DIR/windows-portable"
+cp "target/$WINDOWS_TARGET/release/me-s.exe" "$BUILD_DIR/windows-portable/"
+cp "target/$WINDOWS_TARGET/release/me-gateway.exe" "$BUILD_DIR/windows-portable/"
+cp "me-client/src-tauri/target/$WINDOWS_TARGET/release/me-client.exe" "$BUILD_DIR/windows-portable/"
+(
+    cd "$BUILD_DIR/windows-portable"
+    "$ME_7Z" a -tzip -mm=Deflate -mx=9 "$STAGING_DIST/ME-windows-x86_64-portable.zip" \
+        me-s.exe me-gateway.exe me-client.exe >/dev/null
+)
 
 echo "building Linux packages with persistent local toolchains and caches"
 packaging/linux/build-container.sh "$VERSION" x86_64 "$STAGING_DIST/ME-linux-x86_64.run"

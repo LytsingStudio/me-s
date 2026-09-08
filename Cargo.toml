@@ -1,6 +1,6 @@
 [package]
 name = "me-s"
-version = "0.1.98"
+version = "0.1.99"
 edition = "2024"
 autobins = false
 description = "A lightweight local agent runtime optimized for long-running work"
@@ -61,6 +61,10 @@ zstd = "0.13.3"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_JobObjects", "Win32_System_Threading"] }
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
+
+[dev-dependencies]
+zip = { version = "=8.6.0", default-features = false, features = ["deflate-flate2"] }
 
 [build-dependencies]
 sha2 = "0.10.9"

@@ -49,6 +49,10 @@ fn main() {
 }
 
 fn run() -> Result<()> {
+    #[cfg(windows)]
+    if updater::run_windows_helper_if_requested()? {
+        return Ok(());
+    }
     let arguments: Vec<String> = env::args().skip(1).collect();
     let workspace = env::current_dir()?;
     if arguments.as_slice() == ["__toolbox-terminal-worker"] {

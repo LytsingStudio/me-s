@@ -15,6 +15,7 @@ DIST_DIR="$ROOT_DIR/dist"
 PACKAGE_ASSETS=(
     ME-macos-universal.pkg
     ME-windows-x86_64-setup.exe
+    ME-windows-x86_64-portable.zip
     ME-linux-x86_64.run
     ME-linux-arm64.run
 )
@@ -83,6 +84,7 @@ git push origin "refs/tags/$TAG"
 gh release create "$TAG" \
     "$DIST_DIR/ME-macos-universal.pkg" \
     "$DIST_DIR/ME-windows-x86_64-setup.exe" \
+    "$DIST_DIR/ME-windows-x86_64-portable.zip" \
     "$DIST_DIR/ME-linux-x86_64.run" \
     "$DIST_DIR/ME-linux-arm64.run" \
     "$DIST_DIR/SHA256SUMS#SHA-256 checksums" \
@@ -92,7 +94,7 @@ gh release create "$TAG" \
     --generate-notes \
     --latest
 
-EXPECTED_ASSETS=$'ME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-setup.exe\nSHA256SUMS'
+EXPECTED_ASSETS=$'ME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-portable.zip\nME-windows-x86_64-setup.exe\nSHA256SUMS'
 ACTUAL_ASSETS="$(gh release view "$TAG" --repo "$REPOSITORY" --json assets --jq '.assets[].name' | LC_ALL=C sort)"
 if [[ "$ACTUAL_ASSETS" != "$EXPECTED_ASSETS" ]]; then
     printf 'error: published Release asset set is invalid\nexpected:\n%s\nactual:\n%s\n' "$EXPECTED_ASSETS" "$ACTUAL_ASSETS" >&2

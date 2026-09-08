@@ -7,7 +7,6 @@ const BACKGROUND_SYNC_IDLE_MS = 5000;
 const BACKGROUND_SYNC_RETRY_MAX_MS = 30000;
 const BACKGROUND_REQUEST_GAP_MS = 1000;
 const BACKGROUND_ACTIVE_GAP_MS = 2000;
-const EVENT_RECOVERY_THRESHOLD = 100;
 const RECONNECT_MAX_MS = 5000;
 const DRAFT_BATCH_MS = 80;
 const CONNECTION_DEGRADED_GRACE_MS = 2000;
@@ -39,7 +38,6 @@ const SEND_SHORTCUT_MODIFIED_ENTER = "modified-enter";
 const WINDOW_BORDER_STYLE_PREFERENCE = "me-window-border-style";
 const WINDOW_BORDER_DEFAULT = "default";
 const WINDOW_BORDER_THEME = "theme";
-const RAW_EDB_DECODING_PREFERENCE = "me-raw-edb-decoding";
 const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";
 const API_ACTIVE = new Set(["Requesting", "Streaming", "Retrying"]);
 const API_SPINNER_FRAMES = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
@@ -52,11 +50,10 @@ const rememberedDevices = frontendRuntime.rememberedDevices || null;
 const runtimeCapabilities = Object.freeze({
   multipleWorkspaces: false, gatewaySettings: false, targetConfiguration: false,
   nativeDownload: false, dynamicWindowTitle: false, windowBorderStyle: false,
-  pageTitle: "ME", brandTitle: "ME", cacheStorageLabel: "当前浏览器",
+  pageTitle: "ME", brandTitle: "ME",
   sessionSectionTitle: "聊天", newSessionLabel: "新建聊天",
   ...(frontendRuntime.capabilities || {}),
 });
-const edbCache = frontendRuntime.createEdbCache();
 document.documentElement.classList.toggle("single-workspace", !runtimeCapabilities.multipleWorkspaces);
 document.documentElement.classList.toggle("target-configuration", runtimeCapabilities.targetConfiguration);
 document.documentElement.classList.toggle("remembered-device-logins", Boolean(rememberedDevices));
@@ -107,7 +104,6 @@ const state = {
   selectedAgent: null,
   apiActivity: { agentId: null, active: false, receivedSseEvents: 0 },
   pendingAgentSelection: null,
-  eventRecovery: null,
   view: { kind: "chat", sessionId: null },
   terminals: [],
   terminalRevisions: new Map(),
@@ -115,7 +111,6 @@ const state = {
   expandedTools: new Set(),
   expandedHistoryObjectives: new Set(),
   objectiveDisclosure: emptyObjectiveDisclosure(),
-  workerActivityIndexes: new Map(),
   pendingRender: emptyRenderRequest(),
   inputResizeFrame: null,
   inputHeight: null,
@@ -126,7 +121,6 @@ const state = {
   composing: false,
   sendShortcut: readSendShortcutPreference(),
   windowBorderStyle: readWindowBorderStylePreference(),
-  rawEdbDecoding: readRawEdbDecodingPreference(),
   userMenu: null,
   agentMenu: null,
   modal: null,
@@ -144,7 +138,6 @@ const state = {
   connected: false,
   connecting: false,
   snapshotInitialized: false,
-  edbCacheInitialized: false,
   syncGeneration: 0,
   syncController: null,
   syncInFlight: false,
@@ -384,11 +377,6 @@ function syncFileManagerView() {
   });
 }
 
-function eventParts(event) {
-  const entry = Object.entries(event)[0];
-  return entry || ["Unknown", {}];
-}
-
 function replaceElementChildren(element, ...children) {
   while (element.firstChild) element.removeChild(element.firstChild);
   for (const child of children) element.appendChild(child);
@@ -421,14 +409,6 @@ function normalizeWindowBorderStyle(value) {
 
 function readWindowBorderStylePreference() {
   return normalizeWindowBorderStyle(readLocalPreference(WINDOW_BORDER_STYLE_PREFERENCE));
-}
-
-function readRawEdbDecodingPreference() {
-  return readLocalPreference(RAW_EDB_DECODING_PREFERENCE) === "true";
-}
-
-function usesUiProjection() {
-  return !state.rawEdbDecoding;
 }
 
 function applyWindowBorderStyle() {
@@ -479,7 +459,6 @@ function persistDevicePreference(key, value) {
 function restoreRuntimeDevicePreferences() {
   state.sendShortcut = readSendShortcutPreference();
   state.windowBorderStyle = readWindowBorderStylePreference();
-  state.rawEdbDecoding = readRawEdbDecodingPreference();
   applyWindowBorderStyle();
   elements.loginSettings?.classList.toggle("hidden", !runtimeCapabilities.windowBorderStyle);
   const activeTheme = globalThis.MeTheme.apply(
@@ -496,48 +475,6 @@ function setSendShortcut(value) {
   }
   renderComposer();
   elements.input.focus();
-}
-
-function resetProjectionSourceBucket(bucket) {
-  bucket.stores = new Map();
-  bucket.promptDrafts = new Map();
-  bucket.workerActivityIndexes = new Map();
-  bucket.snapshotInitialized = false;
-  bucket.edbCacheInitialized = false;
-  bucket.cacheValidated = false;
-  bucket.catchUpPending = true;
-  bucket.eventRecovery = null;
-}
-
-function setRawEdbDecoding(enabled) {
-  const next = Boolean(enabled);
-  if (state.rawEdbDecoding === next) return;
-  stopHttpPolling();
-  cancelBackgroundWorkspaceSync();
-  captureActiveWorkspace();
-  state.rawEdbDecoding = next;
-  persistLocalPreference(RAW_EDB_DECODING_PREFERENCE, String(next));
-  for (const workspace of state.workspaceStates.values()) resetProjectionSourceBucket(workspace);
-  const active = state.workspaceId ? gatewayWorkspaceState(state.workspaceId) : null;
-  if (active) {
-    state.snapshot = active.snapshot;
-    state.stores = active.stores;
-    state.promptDrafts = active.promptDrafts;
-    state.workerActivityIndexes = active.workerActivityIndexes;
-    state.selectedAgent = active.selectedAgent;
-  } else {
-    state.stores = new Map();
-    state.promptDrafts = new Map();
-    state.workerActivityIndexes = new Map();
-  }
-  state.snapshotInitialized = false;
-  state.edbCacheInitialized = false;
-  state.activeCatchUpPending = true;
-  state.eventRecovery = null;
-  state.pendingRender = emptyRenderRequest();
-  renderAll();
-  resetConnectionForInitialSync();
-  if (state.workspaceId && state.authenticated) startHttpPolling();
 }
 
 function sendShortcutHint() {
@@ -638,102 +575,9 @@ function canControlRuntime(meta = agentMeta()) {
   return !!meta && (meta.kind !== "sub-agent" || isWorkerAgent(meta));
 }
 
-function edbCacheScope(snapshot = state.snapshot) {
-  return String(snapshot?.environment?.workspace || "");
-}
-
-function cacheEntriesByAgent(snapshot, entries) {
-  const byAgent = new Map(entries
-    .filter((entry) => entry?.agentId)
-    .map((entry) => [entry.agentId, entry]));
-  return new Map((snapshot.agents || []).map((meta) => [meta.id, byAgent.get(meta.id)]));
-}
-
-function cacheEntryEventCount(entry) {
-  if (!entry) return 0;
-  if (Number.isFinite(Number(entry.eventCount))) return Math.max(0, Number(entry.eventCount));
-  return Array.isArray(entry.events) ? entry.events.length : 0;
-}
-
-function cacheEntryValid(cached, meta) {
-  if (!cached) return false;
-  const eventCount = cacheEntryEventCount(cached);
-  const authoritativeCount = Number(meta.event_count || 0);
-  return (!cached.edbId || cached.edbId === meta.edb_id)
-    && cached.mutationRevision === Number(meta.mutation_revision || 0)
-    && eventCount <= authoritativeCount
-    && (eventCount === 0 || typeof cached.lastEventHash === "string")
-    && (eventCount !== authoritativeCount
-      || cached.lastEventHash === (meta.last_event_hash ?? null));
-}
-
-async function loadEdbCacheEntries(snapshot) {
-  const scope = edbCacheScope(snapshot);
-  if (!scope) return [];
-  return frontendRuntime.loadCachedSessions(edbCache, snapshot, scope);
-}
-
-function discardStoredAgentEdb(snapshot, agentId, store = null) {
-  if (usesUiProjection()) return;
-  const scope = edbCacheScope(snapshot);
-  const key = store?.cacheKey || (scope
-    ? frontendRuntime.cacheKey(scope, agentId, store?.edbId || "")
-    : "");
-  if (key) void edbCache.discardSession(key);
-}
-
-function createAgentLoadProgress(meta, localEventCount, localMutationRevision) {
-  const mutationRevision = Number(meta.mutation_revision) || 0;
-  const targetEventCount = Math.max(0, Number(meta.event_count) || 0);
-  const sameMutation = (Number(localMutationRevision) || 0) === mutationRevision;
-  const startEventCount = sameMutation ? Math.max(0, Number(localEventCount) || 0) : 0;
-  return startEventCount < targetEventCount
-    ? { mutationRevision, startEventCount, targetEventCount } : null;
-}
-
-function loadProgressSignature(store) {
-  const progress = store?.loadProgress;
-  return progress
-    ? `${progress.mutationRevision}:${progress.startEventCount}:${progress.targetEventCount}:${store.eventCount}` : "";
-}
-
-function prepareAgentLoadProgress(store, meta, payload, previousEventCount, previousMutationRevision) {
-  const mutationRevision = Number(payload?.mutation_revision ?? meta.mutation_revision) || 0;
-  const targetEventCount = Math.max(0, Number(payload?.event_count ?? meta.event_count) || 0);
-  if (store.loadProgress && store.loadProgress.mutationRevision !== mutationRevision) {
-    store.loadProgress = null;
-  }
-  if (!store.loadProgress) {
-    const reset = Boolean(payload?.reset)
-      || (Number(previousMutationRevision) || 0) !== mutationRevision;
-    const startEventCount = reset ? 0 : Math.max(0, Number(previousEventCount) || 0);
-    if (startEventCount < targetEventCount) {
-      store.loadProgress = { mutationRevision, startEventCount, targetEventCount };
-    }
-  }
-}
-
-function settleAgentLoadProgress(store) {
-  if (store.loadProgress && store.eventCount >= store.loadProgress.targetEventCount) {
-    store.loadProgress = null;
-  }
-}
-
-function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
-  const raw = !usesUiProjection();
-  const events = raw && Array.isArray(cached?.events) ? cached.events : [];
-  const eventCount = events.length;
-  const scope = edbCacheScope(snapshot);
-  const edbId = String(meta.edb_id || "");
-  const mutationRevision = raw && cached
-    ? Number(cached.mutationRevision) || 0 : Number(meta.mutation_revision) || 0;
+function createAgentStore(meta) {
   return {
-    edbId,
-    cacheKey: cached?.key || (scope ? frontendRuntime.cacheKey(scope, meta.id, edbId) : ""),
-    events,
-    eventCount,
-    mutationRevision,
-    lastEventHash: cached?.lastEventHash ?? null,
+    edbId: String(meta.edb_id || ""),
     promptSubmissionRevision: Number(meta.prompt_submission_revision || 0),
     inputDraftRevision: Number(meta.input_draft_revision || 0),
     pendingPromptSubmission: null,
@@ -748,74 +592,8 @@ function createAgentStore(meta, cached = null, snapshot = state.snapshot) {
     projection: emptyProjection(),
     backgroundNextSyncAt: 0, backgroundFailures: 0,
     workmap: emptyWorkMap(),
-    turnHistory: null,
-    summary: projectAgentSummary(events),
-    projectedOrder: 0,
-    needsReplay: raw,
-    needsTurnHistory: false,
-    loadProgress: raw ? createAgentLoadProgress(meta, eventCount, mutationRevision) : null,
+    summary: projectionSummary(null),
   };
-}
-
-async function hydrateEdbCache(snapshot) {
-  if (!snapshot) throw new Error("同步响应未提供缓存元数据");
-  const generation = state.syncGeneration;
-  state.snapshot = snapshot;
-  state.snapshotInitialized = true;
-  reconcileAgents();
-  renderAgents();
-  const entries = await loadEdbCacheEntries(snapshot);
-  if (generation !== state.syncGeneration || state.pageClosing || usesUiProjection()) return;
-  const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
-  for (const entry of entries) {
-    if (entry.agentId && !agentIds.has(entry.agentId) && entry.key) void edbCache.discardSession(entry.key);
-  }
-  const cachedByAgent = cacheEntriesByAgent(snapshot, entries);
-  for (const meta of snapshot.agents || []) {
-    const cached = cachedByAgent.get(meta.id);
-    if (!cached || cacheEntryValid(cached, meta)) continue;
-    cachedByAgent.delete(meta.id);
-    if (cached.key) await edbCache.discardSession(cached.key);
-    if (generation !== state.syncGeneration || state.pageClosing || usesUiProjection()) return;
-  }
-  for (const meta of snapshot.agents || []) {
-    const cached = cachedByAgent.get(meta.id);
-    const previous = state.stores.get(meta.id);
-    const store = createAgentStore(meta, cached || null, snapshot);
-    if (previous) {
-      store.pendingPromptSubmission = previous.pendingPromptSubmission;
-      store.inputDraftRevision = previous.inputDraftRevision;
-      store.promptSubmissionRevision = previous.promptSubmissionRevision;
-    }
-    state.stores.set(meta.id, store);
-    if (!state.drafts.has(meta.id)) state.drafts.set(meta.id, String(meta.input_draft || ""));
-  }
-  state.edbCacheInitialized = true;
-  restoreDraft();
-  renderAll();
-}
-
-function persistWorkspaceAgentEdb(snapshot, meta, store, replace = false, batch = null) {
-  if (usesUiProjection()) return;
-  const scope = edbCacheScope(snapshot);
-  if (!store || !scope || !store.edbId) return;
-  edbCache.saveSession({
-    edbId: store.edbId,
-    scope,
-    agentId: meta.id,
-    mutationRevision: store.mutationRevision,
-    lastEventHash: store.lastEventHash,
-    gatewayLabel: frontendRuntime.endpoint || "",
-    workspaceLabel: MeEdbCache.workspaceName(scope),
-    sessionLabel: meta.title || meta.id,
-    events: store.events,
-    replace,
-    delta: batch ? { ...batch, reset: replace } : null,
-  });
-}
-
-function persistAgentEdb(meta, store, replace = false, batch = null) {
-  persistWorkspaceAgentEdb(state.snapshot, meta, store, replace, batch);
 }
 
 function setWindowBorderStyle(value) {
@@ -836,18 +614,8 @@ function currentProjection() {
 function emptyProjection() {
   return {
     messages: [], apiState: null, apiUsage: null, model: null, effort: null, turnState: null,
-    _activeAssistant: null,
-    _activeTools: new Map(),
-    _turnStartedAt: new Map(),
-    _turnContextBaseline: new Map(),
-    _lastAssistantByPrompt: new Map(),
-    _completedApiUsage: new Map(),
-    _erroredApis: new Set(),
-    _completedCompactTools: new Set(),
     _compactActivity: null,
-    _hiddenTools: new Set(),
     _messageByKey: new Map(),
-    _turn: null,
   };
 }
 
@@ -886,12 +654,10 @@ function emptyGatewayWorkspaceState() {
     },
     stores: new Map(), drafts: new Map(), draftSync: new Map(), promptDrafts: new Map(), selectedAgent: null,
     apiActivity: { agentId: null, active: false, receivedSseEvents: 0 },
-    eventRecovery: null,
     pendingAgentSelection: null, view: { kind: "chat", sessionId: null }, terminals: [],
     terminalRevisions: new Map(), terminalFollowBottom: true, expandedTools: new Set(),
-    expandedHistoryObjectives: new Set(), workerActivityIndexes: new Map(),
+    expandedHistoryObjectives: new Set(),
     terminalFrames: new Map(), terminalFramesUnavailable: new Set(), snapshotInitialized: false,
-    edbCacheInitialized: false, cacheValidated: false, catchUpPending: true,
     backgroundNextSyncAt: 0, backgroundFailures: 0,
     scrollTop: 0, followBottom: true,
   };
@@ -912,13 +678,12 @@ function captureActiveWorkspace() {
   Object.assign(workspace, {
     snapshot: state.snapshot, stores: state.stores, drafts: state.drafts, draftSync: state.draftSync,
     promptDrafts: state.promptDrafts, selectedAgent: state.selectedAgent,
-    apiActivity: state.apiActivity, eventRecovery: state.eventRecovery,
+    apiActivity: state.apiActivity,
     pendingAgentSelection: state.pendingAgentSelection, view: state.view, terminals: state.terminals,
     terminalRevisions: state.terminalRevisions, terminalFollowBottom: state.terminalFollowBottom,
     expandedTools: state.expandedTools, expandedHistoryObjectives: state.expandedHistoryObjectives,
-    workerActivityIndexes: state.workerActivityIndexes, terminalFrames: state.terminalFrames,
+    terminalFrames: state.terminalFrames,
     terminalFramesUnavailable: state.terminalFramesUnavailable, snapshotInitialized: state.snapshotInitialized,
-    edbCacheInitialized: state.edbCacheInitialized, catchUpPending: state.activeCatchUpPending,
     backgroundNextSyncAt: 0,
     scrollTop: elements.transcript.scrollTop, followBottom: transcriptBottomFollower.isFollowing(),
   });
@@ -957,21 +722,16 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   state.selectedAgent = preferredAgent || workspace.selectedAgent;
   state.apiActivity = workspace.apiActivity;
   state.pendingAgentSelection = workspace.pendingAgentSelection;
-  state.eventRecovery = workspace.eventRecovery;
   state.view = workspace.view;
   state.terminals = workspace.terminals;
   state.terminalRevisions = workspace.terminalRevisions;
   state.terminalFollowBottom = workspace.terminalFollowBottom;
   state.expandedTools = workspace.expandedTools;
   state.expandedHistoryObjectives = workspace.expandedHistoryObjectives;
-  state.workerActivityIndexes = workspace.workerActivityIndexes;
   state.terminalFrames = workspace.terminalFrames;
   state.terminalFramesUnavailable = workspace.terminalFramesUnavailable;
   state.snapshotInitialized = workspace.snapshotInitialized;
-  state.edbCacheInitialized = workspace.edbCacheInitialized;
-  state.activeCatchUpPending = !workspace.edbCacheInitialized || workspace.catchUpPending;
-  const selectedMeta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
-  prepareSelectedEventRecovery(selectedMeta, null, true);
+  state.activeCatchUpPending = !workspace.snapshotInitialized;
   resetConnectionForInitialSync();
   state.pendingRender = emptyRenderRequest();
   state.composing = false;
@@ -989,44 +749,24 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
   });
   persistGatewaySelection(workspaceId, state.selectedAgent);
   if (state.workspaceId !== workspaceId) return;
-  const meta = state.snapshot.agents.find((agent) => agent.id === state.selectedAgent);
-  prepareSelectedEventRecovery(meta, null, true);
   renderAll();
   if (beginPolling) startHttpPolling();
   scheduleBackgroundWorkspaceSync(0);
 }
 
-function backgroundSyncProgressSignature(workspace) {
-  return JSON.stringify({
-    snapshotRevision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
-    agents: [...workspace.stores]
-      .map(([id, store]) => usesUiProjection()
-        ? [id, store.projectionRevision]
-        : [id, store.eventCount ?? store.events.length, store.mutationRevision])
-      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
-  });
-}
-
 function backgroundSyncRequestBody(workspace, agentId = null) {
   return {
     snapshot_revision: workspace.snapshotInitialized ? workspace.snapshot.revision : null,
-    ui_projection: usesUiProjection(),
-    agents: [...workspace.stores].map(([id, store]) => usesUiProjection()
-      ? {
+    ui_projection: true,
+    agents: [...workspace.stores].map(([id, store]) => (
+      {
         id, projection_revision: store.projectionRevision,
         ...(id === agentId ? { projection_window: {
           start: store.projectionStart, end: store.projectionEnd, count: store.projectionCount,
           follow_tail: true,
         } } : {}),
-      }
-      : {
-        id,
-        event_count: store.eventCount ?? store.events.length,
-        mutation_revision: store.mutationRevision,
-        cursor_event_hash: workspace.cacheValidated ? null : store.lastEventHash ?? null,
-      }),
-    cache_metadata_only: !usesUiProjection() && !workspace.edbCacheInitialized,
-    selected_agent: usesUiProjection() ? agentId : null,
+      })),
+    selected_agent: agentId,
     terminal_session: null,
     terminal_revision: null,
   };
@@ -1042,16 +782,12 @@ function backgroundSyncCanRun() {
 
 function backgroundSyncOperationCurrent(operation) {
   if (state.backgroundSyncOperation !== operation || operation.cancelled || state.pageClosing) return false;
-  if (operation.projection) {
-    const workspace = operation.workspaceId === state.workspaceId
-      ? state : state.workspaceStates.get(operation.workspaceId);
-    return usesUiProjection() && workspace === operation.workspace
-      && !(operation.workspaceId === state.workspaceId && operation.agentId === state.selectedAgent)
-      && (!operation.store || (operation.workspace.stores.get(operation.agentId) === operation.store
-        && operation.store.projection === operation.projectionBefore));
-  }
-  return state.workspaceId !== operation.workspaceId
-    && state.workspaceStates.get(operation.workspaceId) === operation.workspace;
+  const workspace = operation.workspaceId === state.workspaceId
+    ? state : state.workspaceStates.get(operation.workspaceId);
+  return workspace === operation.workspace
+    && !(operation.workspaceId === state.workspaceId && operation.agentId === state.selectedAgent)
+    && (!operation.store || (operation.workspace.stores.get(operation.agentId) === operation.store
+      && operation.store.projection === operation.projectionBefore));
 }
 
 function cancelBackgroundWorkspaceSync(workspaceId = null) {
@@ -1071,7 +807,7 @@ function scheduleBackgroundWorkspaceSync(delay = 0) {
   if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
   const dueAt = Math.max(
     Date.now() + Math.max(0, Number(delay) || 0),
-    usesUiProjection() ? state.backgroundNextRequestAt : 0,
+    state.backgroundNextRequestAt,
   );
   if (state.backgroundSyncTimer !== null && state.backgroundSyncDueAt <= dueAt) return;
   clearTimeout(state.backgroundSyncTimer);
@@ -1079,33 +815,8 @@ function scheduleBackgroundWorkspaceSync(delay = 0) {
   state.backgroundSyncTimer = setTimeout(() => {
     state.backgroundSyncTimer = null;
     state.backgroundSyncDueAt = null;
-    void requestBackgroundWorkspaceSync();
+    void requestBackgroundProjectionSync();
   }, Math.max(0, dueAt - Date.now()));
-}
-
-function nextBackgroundWorkspace(now = Date.now()) {
-  const ids = (state.gateway.workspaces || [])
-    .map((workspace) => workspace.id)
-    .filter((workspaceId) => workspaceId !== state.workspaceId);
-  if (!ids.length) return { workspaceId: null, workspace: null, wait: BACKGROUND_SYNC_IDLE_MS };
-  const start = state.backgroundSyncCursor % ids.length;
-  let earliest = Number.POSITIVE_INFINITY;
-  for (let offset = 0; offset < ids.length; offset += 1) {
-    const index = (start + offset) % ids.length;
-    const workspaceId = ids[index];
-    const workspace = gatewayWorkspaceState(workspaceId);
-    const nextAt = Math.max(0, Number(workspace.backgroundNextSyncAt) || 0);
-    earliest = Math.min(earliest, nextAt);
-    if (nextAt <= now) {
-      state.backgroundSyncCursor = (index + 1) % ids.length;
-      return { workspaceId, workspace, wait: 0 };
-    }
-  }
-  return {
-    workspaceId: null,
-    workspace: null,
-    wait: Math.max(0, Number.isFinite(earliest) ? earliest - now : BACKGROUND_SYNC_IDLE_MS),
-  };
 }
 
 function nextBackgroundProjection(now = Date.now()) {
@@ -1161,18 +872,16 @@ function reconcileBackgroundAgents(workspace, snapshot) {
   let changed = false;
   for (const id of workspace.stores.keys()) {
     if (ids.has(id)) continue;
-    discardStoredAgentEdb(snapshot, id, workspace.stores.get(id));
     workspace.stores.delete(id);
     workspace.drafts.delete(id);
     clearDraftBatch(workspace.draftSync.get(id));
     workspace.draftSync.delete(id);
-    workspace.workerActivityIndexes.delete(id);
     changed = true;
   }
   for (const meta of snapshot.agents || []) {
     let store = workspace.stores.get(meta.id);
     if (!store) {
-      store = createAgentStore(meta, null, snapshot);
+      store = createAgentStore(meta);
       workspace.stores.set(meta.id, store);
       workspace.drafts.set(meta.id, String(meta.input_draft || ""));
       changed = true;
@@ -1190,99 +899,6 @@ function reconcileBackgroundAgents(workspace, snapshot) {
       || snapshot.agents?.[0]?.id || null;
   }
   return changed;
-}
-
-async function hydrateBackgroundEdbCache(operation, snapshot) {
-  if (!snapshot) throw new Error("同步响应未提供缓存元数据");
-  if (!backgroundSyncOperationCurrent(operation)) return false;
-  const workspace = operation.workspace;
-  workspace.snapshot = snapshot;
-  reconcileBackgroundAgents(workspace, snapshot);
-  renderAgents();
-  const entries = await loadEdbCacheEntries(snapshot);
-  if (!backgroundSyncOperationCurrent(operation)) return false;
-  const agentIds = new Set((snapshot.agents || []).map((agent) => agent.id));
-  for (const entry of entries) {
-    if (entry.agentId && !agentIds.has(entry.agentId) && entry.key) void edbCache.discardSession(entry.key);
-  }
-  const cachedByAgent = cacheEntriesByAgent(snapshot, entries);
-  workspace.snapshot = snapshot;
-  workspace.snapshotInitialized = true;
-  workspace.stores.clear();
-  for (const meta of snapshot.agents || []) {
-    const cached = cachedByAgent.get(meta.id);
-    const valid = cacheEntryValid(cached, meta);
-    if (cached && !valid && cached.key) await edbCache.discardSession(cached.key);
-    workspace.stores.set(meta.id, createAgentStore(meta, valid ? cached : null, snapshot));
-    workspace.drafts.set(meta.id, String(meta.input_draft || ""));
-  }
-  workspace.edbCacheInitialized = true;
-  workspace.cacheValidated = false;
-  workspace.catchUpPending = true;
-  reconcileBackgroundAgents(workspace, snapshot);
-  return true;
-}
-
-function syncBackgroundAgentEvents(workspace, meta, payload) {
-  let store = workspace.stores.get(meta.id);
-  const loadingBefore = loadProgressSignature(store);
-  let changed = false;
-  if (!store) {
-    store = createAgentStore(meta, null, workspace.snapshot);
-    workspace.stores.set(meta.id, store);
-    workspace.drafts.set(meta.id, String(meta.input_draft || ""));
-    changed = true;
-  }
-  observeBackgroundInputDraft(workspace, meta, store);
-  store.promptSubmissionRevision = Number(meta.prompt_submission_revision || 0);
-  const previousEventCount = store.eventCount;
-  const previousMutationRevision = store.mutationRevision;
-  settleAgentLoadProgress(store);
-  prepareAgentLoadProgress(store, meta, payload, previousEventCount, previousMutationRevision);
-  if (!payload && store.eventCount === meta.event_count
-      && store.mutationRevision === meta.mutation_revision) {
-    return {
-      changed, summaryChanged: false,
-      loadChanged: loadingBefore !== loadProgressSignature(store),
-    };
-  }
-  if (!payload) {
-    return {
-      changed, summaryChanged: false,
-      loadChanged: loadingBefore !== loadProgressSignature(store),
-    };
-  }
-  const previousSummary = JSON.stringify(store.summary);
-  const events = Array.isArray(payload.events) ? payload.events : [];
-  if (payload.reset) {
-    store.events = events;
-    store.eventCount = events.length;
-    store.summary = projectAgentSummary(events);
-    store.projectedOrder = 0;
-    store.needsReplay = true;
-    workspace.workerActivityIndexes.delete(meta.id);
-  } else {
-    store.events.push(...events);
-    store.eventCount = previousEventCount + events.length;
-    updateAgentSummary(store.summary, events);
-  }
-  store.mutationRevision = payload.mutation_revision;
-  store.lastEventHash = payload.cursor_event_hash ?? null;
-  settleAgentLoadProgress(store);
-  if (payload.reset || events.length > 0) {
-    persistWorkspaceAgentEdb(workspace.snapshot, meta, store, Boolean(payload.reset), {
-      startOrder: payload.reset ? 0 : previousEventCount,
-      eventCount: Number(payload.event_count ?? store.eventCount),
-      expectedEventCount: previousEventCount,
-      expectedMutationRevision: previousMutationRevision,
-      events,
-    });
-  }
-  return {
-    changed: true,
-    summaryChanged: previousSummary !== JSON.stringify(store.summary),
-    loadChanged: loadingBefore !== loadProgressSignature(store),
-  };
 }
 
 function projectionTurnState(value) {
@@ -1530,10 +1146,6 @@ function installProjectionState(store, projectionState, range = null, retain = "
   }
 
   const transcriptFrom = firstProjectionDifference(previousMessages, messages);
-  store.events = [];
-  store.eventCount = Math.max(0, Number(projectionState.source_event_count) || 0);
-  store.mutationRevision = Math.max(0, Number(projectionState.source_mutation_revision) || 0);
-  store.lastEventHash = null;
   store.edbId = String(projectionState.edb_id || store.edbId || "");
   store.projection = projection;
   store.projectionRevision = projectionState.revision;
@@ -1545,11 +1157,6 @@ function installProjectionState(store, projectionState, range = null, retain = "
   if (count === 0) store.projectionLoading = false;
   store.summary = projectionSummary(projectionState.summary);
   store.workmap = projectionState.workmap || emptyWorkMap();
-  store.turnHistory = projectionState.context?.memory_content ?? null;
-  store.projectedOrder = 0;
-  store.needsReplay = false;
-  store.needsTurnHistory = false;
-  store.loadProgress = null;
   recordProjectionChanges(store, revisionChanged, transcriptFrom);
   return revisionChanged || transcriptFrom !== null;
 }
@@ -1610,7 +1217,7 @@ async function synchronizeProjectionBucket(bucket, payload, workspaceId, observe
   for (const meta of bucket.snapshot.agents || []) {
     let store = bucket.stores.get(meta.id);
     if (!store) {
-      store = createAgentStore(meta, null, bucket.snapshot);
+      store = createAgentStore(meta);
       bucket.stores.set(meta.id, store);
       bucket.drafts.set(meta.id, String(meta.input_draft || ""));
       if (bucket === state && meta.id === state.selectedAgent) restoreDraft();
@@ -1677,7 +1284,7 @@ function projectionRangeDirectionForViewport(store, viewportState, following) {
 }
 
 async function requestSelectedProjectionRange(direction, retain = null) {
-  if (!usesUiProjection() || !state.workspaceId || !state.selectedAgent) return false;
+  if (!state.workspaceId || !state.selectedAgent) return false;
   const generation = state.syncGeneration;
   const workspaceId = state.workspaceId;
   const agentId = state.selectedAgent;
@@ -1698,7 +1305,7 @@ async function requestSelectedProjectionRange(direction, retain = null) {
     const range = await fetchProjectionRange(
       store, agentId, projectionState, request, workspaceId,
     );
-    if (generation !== state.syncGeneration || !usesUiProjection()
+    if (generation !== state.syncGeneration
         || state.workspaceId !== workspaceId || state.selectedAgent !== agentId
         || currentStore() !== store || store.projectionRevision !== projectionState.revision) {
       return false;
@@ -1727,7 +1334,7 @@ async function requestSelectedProjectionRange(direction, retain = null) {
     scheduleSelectedProjectionRangeCheck();
     return changed;
   } catch (error) {
-    if (generation === state.syncGeneration && usesUiProjection()
+    if (generation === state.syncGeneration
         && state.workspaceId === workspaceId && state.selectedAgent === agentId) {
       store.projectionLoading = false;
       if (error.status === 401) { showLogin("登录已失效，请重新登录"); return false; }
@@ -1745,7 +1352,7 @@ function scheduleSelectedProjectionRangeCheck() {
   if (projectionRangeCheckFrame !== null) return;
   projectionRangeCheckFrame = requestAnimationFrame(() => {
     projectionRangeCheckFrame = null;
-    if (state.pageClosing || !usesUiProjection() || state.view.kind !== "chat") return;
+    if (state.pageClosing || state.view.kind !== "chat") return;
     const store = currentStore();
     if (!store || store.projectionLoading || store.projectionRangeLoading) return;
     const viewportState = transcriptVirtualizer?.inspect();
@@ -1758,8 +1365,7 @@ function scheduleSelectedProjectionRangeCheck() {
   });
 }
 
-async function applyBackgroundSyncState(workspace, payload, workspaceId, signal = null) {
-  if (!usesUiProjection()) return applyRawBackgroundSyncState(workspace, payload);
+async function applyBackgroundSyncState(workspace, payload, workspaceId) {
   const previousSnapshot = workspace.snapshot;
   if (payload.snapshot) {
     workspace.snapshot = payload.snapshot;
@@ -1775,28 +1381,8 @@ async function applyBackgroundSyncState(workspace, payload, workspaceId, signal 
     workspaceId,
     (meta, store) => observeBackgroundInputDraft(workspace, meta, store),
   );
-  workspace.edbCacheInitialized = true;
-  workspace.cacheValidated = true;
   return presentationChanged || structureChanged
     || changes.some((change) => change.changed || change.summaryChanged || change.loadChanged);
-}
-
-function applyRawBackgroundSyncState(workspace, payload) {
-  const previousSnapshot = workspace.snapshot;
-  if (payload.snapshot) {
-    workspace.snapshot = payload.snapshot;
-    workspace.snapshotInitialized = true;
-  }
-  if (!workspace.snapshotInitialized) throw new Error("同步响应未提供初始状态");
-  const presentationChanged = snapshotPresentationSignature(previousSnapshot)
-    !== snapshotPresentationSignature(workspace.snapshot);
-  const structureChanged = reconcileBackgroundAgents(workspace, workspace.snapshot);
-  const updates = new Map((payload.event_updates || []).map((update) => [update.agent_id, update]));
-  const eventChanges = workspace.snapshot.agents.map((meta) =>
-    syncBackgroundAgentEvents(workspace, meta, updates.get(meta.id)));
-  workspace.cacheValidated = true;
-  return presentationChanged || structureChanged
-    || eventChanges.some((change) => change.changed || change.summaryChanged || change.loadChanged);
 }
 
 async function requestBackgroundProjectionSync() {
@@ -1812,7 +1398,7 @@ async function requestBackgroundProjectionSync() {
   }
   const controller = typeof AbortController === "function" ? new AbortController() : null;
   const operation = {
-    ...candidate, controller, projection: true, projectionBefore: candidate.store?.projection,
+    ...candidate, controller, projectionBefore: candidate.store?.projection,
   };
   state.backgroundSyncOperation = operation;
   const cooldown = candidate.store || candidate.workspace;
@@ -1860,69 +1446,6 @@ async function requestBackgroundProjectionSync() {
   }
 }
 
-async function requestBackgroundWorkspaceSync() {
-  if (usesUiProjection()) return requestBackgroundProjectionSync();
-  if (!backgroundSyncCanRun() || state.backgroundSyncOperation) return;
-  const candidate = nextBackgroundWorkspace();
-  if (!candidate.workspaceId) {
-    scheduleBackgroundWorkspaceSync(candidate.wait);
-    return;
-  }
-  const controller = typeof AbortController === "function" ? new AbortController() : null;
-  const operation = {
-    workspaceId: candidate.workspaceId, workspace: candidate.workspace, controller,
-  };
-  state.backgroundSyncOperation = operation;
-  const progressBefore = backgroundSyncProgressSignature(candidate.workspace);
-  const timeout = setTimeout(() => controller?.abort(), HTTP_SYNC_TIMEOUT_MS);
-  let sidebarChanged = false;
-  try {
-    const message = await api("/api/sync", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      signal: controller?.signal,
-      body: JSON.stringify(backgroundSyncRequestBody(candidate.workspace)),
-    }, candidate.workspaceId);
-    if (!backgroundSyncOperationCurrent(operation)) return;
-    if (!usesUiProjection() && message.cache_metadata_only) {
-      if (!await hydrateBackgroundEdbCache(operation, message.snapshot)) return;
-      sidebarChanged = true;
-      candidate.workspace.backgroundFailures = 0;
-      candidate.workspace.backgroundNextSyncAt = 0;
-      candidate.workspace.catchUpPending = true;
-    } else {
-      sidebarChanged = await applyBackgroundSyncState(
-        candidate.workspace, message, candidate.workspaceId, controller?.signal,
-      );
-      if (!backgroundSyncOperationCurrent(operation)) return;
-      const madeProgress = progressBefore !== backgroundSyncProgressSignature(candidate.workspace);
-      candidate.workspace.backgroundFailures = 0;
-      candidate.workspace.catchUpPending = Boolean(message.more_events);
-      candidate.workspace.backgroundNextSyncAt = message.more_events && madeProgress
-        ? 0 : Date.now() + (message.more_events ? HTTP_SYNC_ACTIVE_MS : BACKGROUND_SYNC_IDLE_MS);
-    }
-    if (sidebarChanged) renderAgents();
-  } catch (error) {
-    if (!backgroundSyncOperationCurrent(operation)) return;
-    if (error.status === 401) {
-      showLogin("登录已失效，请重新登录");
-      return;
-    }
-    candidate.workspace.backgroundFailures += 1;
-    const retry = Math.min(
-      BACKGROUND_SYNC_RETRY_MAX_MS,
-      HTTP_SYNC_IDLE_MS * (2 ** Math.min(candidate.workspace.backgroundFailures - 1, 5)),
-    );
-    candidate.workspace.backgroundNextSyncAt = Date.now() + retry;
-  } finally {
-    clearTimeout(timeout);
-    if (state.backgroundSyncOperation === operation) {
-      state.backgroundSyncOperation = null;
-      scheduleBackgroundWorkspaceSync(0);
-    }
-  }
-}
-
 function applyGatewaySnapshot(snapshot) {
   state.gateway = snapshot;
   const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
@@ -1957,7 +1480,7 @@ async function refreshGatewayState() {
 
 function applyGatewayStartupMetadata(workspaceId, snapshot) {
   const workspace = gatewayWorkspaceState(workspaceId);
-  if (workspace.edbCacheInitialized) return;
+  if (workspace.snapshotInitialized) return;
   workspace.snapshot = snapshot;
   const ids = new Set((snapshot.agents || []).map((agent) => agent.id));
   if (!workspace.selectedAgent || !ids.has(workspace.selectedAgent)) {
@@ -2144,7 +1667,22 @@ function showApplication() {
   synchronizeWindowTitle(null);
 }
 
+function removeLegacyBrowserCache() {
+  try { globalThis.localStorage?.removeItem("me-raw-edb-decoding"); } catch (_) {}
+  try {
+    const request = globalThis.indexedDB?.deleteDatabase("me-edb-cache");
+    if (request) {
+      request.onerror = () => console.warn("Unable to remove legacy session cache", request.error);
+      // An older tab may hold the database open. Deletion stays pending without delaying startup.
+      request.onblocked = () => console.warn("Legacy session cache cleanup is waiting for older tabs to close");
+    }
+  } catch (error) {
+    console.warn("Unable to remove legacy session cache", error);
+  }
+}
+
 async function initializeAuthentication() {
+  removeLegacyBrowserCache();
   try {
     const bootstrap = await frontendRuntime.initialize();
     restoreRuntimeDevicePreferences();
@@ -2468,7 +2006,6 @@ function notePollingSuccess(authoritativeSelection, recoveryComplete = authorita
   state.stabilizingSuccesses += 1;
   const stableFor = Date.now() - (state.stabilizingSince ?? Date.now());
   if (recoveryComplete
-      && !bulkEventRecoveryActive()
       && state.stabilizingSuccesses >= CONNECTION_STABILIZE_SUCCESSES
       && stableFor >= CONNECTION_STABILIZE_MS) {
     markConnectionStable();
@@ -2481,29 +2018,12 @@ function scheduleHttpSync(delay) {
   state.syncTimer = setTimeout(requestHttpSync, delay);
 }
 
-function httpSyncProgressSignature() {
-  const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
-    ? `${state.selectedAgent}:${state.view.sessionId}` : null;
-  return JSON.stringify({
-    snapshotRevision: state.snapshotInitialized ? state.snapshot.revision : null,
-    agents: [...state.stores]
-      .map(([id, store]) => usesUiProjection()
-        ? [id, store.projectionRevision]
-        : [id, store.eventCount ?? store.events.length, store.mutationRevision])
-      .sort((left, right) => String(left[0]).localeCompare(String(right[0]))),
-    selectedAgent: state.selectedAgent,
-    terminalSession: state.view.kind === "terminal" ? state.view.sessionId : null,
-    terminalRevision: terminalKey ? state.terminalRevisions.get(terminalKey) ?? null : null,
-  });
-}
-
 async function requestHttpSync() {
   if (state.syncInFlight || !connectionCanPoll()) return;
   const generation = state.syncGeneration;
   const terminalKey = state.view.kind === "terminal" && state.selectedAgent && state.view.sessionId
     ? `${state.selectedAgent}:${state.view.sessionId}` : null;
-  const progressBefore = httpSyncProgressSignature();
-  const projectionStore = usesUiProjection() ? state.stores.get(state.selectedAgent) : null;
+  const projectionStore = state.stores.get(state.selectedAgent);
   const projectionBefore = projectionStore?.projection;
   const followTail = projectionFollowing() || Boolean(projectionStore?.pendingPromptSubmission);
   state.syncInFlight = true;
@@ -2517,24 +2037,14 @@ async function requestHttpSync() {
       signal: controller?.signal,
       body: JSON.stringify({
         snapshot_revision: state.snapshotInitialized ? state.snapshot.revision : null,
-        ui_projection: usesUiProjection(),
-        agents: [...state.stores].map(([id, store]) => usesUiProjection()
-          ? {
+        ui_projection: true,
+        agents: [...state.stores].map(([id, store]) => ({
             id, projection_revision: store.projectionRevision,
             ...(id === state.selectedAgent ? { projection_window: {
               start: store.projectionStart, end: store.projectionEnd, count: store.projectionCount,
               follow_tail: followTail,
             } } : {}),
-          }
-          : {
-            id,
-            event_count: store.eventCount ?? store.events.length,
-            mutation_revision: store.mutationRevision,
-            cursor_event_hash: ["initial", "reconnecting"].includes(state.connectionPhase)
-                || (id === state.selectedAgent && store.needsTurnHistory)
-              ? store.lastEventHash ?? null : null,
-          }),
-        cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized,
+        })),
         selected_agent: state.selectedAgent,
         terminal_session: state.view.kind === "terminal" ? state.view.sessionId : null,
         terminal_revision: terminalKey ? state.terminalRevisions.get(terminalKey) ?? null : null,
@@ -2548,13 +2058,6 @@ async function requestHttpSync() {
       scheduleHttpSync(0);
       return;
     }
-    if (!usesUiProjection() && message.cache_metadata_only) {
-      await hydrateEdbCache(message.snapshot);
-      if (generation !== state.syncGeneration || state.pageClosing) return;
-      captureActiveWorkspace();
-      scheduleHttpSync(0);
-      return;
-    }
     try {
       await applySyncState(message, controller?.signal, followTail);
     } catch (error) {
@@ -2563,14 +2066,12 @@ async function requestHttpSync() {
       return failHttpSync("无法更新界面", error);
     }
     if (generation !== state.syncGeneration || state.pageClosing) return;
-    state.activeCatchUpPending = Boolean(message.more_events)
-      || (message.selected_agent ?? null) !== state.selectedAgent;
+    state.activeCatchUpPending = (message.selected_agent ?? null) !== state.selectedAgent;
     if (!state.activeCatchUpPending) scheduleBackgroundWorkspaceSync(0);
-    const madeProgress = progressBefore !== httpSyncProgressSignature();
     const delay = state.connectionPhase === "stabilizing"
-      || message.more_events || state.apiActivity.active || state.view.kind === "terminal"
+      || state.apiActivity.active || state.view.kind === "terminal"
       ? HTTP_SYNC_ACTIVE_MS : HTTP_SYNC_IDLE_MS;
-    scheduleHttpSync((message.more_events && madeProgress) || (message.selected_agent ?? null) !== state.selectedAgent ? 0 : delay);
+    scheduleHttpSync(state.activeCatchUpPending ? 0 : delay);
   } catch (error) {
     if (generation !== state.syncGeneration || state.pageClosing) return;
     state.activeCatchUpPending = true;
@@ -2601,7 +2102,6 @@ function requestHttpSyncNow() {
 }
 
 async function applySyncState(payload, signal = null, followTail = null) {
-  if (!usesUiProjection()) return applyRawSyncState(payload);
   const phaseBefore = state.connectionPhase;
   const generation = state.syncGeneration;
   const previousSnapshot = state.snapshot;
@@ -2616,9 +2116,7 @@ async function applySyncState(payload, signal = null, followTail = null) {
   const changes = await synchronizeProjectionBucket(
     state, payload, state.workspaceId, observeInputDraft, followTail,
   );
-  if (generation !== state.syncGeneration || signal?.aborted || !usesUiProjection()) return;
-  state.edbCacheInitialized = true;
-  state.eventRecovery = null;
+  if (generation !== state.syncGeneration || signal?.aborted) return;
   const selectedChanged = changes.some((change) =>
     change.changed && change.agentId === state.selectedAgent);
   const agentSummaryChanged = changes.some((change) => change.summaryChanged);
@@ -2650,160 +2148,6 @@ async function applySyncState(payload, signal = null, followTail = null) {
   if (!responseMatchesSelection) requestHttpSyncNow();
 }
 
-function applyRawSyncState(payload) {
-  const phaseBefore = state.connectionPhase;
-  const startingRecoveryCycle = phaseBefore === "initial" || phaseBefore === "reconnecting";
-  const hadBulkRecovery = bulkEventRecoveryActive();
-  const previousSnapshot = state.snapshot;
-  if (payload.snapshot) {
-    state.snapshot = payload.snapshot;
-    state.snapshotInitialized = true;
-  }
-  if (!state.snapshotInitialized) throw new Error("同步响应未提供初始状态");
-  const presentationChanged = snapshotPresentationSignature(previousSnapshot)
-    !== snapshotPresentationSignature(state.snapshot);
-  const selectionChanged = reconcileAgents();
-  const updates = new Map((payload.event_updates || []).map((update) => [update.agent_id, update]));
-  const selectedMeta = state.snapshot.agents.find((meta) => meta.id === state.selectedAgent);
-  const selectedUpdate = updates.get(state.selectedAgent);
-  prepareSelectedEventRecovery(
-    selectedMeta,
-    selectedUpdate,
-    startingRecoveryCycle || selectionChanged || Boolean(selectedUpdate?.reset),
-  );
-  const recoveryTransitionedToIncremental = hadBulkRecovery && !bulkEventRecoveryActive();
-  const eventChanges = state.snapshot.agents.map((meta) => syncAgentEvents(meta, updates.get(meta.id)));
-  const selectedEventsChanged = eventChanges.some((change) =>
-    change.changed && change.agentId === state.selectedAgent);
-  const selectedWorkerChanged = eventChanges.some((change) =>
-    change.changed && isWorkerForSelectedAgent(change.agentId));
-  const agentSummaryChanged = eventChanges.some((change) => change.summaryChanged);
-  const agentLoadChanged = eventChanges.some((change) => change.loadChanged);
-  const responseMatchesSelection = (payload.selected_agent ?? null) === state.selectedAgent;
-  const apiActivityChanged = responseMatchesSelection
-    ? syncApiActivity(payload.api_activity || {}) : false;
-  const terminalChanged = responseMatchesSelection
-    ? syncTerminals(payload.terminals || []) : false;
-  if (responseMatchesSelection && payload.terminal_frame_updated) {
-    syncTerminalFrame(payload.terminal_session, payload.terminal_frame ?? null);
-  }
-  const store = currentStore();
-  const recoveryReady = responseMatchesSelection && selectedEventRecoveryReady(
-    state.eventRecovery,
-    state.selectedAgent,
-    store?.mutationRevision,
-    store?.events.length,
-  );
-  let forceRecoveredReplay = false;
-  if (recoveryReady) {
-    store.projectedOrder = 0;
-    store.needsReplay = true;
-    state.eventRecovery = null;
-    forceRecoveredReplay = true;
-  }
-  const bulkRecoveryPending = bulkEventRecoveryActive();
-  notePollingSuccess(
-    responseMatchesSelection,
-    responseMatchesSelection && !payload.more_events,
-  );
-  const connectionChanged = phaseBefore !== state.connectionPhase;
-  requestRender({
-    full: !bulkRecoveryPending && (forceRecoveredReplay || startingRecoveryCycle || selectionChanged),
-    connection: connectionChanged,
-    agents: presentationChanged || agentSummaryChanged || agentLoadChanged,
-    tabs: presentationChanged || terminalChanged,
-    currentEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedEventsChanged,
-    workerEvents: !bulkRecoveryPending && !forceRecoveredReplay && selectedWorkerChanged,
-    apiActivity: !bulkRecoveryPending && !forceRecoveredReplay && apiActivityChanged,
-    status: !bulkRecoveryPending && !forceRecoveredReplay && apiActivityChanged,
-  });
-  if (bulkRecoveryPending) suppressBulkEventRecoveryRender();
-  if (forceRecoveredReplay || recoveryTransitionedToIncremental) flushPendingRender();
-  else if (!inputHasPriority()) flushPendingRender();
-  else if (state.view.kind === "terminal") renderTerminal();
-  for (const [agentId, sync] of state.draftSync) {
-    if (sync.sent !== sync.desired) void runDraftSync(agentId, sync);
-  }
-  if (!responseMatchesSelection) requestHttpSyncNow();
-}
-
-function eventRecoveryBacklog(authoritativeEventCount, localEventCount) {
-  return Math.max(0, Math.max(0, Number(authoritativeEventCount) || 0)
-    - Math.max(0, Number(localEventCount) || 0));
-}
-
-function shouldUseBulkEventRecovery(authoritativeEventCount, localEventCount) {
-  return eventRecoveryBacklog(authoritativeEventCount, localEventCount) > EVENT_RECOVERY_THRESHOLD;
-}
-
-function createEventRecovery(agentId, mutationRevision, authoritativeEventCount, localEventCount) {
-  if (!agentId || !shouldUseBulkEventRecovery(authoritativeEventCount, localEventCount)) return null;
-  return {
-    agentId,
-    mutationRevision: Number(mutationRevision) || 0,
-    startEventCount: Math.max(0, Number(localEventCount) || 0),
-    targetEventCount: Math.max(0, Number(authoritativeEventCount) || 0),
-  };
-}
-
-function eventRecoveryProgress(recovery, localEventCount) {
-  if (!recovery) return 0;
-  const start = Math.max(0, Number(recovery.startEventCount) || 0);
-  const target = Math.max(start, Number(recovery.targetEventCount) || 0);
-  if (target === start) return 1;
-  const current = Math.max(0, Number(localEventCount) || 0);
-  return Math.min(1, Math.max(0, current - start) / (target - start));
-}
-
-function eventRecoveryMatches(recovery, agentId, mutationRevision) {
-  return Boolean(recovery) && recovery.agentId === agentId
-    && recovery.mutationRevision === (Number(mutationRevision) || 0);
-}
-
-function selectedEventRecoveryReady(recovery, agentId, mutationRevision, localEventCount) {
-  return eventRecoveryMatches(recovery, agentId, mutationRevision)
-    && Math.max(0, Number(localEventCount) || 0) >= recovery.targetEventCount;
-}
-
-function prepareSelectedEventRecovery(meta, update, startCycle) {
-  if (usesUiProjection()) {
-    state.eventRecovery = null;
-    return false;
-  }
-  if (!meta || meta.id !== state.selectedAgent) {
-    state.eventRecovery = null;
-    return false;
-  }
-  const mutationRevision = Number(update?.mutation_revision ?? meta.mutation_revision) || 0;
-  if (state.eventRecovery
-      && !eventRecoveryMatches(state.eventRecovery, meta.id, mutationRevision)) {
-    state.eventRecovery = null;
-  }
-  if (state.eventRecovery) return true;
-  if (!startCycle) return false;
-  const store = state.stores.get(meta.id);
-  const localEventCount = update?.reset || store?.mutationRevision !== mutationRevision
-    ? 0 : store?.events.length || 0;
-  const authoritativeEventCount = update?.event_count ?? meta.event_count;
-  state.eventRecovery = createEventRecovery(
-    meta.id, mutationRevision, authoritativeEventCount, localEventCount,
-  );
-  if (state.eventRecovery) suppressBulkEventRecoveryRender();
-  return Boolean(state.eventRecovery);
-}
-
-function bulkEventRecoveryActive() {
-  return Boolean(state.eventRecovery) && state.eventRecovery.agentId === state.selectedAgent;
-}
-
-function suppressBulkEventRecoveryRender() {
-  state.pendingRender.full = false;
-  state.pendingRender.currentEvents = false;
-  state.pendingRender.workerEvents = false;
-  state.pendingRender.apiActivity = false;
-  state.pendingRender.status = false;
-}
-
 function inputHasPriority() {
   return state.composing || performance.now() - state.lastInputAt < INPUT_ANIMATION_QUIET_MS;
 }
@@ -2815,7 +2159,6 @@ function emptyRenderRequest() {
     agents: false,
     tabs: false,
     currentEvents: false,
-    workerEvents: false,
     apiActivity: false,
     status: false,
   };
@@ -2855,12 +2198,6 @@ function snapshotPresentationSignature(snapshot) {
   });
 }
 
-function isWorkerForSelectedAgent(agentId) {
-  const meta = state.snapshot.agents.find((agent) => agent.id === agentId);
-  return meta?.kind === "sub-agent" && meta.orchestrator === "worker-agent"
-    && meta.parent_agent_id === state.selectedAgent;
-}
-
 function reconcileAgents() {
   const previousAgent = state.selectedAgent;
   const previousView = `${state.view.kind}:${state.view.sessionId || ""}`;
@@ -2868,13 +2205,11 @@ function reconcileAgents() {
   const ids = new Set(state.snapshot.agents.map((agent) => agent.id));
   for (const id of state.stores.keys()) {
     if (!ids.has(id)) {
-      discardStoredAgentEdb(state.snapshot, id, state.stores.get(id));
       state.stores.delete(id);
       state.drafts.delete(id);
       clearDraftBatch(state.draftSync.get(id));
       state.promptDrafts.delete(id);
       state.draftSync.delete(id);
-      state.workerActivityIndexes.delete(id);
       changed = true;
     }
   }
@@ -2895,81 +2230,6 @@ function reconcileAgents() {
   }
   return changed || previousAgent !== state.selectedAgent
     || previousView !== `${state.view.kind}:${state.view.sessionId || ""}`;
-}
-
-function syncAgentEvents(meta, payload) {
-  let store = state.stores.get(meta.id);
-  const loadingBefore = loadProgressSignature(store);
-  let changed = false;
-  if (!store) {
-    store = createAgentStore(meta, null, state.snapshot);
-    state.stores.set(meta.id, store);
-    const initialDraft = String(meta.input_draft || "");
-    state.drafts.set(meta.id, initialDraft);
-    if (state.selectedAgent === meta.id && elements.input.value !== initialDraft) {
-      elements.input.value = initialDraft;
-      autoSizeInput(true);
-    }
-    changed = true;
-  }
-  observeInputDraft(meta, store);
-  const previousEventCount = store.eventCount;
-  const previousMutationRevision = store.mutationRevision;
-  settleAgentLoadProgress(store);
-  prepareAgentLoadProgress(store, meta, payload, previousEventCount, previousMutationRevision);
-  if (!payload && store.eventCount === meta.event_count
-      && store.mutationRevision === meta.mutation_revision) {
-    observePromptSubmission(meta, store);
-    return {
-      agentId: meta.id, changed, summaryChanged: false,
-      loadChanged: loadingBefore !== loadProgressSignature(store),
-    };
-  }
-  // A large initial replay is transferred in bounded batches. Agents without a
-  // batch in this response remain pending and are requested again immediately.
-  if (!payload) {
-    return {
-      agentId: meta.id, changed, summaryChanged: false,
-      loadChanged: loadingBefore !== loadProgressSignature(store),
-    };
-  }
-  const previousSummary = JSON.stringify(store.summary);
-  const events = Array.isArray(payload.events) ? payload.events : [];
-  if (payload.reset) {
-    store.events = events;
-    store.eventCount = events.length;
-    store.summary = projectAgentSummary(events);
-    store.projectedOrder = 0;
-    store.needsReplay = true;
-    state.workerActivityIndexes.delete(meta.id);
-  } else {
-    store.events.push(...events);
-    store.eventCount = previousEventCount + events.length;
-    updateAgentSummary(store.summary, events);
-  }
-  store.mutationRevision = payload.mutation_revision;
-  store.lastEventHash = payload.cursor_event_hash ?? null;
-  settleAgentLoadProgress(store);
-  if (payload.reset || events.length > 0) {
-    persistAgentEdb(meta, store, Boolean(payload.reset), {
-      startOrder: payload.reset ? 0 : previousEventCount,
-      eventCount: Number(payload.event_count ?? store.eventCount),
-      expectedEventCount: previousEventCount,
-      expectedMutationRevision: previousMutationRevision,
-      events,
-    });
-  }
-  if (payload.turn_history_updated) {
-    store.turnHistory = payload.turn_history ?? null;
-    store.needsTurnHistory = false;
-  }
-  observePromptSubmission(meta, store);
-  return {
-    agentId: meta.id,
-    changed: true,
-    summaryChanged: previousSummary !== JSON.stringify(store.summary),
-    loadChanged: loadingBefore !== loadProgressSignature(store),
-  };
 }
 
 function observeInputDraft(meta, store) {
@@ -3027,28 +2287,8 @@ function adoptInputDraft(agentId, store, revision, content) {
   return true;
 }
 
-function projectAgentSummary(events) {
-  const summary = { turnState: null };
-  updateAgentSummary(summary, events);
-  return summary;
-}
-
-function updateAgentSummary(summary, events) {
-  for (const event of events) {
-    const [kind, value] = eventParts(event);
-    if (kind === "AgentTurn") summary.turnState = value.state;
-  }
-}
-
 function sidebarAgentActive(summary) {
   return normalize(summary?.turnState) === "started";
-}
-
-function observePromptSubmission(meta, store) {
-  const revision = Number(meta.prompt_submission_revision || 0);
-  if (revision === store.promptSubmissionRevision) return false;
-  store.promptSubmissionRevision = revision;
-  return true;
 }
 
 function syncTerminals(sessions) {
@@ -3080,88 +2320,6 @@ function terminalListSignature(sessions) {
   return JSON.stringify(sessions.map((session) => [
     session.session_id, session.creation_order, session.width, session.height,
   ]));
-}
-
-function effectiveUiEvents(events) {
-  const active = [];
-  for (const event of events) {
-    const [kind] = eventParts(event);
-    if (kind === "AgentKindDef" || kind === "SystemPrompt") continue;
-    if (kind === "ContextCleared") {
-      active.length = 0;
-      active.push(event);
-    } else {
-      active.push(event);
-    }
-  }
-  const activeCalls = new Map();
-  const assistCalls = new Map();
-  const errored = new Set();
-  for (const event of active) {
-    const [kind, value] = eventParts(event);
-    if (kind === "ApiStateUpdate") {
-      if (value.state === "Requesting") activeCalls.set(value.prompt_id, value.api_call_id);
-      if (value.state === "Completed" || value.state === "Interrupted") {
-        if (activeCalls.get(value.prompt_id) === value.api_call_id) activeCalls.delete(value.prompt_id);
-      }
-      if (value.state === "Error") {
-        errored.add(value.api_call_id);
-        if (activeCalls.get(value.prompt_id) === value.api_call_id) activeCalls.delete(value.prompt_id);
-      }
-    } else if (kind === "AssistResponse" && activeCalls.has(value.prompt_id)) {
-      assistCalls.set(value.id, activeCalls.get(value.prompt_id));
-    }
-  }
-  return active.filter((event) => {
-    const [kind, value] = eventParts(event);
-    if (kind === "AssistResponse") return !errored.has(assistCalls.get(value.id));
-    if (kind === "ModelContextItem") return !errored.has(value.api_call_id);
-    return true;
-  });
-}
-
-function effectiveConversationEvents(events) {
-  const active = [];
-  for (const event of events) {
-    const [kind, value] = eventParts(event);
-    if (kind === "AgentKindDef" || kind === "SystemPrompt"
-        || kind === "ModelChanged" || kind === "ReasoningEffortChanged") continue;
-    if (kind === "ContextCleared") active.length = 0;
-    else if (kind === "CompactStateUpdate" && value.state === "Completed") {
-      active.length = 0;
-      active.push(event);
-    } else active.push(event);
-  }
-  return effectiveUiEvents(active);
-}
-
-function projectChat(events) {
-  const effective = effectiveUiEvents(events);
-  const projection = emptyProjection();
-  projection._completedCompactTools = new Set(effective.flatMap((event) => {
-    const [kind, value] = eventParts(event);
-    return kind === "CompactStateUpdate" && value.state === "Completed" ? [value.tool_call_id] : [];
-  }));
-  projection._hiddenTools = new Set(effective.flatMap((event) => {
-    const [kind, value] = eventParts(event);
-    return kind === "ToolCall" && !toolIsChatVisible(value.name)
-      && !toolIsWorkerActivity(value.name) ? [value.id] : [];
-  }));
-  consumeChatEvents(projection, effective);
-  projection.model ||= [...events].reverse().map(eventParts)
-    .find(([kind]) => kind === "ModelChanged")?.[1].model || null;
-  projection.effort ||= [...events].reverse().map(eventParts)
-    .find(([kind]) => kind === "ReasoningEffortChanged")?.[1].effort || null;
-  return projection;
-}
-
-function chatAppendNeedsReplay(events) {
-  return events.some((event) => {
-    const [kind, value] = eventParts(event);
-    return kind === "ContextCleared"
-      || (kind === "CompactStateUpdate" && value.state === "Completed")
-      || (kind === "ApiStateUpdate" && value.state === "Error");
-  });
 }
 
 function emptyProjectionChanges() {
@@ -3197,374 +2355,9 @@ function markTranscriptChanged(changes, index) {
     ? index : Math.min(changes.transcriptFrom, index);
 }
 
-function appendProjectedMessage(projection, changes, message) {
-  message._projectionIndex = projection.messages.length;
-  message._localProjectionIndex = message._projectionIndex;
-  projection.messages.push(message);
-  if (message.key) projection._messageByKey.set(message.key, message);
-  markTranscriptChanged(changes, message._localProjectionIndex);
-  return message;
-}
-
 function markProjectedMessageChanged(changes, message) {
   const index = message?._localProjectionIndex ?? message?._projectionIndex;
   if (index != null) markTranscriptChanged(changes, index);
-}
-
-function markProjectedToolChanged(projection, changes, tool) {
-  const index = tool?._localMessageIndex ?? tool?._messageIndex;
-  if (index != null) markTranscriptChanged(changes, index);
-}
-
-function consumeChatEvents(projection, events) {
-  const changes = emptyProjectionChanges();
-
-  for (const event of events) {
-    const [kind, value] = eventParts(event);
-    switch (kind) {
-      case "ModelChanged":
-        projection.model = value.model;
-        projection.apiUsage = null;
-        changes.status = true;
-        if (value.cause !== "Initial") {
-          addNotice(projection, changes, `模型已变更为 ${value.model}`, value);
-        }
-        break;
-      case "ReasoningEffortChanged":
-        projection.effort = value.effort;
-        changes.status = true;
-        if (value.cause !== "Initial") {
-          addNotice(projection, changes,
-            value.cause === "ModelUnsupported" ? "思考强度不支持，已退回 unset" : `effort 已变更为 ${value.effort}`,
-            value);
-        }
-        break;
-      case "UserPrompt":
-        beginProjectedTurn(projection, value.id);
-        projection._turnStartedAt.set(value.id, value.timestamp_ms);
-        projection._turnContextBaseline.set(value.id, projection.apiUsage?.total_tokens ?? null);
-        appendProjectedMessage(projection, changes, {
-          key: `user:${value.id}`, revision: value.id, kind: "user",
-          content: value.content, timestamp: value.timestamp_ms, eventId: value.id,
-          rewindable: true,
-        });
-        projection._activeAssistant = null;
-        changes.turn = true;
-        break;
-      case "ManagerPrompt":
-      case "ParentAgentPrompt":
-        beginProjectedTurn(projection, value.id);
-        projection._turnStartedAt.set(value.id, value.timestamp_ms);
-        projection._turnContextBaseline.set(value.id, projection.apiUsage?.total_tokens ?? null);
-        appendProjectedMessage(projection, changes, {
-          key: `agent-prompt:${value.id}`, revision: value.id, kind: "user",
-          content: value.content, timestamp: value.timestamp_ms, eventId: value.id,
-          rewindable: false,
-        });
-        projection._activeAssistant = null;
-        changes.turn = true;
-        break;
-      case "FollowUpPrompt":
-        appendProjectedMessage(projection, changes, {
-          key: `user:${value.id}`, revision: value.id, kind: "user",
-          content: value.content, timestamp: value.timestamp_ms, eventId: value.id,
-          rewindable: false,
-        });
-        projection._activeAssistant = null;
-        break;
-      case "AssistResponse":
-        if (value.content) {
-          if (!projection._activeAssistant
-              || projection._activeAssistant.promptId !== value.prompt_id) {
-            const message = {
-              key: `assistant:${value.prompt_id}:${value.id}`, revision: value.id,
-              kind: "assistant", content: "", timestamp: value.timestamp_ms,
-            };
-            appendProjectedMessage(projection, changes, message);
-            projection._activeAssistant = { promptId: value.prompt_id, message };
-            projection._lastAssistantByPrompt.set(value.prompt_id, message);
-          }
-          projection._activeAssistant.message.content += value.content;
-          projection._activeAssistant.message.revision = value.id;
-          markProjectedMessageChanged(changes, projection._activeAssistant.message);
-        }
-        if (value.finished) {
-          projection._activeAssistant = null;
-          finishProjectedAssistant(projection, value.prompt_id);
-          changes.turn = true;
-        }
-        break;
-      case "AgentTurn": {
-        const stateName = normalize(value.state);
-        if (stateName === "completed") {
-          const assistant = projection._lastAssistantByPrompt.get(value.prompt_id);
-          const started = projection._turnStartedAt.get(value.prompt_id);
-          if (assistant && started != null
-              && projection.messages[projection.messages.length - 1] === assistant
-              && assistantContentHasRenderableContent(assistant.content)) {
-            appendProjectedMessage(projection, changes, {
-              key: `turn-toolbar:${value.turn_id}`, revision: value.id, kind: "turn-toolbar",
-              timestamp: value.timestamp_ms,
-              finalAnswerEventId: value.id,
-              promptId: value.prompt_id,
-              durationMs: Math.max(0, Number(value.timestamp_ms) - Number(started)),
-              tokenCount: completedTurnContextGrowth(
-                projection._completedApiUsage,
-                value.prompt_id,
-                projection._turnContextBaseline.get(value.prompt_id) ?? null,
-              ),
-            });
-          }
-        }
-        finishProjectedTurn(projection, value.prompt_id, stateName);
-        changes.turn = true;
-        break;
-      }
-      case "ApiStateUpdate":
-        projection.apiState = value.state;
-        updateProjectedApiState(projection, value);
-        changes.status = true;
-        changes.turn = true;
-        if (value.state === "Completed") {
-          projection.apiUsage = value.usage;
-          projection._completedApiUsage.set(value.api_call_id, {
-            promptId: value.prompt_id,
-            usage: value.usage ?? null,
-          });
-        }
-        if (value.state === "Error") {
-          projection._erroredApis.add(value.api_call_id);
-          addNotice(projection, changes, `API 错误：${value.detail}`, value);
-        }
-        if (value.state === "Retrying") {
-          addNotice(projection, changes, `API 正在重试 ${value.retry_count}/${value.retry_limit}`, value);
-        }
-        if (value.state === "Interrupted") {
-          if (!projection._erroredApis.has(value.api_call_id)) projection.apiUsage = value.usage;
-          else {
-            addNotice(projection, changes, `API 已中断：${value.detail}`, value);
-          }
-        }
-        break;
-      case "ToolCall": {
-        openProjectedTool(projection, value);
-        changes.turn = true;
-        const workerActivity = toolIsWorkerActivity(value.name);
-        if (!toolIsChatVisible(value.name) && !workerActivity) {
-          projection._hiddenTools.add(value.id);
-          break;
-        }
-        if (projection._completedCompactTools.has(value.id)) break;
-        const queued = [...projection._activeTools.values()]
-          .some((tool) => tool.apiCallId === value.api_call_id);
-        const args = safeJson(value.arguments);
-        const tool = {
-          id: value.id, apiCallId: value.api_call_id, name: value.name, arguments: value.arguments,
-          args, started: value.timestamp_ms, queued, sessionId: args?.session_id || null,
-          output: "", updates: [], result: null, revision: value.id,
-        };
-        const message = appendProjectedMessage(projection, changes, {
-          key: `tool:${value.id}`, revision: value.id,
-          kind: workerActivity ? "worker-activity" : "tool",
-          timestamp: value.timestamp_ms, tool,
-        });
-        tool._messageIndex = message._projectionIndex;
-        projection._activeTools.set(value.id, tool);
-        break;
-      }
-      case "ToolInfoUpdate": {
-        if (projection._hiddenTools.has(value.tool_call_id)) break;
-        if (projection._completedCompactTools.has(value.tool_call_id)) break;
-        const tool = projection._activeTools.get(value.tool_call_id);
-        if (tool) {
-          tool.updates.push(value.content);
-          tool.output += toolInfoText(value.content);
-          tool.revision = value.id;
-          markProjectedToolChanged(projection, changes, tool);
-        }
-        break;
-      }
-      case "ToolCallResult": {
-        closeProjectedTool(projection, value.tool_call_id);
-        changes.turn = true;
-        if (projection._hiddenTools.has(value.tool_call_id)) break;
-        if (projection._completedCompactTools.has(value.tool_call_id)) break;
-        const tool = projection._activeTools.get(value.tool_call_id);
-        if (!tool) break;
-        tool.result = { state: value.state, exitCode: value.exit_code, detail: value.detail, finished: value.timestamp_ms };
-        tool.revision = value.id;
-        if (!tool.sessionId && tool.name === "Terminal.Create") tool.sessionId = safeJson(value.detail)?.session_id || null;
-        projection._activeTools.delete(value.tool_call_id);
-        const next = [...projection._activeTools.values()]
-          .find((candidate) => candidate.apiCallId === tool.apiCallId && candidate.queued);
-        if (next) {
-          next.queued = false;
-          next.started = value.timestamp_ms;
-          next.revision = value.id;
-          markProjectedToolChanged(projection, changes, next);
-        }
-        markProjectedToolChanged(projection, changes, tool);
-        break;
-      }
-      case "TerminalSessionCreated": {
-        const tool = projection._activeTools.get(value.tool_call_id);
-        if (tool) {
-          tool.sessionId = value.session_id;
-          tool.revision = value.id;
-          markProjectedToolChanged(projection, changes, tool);
-        }
-        break;
-      }
-      case "TerminalSessionState":
-        appendProjectedMessage(projection, changes, {
-          key: `session:${value.id}`, revision: value.id,
-          kind: "session", timestamp: value.timestamp_ms,
-          content: `Session ${value.session_id} ${normalize(value.state)} · exit_code=${value.exit_code ?? "None"} · ${value.detail}`,
-        });
-        break;
-      case "UserTurnAborted":
-        abortProjectedTurn(projection, value.prompt_id);
-        changes.turn = true;
-        break;
-      case "ContextCleared":
-        addNotice(projection, changes, "上下文已清空", value);
-        break;
-      case "SystemStaticPromptChange":
-        addNotice(
-          projection,
-          changes,
-          normalize(value.mode) === "custom"
-            ? `系统提示词已更新\n${String(value.content ?? "")}`
-            : "系统提示词已恢复默认",
-          value,
-        );
-        break;
-      case "CompactStateUpdate":
-        if (value.state === "Started") {
-          beginCompactActivity(projection, changes, value);
-        } else if (value.state === "StageCompleted") {
-          advanceCompactActivity(projection, changes, value);
-        } else if (value.state === "Completed") {
-          projection.apiUsage = null;
-          projection._turn = null;
-          projection.turnState = null;
-          projection._turnContextBaseline.set(value.prompt_id, null);
-          for (const [apiCallId, entry] of projection._completedApiUsage) {
-            if (entry.promptId === value.prompt_id) projection._completedApiUsage.delete(apiCallId);
-          }
-          finishCompactActivity(projection, changes, value, "上下文已压缩");
-          changes.status = true;
-        } else if (value.state === "Failed") {
-          finishCompactActivity(projection, changes, value, "压缩失败");
-        } else if (value.state === "Interrupted") {
-          finishCompactActivity(projection, changes, value, "压缩中断");
-        }
-        break;
-      case "CloneCompleted":
-        addNotice(projection, changes, `克隆完成。新会话：${value.title}`, value);
-        break;
-      default:
-        break;
-    }
-  }
-  refreshProjectedTurnState(projection);
-  return changes;
-}
-
-function beginProjectedTurn(projection, promptId) {
-  projection._turn = {
-    promptId,
-    aborted: false,
-    terminal: false,
-    apiStates: new Map(),
-    openTools: new Set(),
-    latestApiCallId: null,
-    latestApiHasTool: false,
-    latestApiHasFinal: false,
-  };
-  refreshProjectedTurnState(projection);
-}
-
-function updateProjectedApiState(projection, update) {
-  const turn = projection._turn;
-  if (!turn || turn.promptId !== update.prompt_id) return;
-  turn.apiStates.set(update.api_call_id, update.state);
-  if (update.state === "Requesting") {
-    turn.latestApiCallId = update.api_call_id;
-    turn.latestApiHasTool = false;
-    turn.latestApiHasFinal = false;
-    turn.terminal = false;
-  } else if (["Streaming", "Retrying"].includes(update.state)) {
-    turn.terminal = false;
-  } else if (["Error", "Interrupted"].includes(update.state)) {
-    turn.terminal = true;
-  }
-  refreshProjectedTurnState(projection);
-}
-
-function openProjectedTool(projection, call) {
-  const turn = projection._turn;
-  if (!turn || turn.promptId !== call.prompt_id) return;
-  turn.openTools.add(call.id);
-  if (turn.latestApiCallId === call.api_call_id) turn.latestApiHasTool = true;
-  turn.terminal = false;
-  refreshProjectedTurnState(projection);
-}
-
-function closeProjectedTool(projection, toolCallId) {
-  const turn = projection._turn;
-  if (!turn) return;
-  turn.openTools.delete(toolCallId);
-  refreshProjectedTurnState(projection);
-}
-
-function finishProjectedAssistant(projection, promptId) {
-  const turn = projection._turn;
-  if (!turn || turn.promptId !== promptId) return;
-  turn.latestApiHasFinal = true;
-  if (!turn.latestApiHasTool) turn.terminal = true;
-  refreshProjectedTurnState(projection);
-}
-
-function finishProjectedTurn(projection, promptId, stateName) {
-  const turn = projection._turn;
-  if (!turn || turn.promptId !== promptId || stateName === "started") return;
-  turn.terminal = true;
-  refreshProjectedTurnState(projection);
-}
-
-function abortProjectedTurn(projection, promptId) {
-  const turn = projection._turn;
-  if (!turn || turn.promptId !== promptId) return;
-  turn.aborted = true;
-  refreshProjectedTurnState(projection);
-}
-
-function refreshProjectedTurnState(projection) {
-  const turn = projection._turn;
-  if (!turn) {
-    projection.turnState = null;
-    return;
-  }
-  if (turn.aborted) {
-    const terminalStates = new Set(["Completed", "Error", "Interrupted"]);
-    const settled = [...turn.apiStates.values()].every((stateName) => terminalStates.has(stateName))
-      && turn.openTools.size === 0;
-    projection.turnState = { state: settled ? "aborted" : "aborting", promptId: turn.promptId };
-    return;
-  }
-  const apiState = turn.latestApiCallId == null ? null : turn.apiStates.get(turn.latestApiCallId);
-  const active = ["Requesting", "Streaming", "Retrying"].includes(apiState)
-    || turn.openTools.size > 0
-    || !turn.terminal;
-  projection.turnState = { state: active ? "active" : "completed", promptId: turn.promptId };
-}
-
-function addNotice(projection, changes, content, event) {
-  return appendProjectedMessage(projection, changes, {
-    key: `notice:${event.id}`, revision: event.id,
-    kind: "notice", content, timestamp: event.timestamp_ms,
-  });
 }
 
 function compactStageCount(kind, totalStages = null) {
@@ -3579,39 +2372,6 @@ function compactProgressText(kind, stage, receivedSseEvents = null, totalStages 
   const progress = `正在压缩 (${current}/${total}) ...`;
   return receivedSseEvents == null
     ? progress : `${progress} ↓ ${Math.max(0, Number(receivedSseEvents) || 0)}`;
-}
-
-function refreshCompactActivity(projection, changes, revision) {
-  const activity = projection._compactActivity;
-  if (!activity) return;
-  activity.message.content = compactProgressText(
-    activity.kind, activity.stage, null, activity.totalStages,
-  );
-  activity.message.revision = revision;
-  markProjectedMessageChanged(changes, activity.message);
-}
-
-function beginCompactActivity(projection, changes, event) {
-  const totalStages = compactStageCount(event.kind, event.total_stages);
-  const message = appendProjectedMessage(projection, changes, {
-    key: `compact:${event.compact_id}`, revision: event.id,
-    kind: "notice", content: compactProgressText(event.kind, 1, null, totalStages),
-    timestamp: event.timestamp_ms,
-  });
-  projection._compactActivity = {
-    compactId: event.compact_id,
-    kind: event.kind,
-    totalStages,
-    stage: 1,
-    message,
-  };
-}
-
-function advanceCompactActivity(projection, changes, event) {
-  const activity = projection._compactActivity;
-  if (!activity || activity.compactId !== event.compact_id) return;
-  activity.stage = Math.min(activity.stage + 1, activity.totalStages);
-  refreshCompactActivity(projection, changes, event.id);
 }
 
 function applyCompactApiActivity(projection, apiActivity) {
@@ -3629,113 +2389,14 @@ function applyCompactApiActivity(projection, apiActivity) {
   return changes;
 }
 
-function finishCompactActivity(projection, changes, event, content) {
-  const activity = projection._compactActivity;
-  if (activity && activity.compactId === event.compact_id) {
-    activity.message.content = content;
-    activity.message.timestamp = event.timestamp_ms;
-    activity.message.revision = event.id;
-    delete activity.message.presentationRevision;
-    markProjectedMessageChanged(changes, activity.message);
-    projection._compactActivity = null;
-  } else {
-    addNotice(projection, changes, content, event);
-  }
-}
-
-function toolInfoText(content) {
-  if (!content) return "";
-  if (content.kind === "text") return content.value || "";
-  if (content.kind === "terminal") {
-    return (content.value?.rows || []).map((row) => `${String(row.row).padStart(6, "0")}: ${terminalRowText(row)}`).join("\n");
-  }
-  return "";
-}
-
-function terminalRowText(row) {
-  let output = "", column = 0;
-  for (const run of row.runs || []) {
-    if (run.col > column) output += " ".repeat(run.col - column);
-    output += run.text;
-    column = run.col + run.width;
-  }
-  return output.replace(/\s+$/, "");
-}
-
 function safeJson(value) {
   try { return JSON.parse(value); } catch { return null; }
-}
-
-function toolIsChatVisible(name) {
-  if (toolIsWorkerActivity(name)) return false;
-  const policy = state.snapshot.tool_visibility || {};
-  return !(policy.hidden_names || []).includes(name)
-    && !(policy.hidden_prefixes || []).some((prefix) => name.startsWith(prefix));
-}
-
-function toolIsWorkerActivity(name) {
-  return (state.snapshot.tool_visibility?.activity_names || []).includes(name);
 }
 
 function emptyWorkMap() {
   return {
     memory: { facts: [], agreements: [] }, history: [], current: null, recordCount: 0,
-    _records: new Map(),
   };
-}
-
-function projectWorkMap(events) {
-  const workmap = emptyWorkMap();
-  consumeWorkMapEvents(workmap, events);
-  return workmap;
-}
-
-function consumeWorkMapEvents(workmap, events) {
-  let changed = false;
-  for (const event of events) {
-    const [kind, value] = eventParts(event);
-    if (kind === "ContextCleared") {
-      workmap._records.clear();
-      changed = true;
-      continue;
-    }
-    if (kind !== "WorkMapMutation") continue;
-    for (const record of value.mutation.records || []) {
-      const recordType = record.kind;
-      const data = record.record;
-      if (data?.id) {
-        workmap._records.set(data.id, { recordType, ...data });
-        changed = true;
-      }
-    }
-  }
-  if (!changed) return false;
-  materializeWorkMap(workmap);
-  return true;
-}
-
-function materializeWorkMap(workmap) {
-  const records = workmap._records;
-  const objectives = [...records.values()].filter((record) => record.recordType === "objective")
-    .sort((a, b) => a.created_at_ms - b.created_at_ms);
-  const plans = [...records.values()].filter((record) => record.recordType === "plan");
-  const notes = [...records.values()].filter((record) => record.recordType === "note");
-  const memories = [...records.values()].filter((record) => record.recordType === "memory" && record.state === "active");
-  const objectiveSnapshot = (objective) => ({
-    objective,
-    plans: plans.filter((plan) => plan.objective_id === objective.id)
-      .sort((a, b) => a.order - b.order)
-      .map((plan) => ({ plan, notes: notes.filter((note) => note.plan_id === plan.id).sort((a, b) => a.sequence - b.sequence) })),
-  });
-  const current = objectives.find((objective) => objective.state === "active");
-  workmap.memory = {
-    facts: memories.filter((memory) => memory.kind === "fact"),
-    agreements: memories.filter((memory) => memory.kind === "agreement"),
-  };
-  workmap.history = objectives.filter((objective) => objective.state !== "active")
-    .map(objectiveSnapshot);
-  workmap.current = current ? objectiveSnapshot(current) : null;
-  workmap.recordCount = objectives.length + plans.length + notes.length + memories.length;
 }
 
 function flushPendingRender() {
@@ -3788,9 +2449,6 @@ function renderIncremental(request) {
   if (changes.transcript) {
     renderTranscript(Boolean(changes.fullReplay), changes.transcriptFrom ?? 0);
     transcriptChanged = true;
-  } else if (request.workerEvents && state.view.kind === "chat") {
-    refreshWorkerActivityCards();
-    transcriptChanged = true;
   }
   if (transcriptChanged) refreshRunningToolNodes();
   if (changes.workmap) {
@@ -3811,31 +2469,8 @@ function renderIncremental(request) {
 function advanceCurrentProjection() {
   const store = currentStore();
   if (!store) return emptyProjectionChanges();
-  if (usesUiProjection()) {
-    const changes = store.projectionChanges || emptyProjectionChanges();
-    store.projectionChanges = null;
-    return markPendingPromptConfirmation(store, changes);
-  }
-  if (bulkEventRecoveryActive()) return emptyProjectionChanges();
-  if (store.needsReplay) {
-    store.projection = projectChat(store.events);
-    store.workmap = projectWorkMap(store.events);
-    store.projectedOrder = store.events.length;
-    store.needsReplay = false;
-    return markPendingPromptConfirmation(store, {
-      transcript: true, status: true, turn: true, workmap: true, fullReplay: true,
-    });
-  }
-  const appended = store.events.slice(store.projectedOrder);
-  if (!appended.length) return markPendingPromptConfirmation(store, emptyProjectionChanges());
-  const fullReplay = chatAppendNeedsReplay(appended);
-  const changes = fullReplay
-    ? { transcript: true, transcriptFrom: 0, status: true, turn: true }
-    : consumeChatEvents(store.projection, appended);
-  if (fullReplay) store.projection = projectChat(store.events);
-  changes.workmap = consumeWorkMapEvents(store.workmap, appended);
-  changes.fullReplay = fullReplay;
-  store.projectedOrder = store.events.length;
+  const changes = store.projectionChanges || emptyProjectionChanges();
+  store.projectionChanges = null;
   return markPendingPromptConfirmation(store, changes);
 }
 
@@ -3896,19 +2531,11 @@ function workspaceMetadataReady(workspaceId) {
 function agentLoadingState(workspaceId, agentId) {
   const bucket = workspaceUiState(workspaceId);
   const meta = bucket.snapshot?.agents?.find((agent) => agent.id === agentId);
-  if (!meta) return { loading: false, percent: null };
+  if (!meta) return { loading: false };
   const store = bucket.stores.get(agentId);
   const selected = workspaceId === state.workspaceId && agentId === state.selectedAgent;
   const connecting = selected && state.connecting;
-  if (usesUiProjection()) {
-    return { loading: selected && Boolean(connecting || store?.projectionLoading || !store?.projectionState), percent: null };
-  }
-  if (!bucket.edbCacheInitialized || !store) return { loading: true, percent: null };
-  if (!store.loadProgress) return { loading: connecting, percent: null };
-  return {
-    loading: true,
-    percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100),
-  };
+  return { loading: selected && Boolean(connecting || store?.projectionLoading || !store?.projectionState) };
 }
 
 
@@ -4037,21 +2664,16 @@ function updateAgentRow(row, agent, workspaceId, bucket) {
   const summary = bucket.stores.get(agent.id)?.summary;
   const active = !loadingState.loading && sidebarAgentActive(summary);
   const label = agent.title || agent.id;
-  const loadingLabel = loadingState.percent == null ? "正在加载" : `正在加载 ${loadingState.percent}%`;
   row.classList.toggle("session-loading", loadingState.loading);
   row.classList.toggle("active", workspaceId === state.workspaceId && agent.id === state.selectedAgent);
   row.setAttribute("aria-busy", String(loadingState.loading));
   const item = row.querySelector(".agent-item");
-  item.title = loadingState.loading ? loadingLabel : "";
+  item.title = loadingState.loading ? "正在加载" : "";
   const dot = row.querySelector(".agent-dot");
   dot.classList.toggle("loading", loadingState.loading);
   dot.classList.toggle("active", active);
   const title = row.querySelector(".agent-label");
   if (title.textContent !== label) title.textContent = label;
-  const progress = row.querySelector(".agent-load-progress");
-  const progressText = loadingState.percent == null ? "" : `${loadingState.percent}%`;
-  if (progress.textContent !== progressText) progress.textContent = progressText;
-  progress.classList.toggle("hidden", !loadingState.loading || loadingState.percent == null);
   const deleteButton = row.querySelector(".agent-delete");
   deleteButton.setAttribute("aria-label", `删除 ${label}`);
   deleteButton.title = `删除 ${label}`;
@@ -4063,7 +2685,6 @@ function createAgentRow(agent, workspaceId = state.workspaceId) {
     <button class="agent-item" type="button" data-agent="${escapeAttr(agent.id)}">
       <span class="agent-dot" aria-hidden="true"></span>
       <span class="agent-label"></span>
-      <span class="agent-load-progress hidden" aria-hidden="true"></span>
     </button>
     <button class="agent-delete" type="button" data-agent-delete="${escapeAttr(agent.id)}" title="删除会话" aria-label="删除会话">
       <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16M9 7V4h6v3M7 7l1 13h8l1-13M10 11v5M14 11v5"/></svg>
@@ -4106,15 +2727,13 @@ function finishAgentSelection(id) {
   delete elements.terminalScreen.dataset.terminalKey;
   delete elements.terminalScreen.dataset.revision;
   restoreDraft();
-  const meta = state.snapshot.agents.find((agent) => agent.id === id);
-  prepareSelectedEventRecovery(meta, null, true);
   const store = currentStore();
-  if (usesUiProjection() && store?.projectionState
+  if (store?.projectionState
       && store.projectionCount > 0 && store.projectionEnd < store.projectionCount) {
     store.projectionLoading = true;
   }
   renderAll();
-  if (usesUiProjection()) void requestSelectedProjectionRange("tail");
+  void requestSelectedProjectionRange("tail");
   persistGatewaySelection(state.workspaceId, id);
   requestHttpSyncNow();
 }
@@ -4200,32 +2819,17 @@ function showView(view) {
 
 function systemPromptChanges(agentId = state.selectedAgent) {
   const store = state.stores.get(agentId);
-  if (usesUiProjection()) return store?.projectionState?.system_prompt?.changes || [];
-  return (store?.events || []).flatMap((event) => {
-    const [kind, value] = eventParts(event);
-    return kind === "SystemStaticPromptChange" ? [value] : [];
-  });
+  return store?.projectionState?.system_prompt?.changes || [];
 }
 
 function latestSystemPromptState(agentId = state.selectedAgent) {
   const defaultContent = String(state.snapshot.chatbot_default_static_prompt ?? "");
-  if (usesUiProjection()) {
-    const prompt = state.stores.get(agentId)?.projectionState?.system_prompt;
-    const custom = normalize(prompt?.mode) === "custom";
-    return {
-      mode: custom ? "Custom" : "Default",
-      content: custom ? String(prompt?.content ?? "") : defaultContent,
-      eventId: prompt?.event_id == null ? null : Number(prompt.event_id),
-    };
-  }
-  const changes = systemPromptChanges(agentId);
-  const latest = changes[changes.length - 1];
-  if (!latest) return { mode: "Default", content: defaultContent, eventId: null };
-  const custom = normalize(latest.mode) === "custom";
+  const prompt = state.stores.get(agentId)?.projectionState?.system_prompt;
+  const custom = normalize(prompt?.mode) === "custom";
   return {
     mode: custom ? "Custom" : "Default",
-    content: custom ? String(latest.content ?? "") : defaultContent,
-    eventId: Number(latest.id),
+    content: custom ? String(prompt?.content ?? "") : defaultContent,
+    eventId: prompt?.event_id == null ? null : Number(prompt.event_id),
   };
 }
 
@@ -4303,12 +2907,7 @@ function renderSystemPromptEditor() {
 
 function lastPhysicalEventId(agentId) {
   const store = state.stores.get(agentId);
-  if (usesUiProjection()) return Number(store?.projectionState?.last_event_id ?? -1);
-  return (store?.events || []).reduce((highest, event) => {
-    const [, value] = eventParts(event);
-    const id = Number(value.id);
-    return Number.isFinite(id) ? Math.max(highest, id) : highest;
-  }, -1);
+  return Number(store?.projectionState?.last_event_id ?? -1);
 }
 
 async function submitSystemPromptChange(mode) {
@@ -4693,7 +3292,7 @@ function messageRenderRevision(message, afterTool, followsTool = false) {
   const revision = message.kind === "tool" || message.kind === "worker-activity"
     ? message.tool.revision : message.revision;
   const workerRevision = message.kind === "worker-activity"
-    ? workerActivityForWait(message.tool)?.revision || 0 : 0;
+    ? message.tool.activity?.revision || 0 : 0;
   return `${revision ?? message.timestamp}:${message.presentationRevision || 0}:${workerRevision}:${afterTool ? 1 : 0}:${followsTool ? 1 : 0}:${expanded ? 1 : 0}`;
 }
 
@@ -4824,18 +3423,8 @@ function renderWorkerActivity(wait) {
   </div>`;
 }
 
-function refreshWorkerActivityCards() {
-  const projection = currentProjection();
-  elements.transcriptContent.querySelectorAll(":scope > [data-worker-wait]").forEach((node) => {
-    const message = projection._messageByKey.get(`tool:${node.dataset.workerWait}`);
-    if (!message) return;
-    updateWorkerActivityNode(node, message.tool);
-    node.meRenderRevision = messageRenderRevision(message, false);
-  });
-}
-
 function workerActivityView(wait) {
-  const activity = workerActivityForWait(wait);
+  const activity = wait.activity || null;
   const stateName = activity?.state || workerWaitState(wait);
   return {
     status: stateName === "completed" ? "succeeded"
@@ -4884,109 +3473,6 @@ function updateWorkerActivityNode(node, wait) {
     if (brief.textContent !== toolView.brief) brief.textContent = toolView.brief;
   }
   while (tools.children.length > view.tools.length) tools.lastElementChild.remove();
-}
-
-function workerActivityForWait(wait) {
-  if (usesUiProjection()) return wait.activity || null;
-  const worker = state.snapshot.agents.find((agent) => agent.kind === "sub-agent"
-    && agent.orchestrator === "worker-agent" && agent.parent_agent_id === state.selectedAgent);
-  if (!worker) return null;
-  const index = workerActivityIndex(worker);
-  const targetTurnId = Number(safeJson(wait.result?.detail)?.turn_id);
-  let turn = Number.isFinite(targetTurnId) ? index.byPromptId.get(targetTurnId) : null;
-  if (!turn) {
-    const cutoff = wait.result ? Number(wait.result.finished) : Number.POSITIVE_INFINITY;
-    turn = [...index.turns].reverse().find((candidate) => candidate.timestamp <= cutoff) || null;
-  }
-  return turn ? {
-    state: workerWaitState(wait),
-    tools: turn.tools,
-    revision: turn.revision,
-  } : null;
-}
-
-function workerActivityIndex(worker) {
-  const store = state.stores.get(worker.id);
-  const events = store?.events || [];
-  let cache = state.workerActivityIndexes.get(worker.id);
-  const prefixChanged = !cache
-    || cache.mutationRevision !== store?.mutationRevision
-    || cache.nextOrder > events.length
-    || (cache.nextOrder > 0
-      && eventParts(events[cache.nextOrder - 1] || {})[1]?.id !== cache.lastEventId);
-  if (prefixChanged) {
-    cache = {
-      mutationRevision: store?.mutationRevision || 0,
-      nextOrder: 0,
-      lastEventId: null,
-      index: { turns: [], byPromptId: new Map() },
-      activeTools: new Map(),
-      turn: null,
-    };
-    state.workerActivityIndexes.set(worker.id, cache);
-  }
-  while (cache.nextOrder < events.length) {
-    const event = events[cache.nextOrder];
-    const [kind, value] = eventParts(event);
-    if (kind === "ManagerPrompt") {
-      cache.turn = {
-        promptId: Number(value.id), timestamp: Number(value.timestamp_ms),
-        tools: [], revision: value.id,
-      };
-      cache.index.turns.push(cache.turn);
-      cache.index.byPromptId.set(cache.turn.promptId, cache.turn);
-      cache.activeTools.clear();
-    } else if (cache.turn && kind === "ToolCall") {
-      if (toolIsChatVisible(value.name) && !toolIsWorkerActivity(value.name)) {
-        const queued = [...cache.activeTools.values()]
-          .some((tool) => tool.apiCallId === value.api_call_id);
-        const args = safeJson(value.arguments);
-        const tool = {
-          id: value.id, apiCallId: value.api_call_id, name: value.name, arguments: value.arguments,
-          args, started: value.timestamp_ms, queued, sessionId: args?.session_id || null,
-          output: "", result: null, revision: value.id,
-        };
-        cache.turn.tools.push(tool);
-        cache.turn.revision = value.id;
-        cache.activeTools.set(value.id, tool);
-      }
-    } else if (cache.turn && kind === "ToolInfoUpdate") {
-      const tool = cache.activeTools.get(value.tool_call_id);
-      if (tool) {
-        tool.output += toolInfoText(value.content);
-        tool.revision = value.id;
-        cache.turn.revision = value.id;
-      }
-    } else if (cache.turn && kind === "ToolCallResult") {
-      const tool = cache.activeTools.get(value.tool_call_id);
-      if (tool) {
-        tool.result = { state: value.state, exitCode: value.exit_code, detail: value.detail, finished: value.timestamp_ms };
-        tool.revision = value.id;
-        cache.turn.revision = value.id;
-        if (!tool.sessionId && tool.name === "Terminal.Create") {
-          tool.sessionId = safeJson(value.detail)?.session_id || null;
-        }
-        cache.activeTools.delete(value.tool_call_id);
-        const next = [...cache.activeTools.values()]
-          .find((candidate) => candidate.apiCallId === tool.apiCallId && candidate.queued);
-        if (next) {
-          next.queued = false;
-          next.started = value.timestamp_ms;
-          next.revision = value.id;
-        }
-      }
-    } else if (cache.turn && kind === "TerminalSessionCreated") {
-      const tool = cache.activeTools.get(value.tool_call_id);
-      if (tool) {
-        tool.sessionId = value.session_id;
-        tool.revision = value.id;
-        cache.turn.revision = value.id;
-      }
-    }
-    cache.nextOrder += 1;
-    cache.lastEventId = value?.id ?? cache.lastEventId;
-  }
-  return cache.index;
 }
 
 function workerWaitState(wait) {
@@ -5186,77 +3672,6 @@ const CONTEXT_CATEGORIES = [
   { key: "reserve", label: "输出预留", color: "var(--context-reserve)" },
 ];
 
-function latestCommittedUsageBoundary(events, expectedUsage) {
-  if (!expectedUsage) return null;
-  const effective = effectiveConversationEvents(events);
-  const errored = new Set();
-  let boundary = null;
-  for (const event of effective) {
-    const [kind, value] = eventParts(event);
-    if (kind !== "ApiStateUpdate") continue;
-    if (value.state === "Error") errored.add(value.api_call_id);
-    const committed = value.state === "Completed"
-      || (value.state === "Interrupted" && !errored.has(value.api_call_id));
-    if (committed && value.usage) boundary = value;
-  }
-  if (!boundary || boundary.usage.total_tokens !== expectedUsage.total_tokens) return null;
-  return events.findIndex((event) => eventParts(event)[1].id === boundary.id);
-}
-
-function latestCompactPreview(events) {
-  const completed = effectiveConversationEvents(events)
-    .map(eventParts)
-    .find(([kind, value]) => kind === "CompactStateUpdate" && value.state === "Completed")?.[1];
-  if (!completed) return { content: null, analysis: null };
-  const analysis = events.map(eventParts).find(([kind, value]) =>
-    kind === "CompactStateUpdate"
-      && value.compact_id === completed.compact_id
-      && value.state === "StageCompleted"
-      && value.stage === "Analysis")?.[1].content ?? null;
-  return { content: completed.content, analysis };
-}
-
-function estimateContextBreakdown(events, usage, memoryContent) {
-  const empty = { system: 0, compact: 0, memory: 0, user: 0, model: 0, tool: 0 };
-  const currentCompact = latestCompactPreview(events);
-  const currentCompactContent = currentCompact.content;
-  const currentCompactAnalysis = currentCompact.analysis;
-  const total = Number(usage?.total_tokens);
-  if (!Number.isFinite(total) || total < 0) return { total: null, values: empty, compactContent: currentCompactContent, compactAnalysis: currentCompactAnalysis, memoryContent };
-  const boundary = latestCommittedUsageBoundary(events, usage);
-  if (boundary == null || boundary < 0) return { total, values: { ...empty, system: total }, compactContent: currentCompactContent, compactAnalysis: currentCompactAnalysis, memoryContent };
-  const boundaryId = eventParts(events[boundary])[1].id;
-  const persistedEstimate = events.map(eventParts).find(([kind, value]) =>
-    kind === "ContextUsageEstimate" && value.api_state_event_id === boundaryId)?.[1];
-  if (persistedEstimate) {
-    const values = {
-      system: Number(persistedEstimate.values?.system || 0),
-      compact: Number(persistedEstimate.values?.compact || 0),
-      memory: Number(persistedEstimate.values?.memory || 0),
-      user: Number(persistedEstimate.values?.user || 0),
-      model: Number(persistedEstimate.values?.model || 0),
-      tool: Number(persistedEstimate.values?.tool || 0),
-    };
-    const estimatedTotal = Object.values(values).reduce((sum, value) => sum + value, 0);
-    if (Object.values(values).every(Number.isFinite) && estimatedTotal === total) {
-      return {
-        total,
-        values,
-        compactContent: currentCompactContent,
-        compactAnalysis: currentCompactAnalysis,
-        memoryContent: currentCompactContent === null ? null : memoryContent,
-      };
-    }
-  }
-  return {
-    total,
-    values: { ...empty, system: total },
-    compactContent: currentCompactContent,
-    compactAnalysis: currentCompactAnalysis,
-    memoryContent: currentCompactContent === null ? null : memoryContent,
-  };
-}
-
 function projectedContextBreakdown(store) {
   const context = store?.projectionState?.context;
   return {
@@ -5272,9 +3687,7 @@ function renderContextDrawer() {
   const projection = currentProjection();
   const model = state.snapshot.models.find((candidate) => candidate.name === projection.model);
   const limit = Number(model?.context_window);
-  const { total, values: usageValues, compactContent, compactAnalysis, memoryContent } = usesUiProjection()
-    ? projectedContextBreakdown(currentStore())
-    : estimateContextBreakdown(currentStore()?.events || [], projection.apiUsage, currentStore()?.turnHistory ?? null);
+  const { total, values: usageValues, compactContent, compactAnalysis, memoryContent } = projectedContextBreakdown(currentStore());
   const configuredReserve = Number(model?.output_token_reservations?.[projection.effort] ?? 0);
   const outputReserve = Number.isFinite(configuredReserve) && configuredReserve > 0 ? configuredReserve : 0;
   const values = { ...usageValues, reserve: outputReserve };
@@ -6039,28 +4452,6 @@ function modelSettingsHtml(model, index) {
   </details>`;
 }
 
-function resolveGatewayEdbCacheLabel(entry) {
-  let workspaceId = null;
-  let snapshot = null;
-  if (state.snapshot?.environment?.workspace === entry.scope) {
-    workspaceId = state.workspaceId;
-    snapshot = state.snapshot;
-  } else {
-    for (const [candidateId, workspace] of state.workspaceStates) {
-      if (workspace.snapshot?.environment?.workspace !== entry.scope) continue;
-      workspaceId = candidateId;
-      snapshot = workspace.snapshot;
-      break;
-    }
-  }
-  const meta = snapshot?.agents?.find((agent) => agent.id === entry.agentId);
-  const gatewayWorkspace = state.gateway.workspaces?.find((item) => item.id === workspaceId);
-  return {
-    workspace: gatewayWorkspace?.name || entry.workspaceLabel || MeEdbCache.workspaceName(entry.scope),
-    title: meta?.title || entry.sessionLabel || null,
-  };
-}
-
 function localPreferenceSettingsHtml() {
   const borderStyle = runtimeCapabilities.windowBorderStyle ? `
       <label class="settings-preference-row settings-preference-select">
@@ -6074,18 +4465,14 @@ function localPreferenceSettingsHtml() {
   const clientVersion = isClient ? `<div class="settings-version-row"><dt>客户端版本</dt><dd>${escapeHtml(frontendRuntime.clientVersion || "未知版本")}</dd></div>` : "";
   const serviceLabel = isClient ? "远端服务版本" : runtimeCapabilities.multipleWorkspaces ? "ME Gateway" : "ME-S";
   const serviceVersion = isClient && !state.authenticated ? "未连接" : "正在获取…";
-  return `<section class="settings-section settings-local-section">
+  return `${borderStyle ? `<section class="settings-section settings-local-section">
     <header class="settings-section-header">
       <div class="settings-section-heading"><h3>本机偏好</h3><p>仅保存在当前设备，并会立即生效。</p></div>
     </header>
     <div class="settings-preference-list">
-      <label class="settings-preference-row">
-        <span class="settings-preference-copy"><strong>兼容渲染模式</strong><small>遇到显示异常时可切换使用。切换后将重新载入会话。</small></span>
-        <input class="settings-toggle" type="checkbox" data-local-preference="raw-edb-decoding" ${state.rawEdbDecoding ? "checked" : ""}>
-      </label>
       ${borderStyle}
     </div>
-  </section>
+  </section>` : ""}
   <section class="settings-section settings-version-section">
     <header class="settings-section-header"><div class="settings-section-heading"><h3>版本</h3></div></header>
     <dl class="settings-version-list">
@@ -6102,8 +4489,6 @@ async function bindLocalPreferenceSettings(container = elements.modalContent) {
   void bindCodexUsageSettings(container);
   const borderStyle = container.querySelector('[data-local-preference="window-border-style"]');
   borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));
-  const rawEdbDecoding = container.querySelector('[data-local-preference="raw-edb-decoding"]');
-  rawEdbDecoding?.addEventListener("change", () => setRawEdbDecoding(rawEdbDecoding.checked));
   const serviceVersion = container.querySelector("[data-service-version]");
   if (!serviceVersion || (runtimeCapabilities.targetConfiguration && !state.authenticated)) return;
   try {
@@ -6195,33 +4580,6 @@ function openLocalSettings() {
   });
 }
 
-function renderGatewayEdbCacheSettings() {
-  const container = elements.modalContent.querySelector("#settings-edb-cache-manager");
-  if (!container) return;
-  void edbCache.renderManager(container, {
-    resolveLabel: resolveGatewayEdbCacheLabel,
-    storageLabel: runtimeCapabilities.cacheStorageLabel,
-    onRemoved: () => toast("会话缓存已清除"),
-    onError: (error) => toast(error?.message || "无法清除会话缓存", true),
-  });
-}
-
-function openEdbCacheSettings() {
-  openModal({
-    kind: "settings",
-    title: "设置",
-    description: "管理本机偏好与此设备保存的会话缓存。",
-    choices: [],
-    selected: null,
-    confirmLabel: null,
-    html: `<div class="settings-editor">${localPreferenceSettingsHtml()}<div id="settings-edb-cache-manager" class="edb-cache-manager settings-cache-manager"></div></div>`,
-    onOpen: (container) => {
-      bindLocalPreferenceSettings(container);
-      renderGatewayEdbCacheSettings();
-    },
-  });
-}
-
 function renderSettingsModal() {
   const settings = state.modal?.settings;
   if (!settings) return;
@@ -6244,7 +4602,6 @@ function renderSettingsModal() {
         <p class="settings-help">保存后不会更改正在运行的工作区。请重启 ME Gateway 以使用新设置。</p>
       </div>
     </section>
-    <div id="settings-edb-cache-manager" class="edb-cache-manager settings-cache-manager"></div>
   </div>`;
   elements.modalContent.querySelector("#settings-add-model")?.addEventListener("click", () => {
     if (!captureSettingsEditor()) return;
@@ -6257,7 +4614,6 @@ function renderSettingsModal() {
     renderSettingsModal();
   }));
   bindLocalPreferenceSettings(elements.modalContent);
-  renderGatewayEdbCacheSettings();
 }
 
 function parseSettingsJson(value, label) {
@@ -6314,7 +4670,7 @@ async function openGatewaySettings() {
     const settings = await api("/api/gateway/settings");
     openModal({
       kind: "settings",
-      title: "设置", description: "管理本机偏好、模型配置与此设备保存的会话缓存。",
+      title: "设置", description: "管理本机偏好与模型配置。",
       choices: [], selected: null, confirmLabel: "保存设置", html: `<div class="settings-editor"></div>`,
       settings, onOpen: renderSettingsModal,
       onConfirm: async () => {
@@ -6424,7 +4780,7 @@ async function sendCommand(payload, workspaceId = state.workspaceId, { refresh =
 }
 
 function promptSubmissionBoundary(meta, store) {
-  if (usesUiProjection() && store?.projectionState?.last_event_id != null) {
+  if (store?.projectionState?.last_event_id != null) {
     const projectionBoundary = Number(store.projectionState.last_event_id);
     if (Number.isSafeInteger(projectionBoundary)) return projectionBoundary;
   }
@@ -6432,9 +4788,7 @@ function promptSubmissionBoundary(meta, store) {
     const snapshotBoundary = Number(meta.last_event_id);
     if (Number.isSafeInteger(snapshotBoundary)) return snapshotBoundary;
   }
-  const lastEvent = store.events[store.events.length - 1];
-  const eventBoundary = lastEvent ? Number(eventParts(lastEvent)[1].id) : -1;
-  return Number.isSafeInteger(eventBoundary) ? eventBoundary : -1;
+  return -1;
 }
 
 function commandResultIsUnknown(error) {
@@ -6809,11 +5163,7 @@ function toast(message, error = false) {
 }
 
 function childStateLabel(store) {
-  if (usesUiProjection()) return normalize(store?.summary?.turnState || "working");
-  const latest = [...(store?.events || [])].reverse().map(eventParts)
-    .find(([kind]) => kind === "AgentTurn")?.[1];
-  if (!latest) return "working";
-  return normalize(latest.state);
+  return normalize(store?.summary?.turnState || "working");
 }
 
 function planSymbol(value) { return ({ planned: "□", active: "■", completed: "✓", cancelled: "×", superseded: "×" })[normalize(value)] || "·"; }
@@ -6845,14 +5195,6 @@ function formatTurnCompletedAt(timestamp, now = Date.now()) {
   const day = daysAgo === 0 ? "今天" : daysAgo === 1 ? "昨天" : daysAgo === 2 ? "前天" : `${daysAgo} 天前`;
   const time = `${String(completed.getHours()).padStart(2, "0")}:${String(completed.getMinutes()).padStart(2, "0")}`;
   return `${day} ${time}`;
-}
-
-function completedTurnContextGrowth(completedApiUsage, promptId, contextBaseline) {
-  const calls = [...completedApiUsage.values()].filter((entry) => entry.promptId === promptId);
-  const latest = calls[calls.length - 1];
-  if (!calls.length || !calls[0].usage || !latest.usage) return null;
-  const baseline = contextBaseline ?? calls[0].usage.input_tokens;
-  return Math.max(0, Number(latest.usage.total_tokens) - Number(baseline));
 }
 
 function formatTurnTokens(tokens) {
@@ -6911,7 +5253,7 @@ if (runtimeCapabilities.multipleWorkspaces) {
 elements.openSettings.addEventListener("click", () => {
   closeMobileSidebar();
   if (runtimeCapabilities.gatewaySettings) void openGatewaySettings();
-  else openEdbCacheSettings();
+  else openLocalSettings();
 });
 elements.mobileSidebarToggle.addEventListener("click", openMobileSidebar);
 elements.mobileSidebarBackdrop.addEventListener("click", closeMobileSidebar);

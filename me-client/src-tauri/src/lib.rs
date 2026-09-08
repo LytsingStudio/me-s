@@ -1,5 +1,5 @@
-mod cache;
 mod gateway;
+mod storage;
 
 use std::{
     collections::BTreeMap,
@@ -29,27 +29,26 @@ use objc2_foundation::NSString;
 #[cfg(target_os = "ios")]
 use objc2_ui_kit::{UIView, UIViewAutoresizing};
 
-use cache::{CacheChunk, CacheDatabase, CacheMetadata, CacheSaveRequest, RememberedDevice};
 use gateway::{
     DownloadProgress, DownloadResult, GatewayRequest, GatewayResponse, GatewayTransport,
     LocalDevice, discover_local_device, normalize_endpoint, online_remembered_devices,
 };
 use serde::Serialize;
+use storage::{ClientDatabase, RememberedDevice};
 use tauri::{AppHandle, Manager, State, WebviewWindow};
 
 const ENDPOINT_SETTING: &str = "gateway.endpoint";
-const DEVICE_PREFERENCE_KEYS: [&str; 5] = [
+const DEVICE_PREFERENCE_KEYS: [&str; 4] = [
     "me-theme",
     "me-color-mode",
     "me-send-shortcut",
     "me-window-border-style",
-    "me-raw-edb-decoding",
 ];
 
 const MAX_REMEMBERED_PASSWORD_BYTES: usize = 4096;
 
 struct AppState {
-    cache: CacheDatabase,
+    database: ClientDatabase,
     gateway: GatewayTransport,
     window_revealed: AtomicBool,
 }
@@ -618,15 +617,14 @@ fn valid_device_preference(key: &str, value: &str) -> bool {
         "me-color-mode" => matches!(value, "light" | "dark"),
         "me-send-shortcut" => matches!(value, "enter" | "modified-enter"),
         "me-window-border-style" => matches!(value, "default" | "theme"),
-        "me-raw-edb-decoding" => matches!(value, "true" | "false"),
         _ => false,
     }
 }
 
-fn load_device_preferences(cache: &CacheDatabase) -> Result<BTreeMap<String, String>, String> {
+fn load_device_preferences(database: &ClientDatabase) -> Result<BTreeMap<String, String>, String> {
     let mut preferences = BTreeMap::new();
     for key in DEVICE_PREFERENCE_KEYS {
-        if let Some(value) = cache.setting(key)? {
+        if let Some(value) = database.setting(key)? {
             if valid_device_preference(key, &value) {
                 preferences.insert(key.to_owned(), value);
             }
@@ -638,11 +636,11 @@ fn load_device_preferences(cache: &CacheDatabase) -> Result<BTreeMap<String, Str
 #[tauri::command]
 async fn client_bootstrap(state: State<'_, AppState>) -> Result<ClientBootstrap, String> {
     let endpoint = state.gateway.endpoint().await;
-    let cache = state.cache.clone();
+    let database = state.database.clone();
     let (device_preferences, remembered_devices) = run_blocking(move || {
         Ok((
-            load_device_preferences(&cache)?,
-            cache.remembered_devices()?,
+            load_device_preferences(&database)?,
+            database.remembered_devices()?,
         ))
     })
     .await?;
@@ -676,9 +674,9 @@ async fn configure_target(
     state: State<'_, AppState>,
 ) -> Result<ConfiguredTarget, String> {
     let endpoint = state.gateway.configure(&endpoint).await?;
-    let cache = state.cache.clone();
+    let database = state.database.clone();
     let stored_endpoint = endpoint.clone();
-    run_blocking(move || cache.set_setting(ENDPOINT_SETTING, &stored_endpoint)).await?;
+    run_blocking(move || database.set_setting(ENDPOINT_SETTING, &stored_endpoint)).await?;
     Ok(ConfiguredTarget { endpoint })
 }
 
@@ -691,8 +689,8 @@ async fn set_device_preference(
     if !valid_device_preference(&key, &value) {
         return Err("设备偏好无效".into());
     }
-    let cache = state.cache.clone();
-    run_blocking(move || cache.set_setting(&key, &value)).await
+    let database = state.database.clone();
+    run_blocking(move || database.set_setting(&key, &value)).await
 }
 
 #[tauri::command]
@@ -705,16 +703,16 @@ async fn remember_device(
     if password.len() > MAX_REMEMBERED_PASSWORD_BYTES {
         return Err("密码过长".into());
     }
-    let cache = state.cache.clone();
-    let device = run_blocking(move || cache.remember_device(&endpoint, &password)).await?;
+    let database = state.database.clone();
+    let device = run_blocking(move || database.remember_device(&endpoint, &password)).await?;
     Ok(RememberedDeviceStatus::from_device(device, true))
 }
 
 #[tauri::command]
 async fn forget_device(endpoint: String, state: State<'_, AppState>) -> Result<(), String> {
     let endpoint = normalize_endpoint(&endpoint)?;
-    let cache = state.cache.clone();
-    run_blocking(move || cache.forget_device(&endpoint)).await
+    let database = state.database.clone();
+    run_blocking(move || database.forget_device(&endpoint)).await
 }
 
 #[tauri::command]
@@ -723,47 +721,6 @@ async fn gateway_request(
     state: State<'_, AppState>,
 ) -> Result<GatewayResponse, String> {
     state.gateway.request(request).await
-}
-
-#[tauri::command]
-async fn cache_load_metadata(
-    edb_ids: Vec<String>,
-    state: State<'_, AppState>,
-) -> Result<Vec<CacheMetadata>, String> {
-    let cache = state.cache.clone();
-    run_blocking(move || cache.load_metadata(&edb_ids)).await
-}
-
-#[tauri::command]
-async fn cache_load_chunk(
-    edb_id: String,
-    start_order: u64,
-    byte_limit: u64,
-    state: State<'_, AppState>,
-) -> Result<CacheChunk, String> {
-    let cache = state.cache.clone();
-    run_blocking(move || cache.load_chunk(&edb_id, start_order, byte_limit)).await
-}
-
-#[tauri::command]
-async fn cache_list(state: State<'_, AppState>) -> Result<Vec<CacheMetadata>, String> {
-    let cache = state.cache.clone();
-    run_blocking(move || cache.list()).await
-}
-
-#[tauri::command]
-async fn cache_save_batch(
-    session: CacheSaveRequest,
-    state: State<'_, AppState>,
-) -> Result<(), String> {
-    let cache = state.cache.clone();
-    run_blocking(move || cache.save(session)).await
-}
-
-#[tauri::command]
-async fn cache_remove(edb_id: String, state: State<'_, AppState>) -> Result<(), String> {
-    let cache = state.cache.clone();
-    run_blocking(move || cache.remove(&edb_id)).await
 }
 
 fn client_download_directory(app: &AppHandle) -> Result<PathBuf, String> {
@@ -819,11 +776,13 @@ fn app_state(app: &tauri::App) -> Result<AppState, io::Error> {
         Some(directory) => PathBuf::from(directory),
         None => app.path().app_data_dir().map_err(io::Error::other)?,
     };
-    let cache = CacheDatabase::new(database_path(data_directory)).map_err(io::Error::other)?;
-    let endpoint = cache.setting(ENDPOINT_SETTING).map_err(io::Error::other)?;
+    let database = ClientDatabase::new(database_path(data_directory)).map_err(io::Error::other)?;
+    let endpoint = database
+        .setting(ENDPOINT_SETTING)
+        .map_err(io::Error::other)?;
     let gateway = GatewayTransport::new(endpoint).map_err(io::Error::other)?;
     Ok(AppState {
-        cache,
+        database,
         gateway,
         window_revealed: AtomicBool::new(false),
     })
@@ -1035,11 +994,6 @@ pub fn run() {
             remember_device,
             forget_device,
             gateway_request,
-            cache_load_metadata,
-            cache_load_chunk,
-            cache_list,
-            cache_save_batch,
-            cache_remove,
             download_file,
             cancel_download,
         ])
@@ -1077,9 +1031,7 @@ mod tests {
         ));
         assert!(valid_device_preference("me-window-border-style", "default"));
         assert!(valid_device_preference("me-window-border-style", "theme"));
-        assert!(valid_device_preference("me-raw-edb-decoding", "true"));
-        assert!(valid_device_preference("me-raw-edb-decoding", "false"));
-        assert!(!valid_device_preference("me-raw-edb-decoding", "yes"));
+        assert!(!valid_device_preference("me-raw-edb-decoding", "true"));
         assert!(!valid_device_preference("me-theme", "unknown"));
         assert!(!valid_device_preference("me-window-border-style", "accent"));
         assert!(!valid_device_preference(

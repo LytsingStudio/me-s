@@ -9,14 +9,20 @@ use std::{
     time::Duration,
 };
 
-#[cfg(windows)]
-use std::os::windows::process::CommandExt;
-#[cfg(windows)]
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
-
 use sha2::{Digest, Sha256};
 
 use crate::Result;
+
+#[cfg(any(windows, test))]
+mod portable;
+
+#[cfg(windows)]
+mod windows;
+
+#[cfg(windows)]
+pub fn run_windows_helper_if_requested() -> Result<bool> {
+    windows::run_helper_if_requested()
+}
 
 pub const RELEASE_REPOSITORY: &str = "LytsingStudio/me-s";
 const CHECKSUM_ASSET: &str = "SHA256SUMS";
@@ -26,14 +32,11 @@ const METADATA_REQUEST_TIMEOUT: Duration = Duration::from_secs(8);
 const DOWNLOAD_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
 const DOWNLOAD_REQUEST_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
-#[cfg(any(windows, test))]
-const WINDOWS_UPDATE_POWERSHELL_ARGS: [&str; 3] = ["-NoLogo", "-NoProfile", "-NonInteractive"];
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum InstallerKind {
     MacosPkg,
     LinuxRun,
-    WindowsNsis,
+    WindowsPortable,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -79,8 +82,8 @@ impl UpdatePlatform {
                 client_executable: "me-client",
             },
             ("windows", "x86_64") => Self {
-                package_asset: "ME-windows-x86_64-setup.exe",
-                installer: InstallerKind::WindowsNsis,
+                package_asset: "ME-windows-x86_64-portable.zip",
+                installer: InstallerKind::WindowsPortable,
                 me_s_executable: "me-s.exe",
                 gateway_executable: "me-gateway.exe",
                 client_executable: "me-client.exe",
@@ -146,11 +149,12 @@ pub fn update() -> Result<()> {
     let expected_version = latest_tag.strip_prefix('v').unwrap_or(latest_tag);
     validate_downloaded_package(&package, platform, expected_version)?;
 
-    let scheduled_after_exit = deploy_product_package(&package, install_directory, platform)?;
+    let scheduled_after_exit =
+        deploy_product_package(&package, install_directory, platform, expected_version)?;
     if scheduled_after_exit {
         let error_log = install_directory.join(".me-update-error.log");
         println!(
-            "downloaded and verified ME {latest_tag}; Windows will install the complete product after this process exits\nerror log if installation cannot be completed: {}\nglobal configuration: unchanged",
+            "downloaded and verified ME {latest_tag}; Windows will replace the three programs after this process exits\nclose other ME programs in this installation before updating\nerror log if replacement cannot be completed: {}\nconfiguration and user data: unchanged",
             error_log.display()
         );
     } else {
@@ -176,6 +180,10 @@ fn installed_product_matches(
     platform: UpdatePlatform,
     version: &str,
 ) -> bool {
+    #[cfg(windows)]
+    if platform.installer == InstallerKind::WindowsPortable {
+        return windows::verify_versions(install_directory, version).is_ok();
+    }
     let destinations = platform.cli_destinations(install_directory);
     for (destination, program) in destinations.iter().zip(["me-s", "me-gateway"]) {
         let Ok(metadata) = fs::symlink_metadata(destination) else {
@@ -485,6 +493,7 @@ fn deploy_product_package(
     package: &Path,
     install_directory: &Path,
     platform: UpdatePlatform,
+    _version: &str,
 ) -> Result<bool> {
     #[cfg(target_os = "macos")]
     if platform.installer == InstallerKind::MacosPkg {
@@ -518,8 +527,8 @@ fn deploy_product_package(
     }
 
     #[cfg(windows)]
-    if platform.installer == InstallerKind::WindowsNsis {
-        return schedule_windows_installer(package, install_directory);
+    if platform.installer == InstallerKind::WindowsPortable {
+        return windows::schedule(package, install_directory, _version);
     }
 
     Err("ME product installer does not match the current platform".into())
@@ -534,88 +543,6 @@ fn run_checked(command: &mut Command, operation: &str) -> Result<()> {
         return Err(format!("cannot {operation}: command exited with {status}").into());
     }
     Ok(())
-}
-
-#[cfg(windows)]
-fn schedule_windows_installer(package: &Path, install_directory: &Path) -> Result<bool> {
-    let staged = sibling_temporary_path(
-        &install_directory.join("ME-windows-x86_64-setup.exe"),
-        "update",
-    )?;
-    fs::copy(package, &staged).map_err(|error| {
-        format!(
-            "cannot stage the Windows product installer beside {}: {error}",
-            install_directory.display()
-        )
-    })?;
-    let error_log = install_directory.join(".me-update-error.log");
-    let _ = fs::remove_file(&error_log);
-    let script = windows_update_script(
-        std::process::id(),
-        &powershell_literal(&staged),
-        &powershell_literal(&error_log),
-    );
-    let mut helper = Command::new("powershell.exe");
-    helper
-        .args(WINDOWS_UPDATE_POWERSHELL_ARGS)
-        .arg("-Command")
-        .arg(&script)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .creation_flags(CREATE_NO_WINDOW);
-    if let Err(error) = helper.spawn() {
-        let _ = fs::remove_file(&staged);
-        return Err(format!("cannot start the Windows product update helper: {error}").into());
-    }
-    Ok(true)
-}
-
-#[cfg(any(windows, test))]
-fn windows_update_script(process_id: u32, setup: &str, error_log: &str) -> String {
-    format!(
-        "$ErrorActionPreference='Stop'; Wait-Process -Id {process_id} -ErrorAction SilentlyContinue; try {{ $process=Start-Process -FilePath '{setup}' -ArgumentList '/S' -Wait -PassThru; if($process.ExitCode -ne 0) {{ throw \"ME installer exited with code $($process.ExitCode)\" }}; Remove-Item -LiteralPath '{setup}' -Force -ErrorAction SilentlyContinue; Remove-Item -LiteralPath '{error_log}' -Force -ErrorAction SilentlyContinue }} catch {{ Set-Content -LiteralPath '{error_log}' -Value $_.Exception.Message -Encoding UTF8; exit 1 }}"
-    )
-}
-
-#[cfg(windows)]
-fn powershell_literal(path: &Path) -> String {
-    powershell_literal_text(&path.to_string_lossy())
-}
-
-#[cfg(any(windows, test))]
-fn powershell_literal_text(path: &str) -> String {
-    let normalized = if let Some(path) = path.strip_prefix(r"\\?\UNC\") {
-        format!(r"\\{path}")
-    } else {
-        path.strip_prefix(r"\\?\").unwrap_or(path).to_owned()
-    };
-    normalized.replace('\'', "''")
-}
-
-#[cfg(windows)]
-fn sibling_temporary_path(destination: &Path, purpose: &str) -> std::io::Result<PathBuf> {
-    let parent = destination.parent().ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "current executable has no parent directory",
-        )
-    })?;
-    let file = destination
-        .file_name()
-        .and_then(|name| name.to_str())
-        .unwrap_or("me");
-    for _ in 0..16 {
-        let suffix = random_suffix().map_err(std::io::Error::other)?;
-        let candidate = parent.join(format!(".{file}.{purpose}-{suffix}"));
-        if !candidate.exists() {
-            return Ok(candidate);
-        }
-    }
-    Err(std::io::Error::new(
-        std::io::ErrorKind::AlreadyExists,
-        format!("cannot allocate a unique update {purpose} path"),
-    ))
 }
 
 fn random_suffix() -> Result<String> {
@@ -697,8 +624,8 @@ mod tests {
             (
                 "windows",
                 "x86_64",
-                "ME-windows-x86_64-setup.exe",
-                InstallerKind::WindowsNsis,
+                "ME-windows-x86_64-portable.zip",
+                InstallerKind::WindowsPortable,
             ),
         ];
         for (os, arch, asset, installer) in cases {
@@ -822,24 +749,6 @@ mod tests {
         fs::remove_file(client).unwrap();
         assert!(!installed_product_matches(&directory, platform, "1.2.3"));
         fs::remove_dir_all(directory).unwrap();
-    }
-
-    #[test]
-    fn windows_helper_waits_and_runs_the_complete_installer() {
-        assert_eq!(
-            WINDOWS_UPDATE_POWERSHELL_ARGS,
-            ["-NoLogo", "-NoProfile", "-NonInteractive"]
-        );
-        let script = windows_update_script(42, "C:\\ME setup.exe", "C:\\error.log");
-        assert!(script.contains("Wait-Process -Id 42"));
-        assert!(script.contains("Start-Process"));
-        assert!(script.contains("-ArgumentList '/S'"));
-        assert!(script.contains("C:\\ME setup.exe"));
-        assert!(script.contains("Set-Content -LiteralPath 'C:\\error.log'"));
-        assert_eq!(
-            powershell_literal_text(r"\\?\C:\ME O'Brien\setup.exe"),
-            r"C:\ME O''Brien\setup.exe"
-        );
     }
 
     #[test]

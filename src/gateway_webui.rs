@@ -27,8 +27,6 @@ const INDEX_HTML: &str = include_str!("webui/index.html");
 #[cfg(test)]
 const APP_JS: &str = include_str!("webui/app.js");
 const RUNTIME_JS: &str = include_str!("gateway_webui/runtime.js");
-#[cfg(test)]
-const EDB_CACHE_JS: &str = include_str!("webui/edb-cache.js");
 const SESSION_COOKIE_PREFIX: &str = "me_gateway_session";
 const MAX_BODY_BYTES: usize = 1024 * 1024;
 const MAX_LOGIN_BYTES: usize = 4096;
@@ -641,20 +639,13 @@ mod tests {
     }
 
     #[test]
-    fn embedded_gateway_webui_loads_and_manages_the_shared_raw_edb_cache() {
-        let cache_script = INDEX_HTML.find("/edb-cache.js").unwrap();
-        let app_script = INDEX_HTML.find("/app.js").unwrap();
-        assert!(cache_script < app_script);
-        assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
-        assert!(
-            APP_JS
-                .contains("cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized")
-        );
+    fn embedded_gateway_webui_uses_the_shared_projection_frontend() {
+        assert!(!INDEX_HTML.contains("/edb-cache.js"));
+        assert!(APP_JS.contains("ui_projection: true"));
         assert!(APP_JS.contains("/api/ui-projections/"));
         assert!(RUNTIME_JS.contains("/api/ui-projections/"));
-        assert!(APP_JS.contains("id=\"settings-edb-cache-manager\""));
-        assert!(APP_JS.contains("edbCacheInitialized: state.edbCacheInitialized"));
-        assert!(APP_JS.contains("state.edbCacheInitialized = workspace.edbCacheInitialized"));
+        assert!(!APP_JS.contains("cache_metadata_only"));
+        assert!(!RUNTIME_JS.contains("createEdbCache"));
     }
 
     #[test]

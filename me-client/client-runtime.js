@@ -8,7 +8,6 @@
   const browserSendBeacon = globalThis.navigator?.sendBeacon?.bind(globalThis.navigator) || null;
   let endpoint = "";
   let clientVersion = "";
-  let activeEdbCache = null;
   let windowReadyPromise = null;
   let titleBarTitleElement = null;
   let maximizeControl = null;
@@ -65,7 +64,6 @@
 
   const DEVICE_PREFERENCE_KEYS = new Set([
     "me-theme", "me-color-mode", "me-send-shortcut", "me-window-border-style",
-    "me-raw-edb-decoding",
   ]);
   const devicePreferenceValues = new Map();
   let devicePreferencesReady = false;
@@ -210,9 +208,6 @@
     const path = apiPath(input);
     if (!path) return browserFetch(input, options);
     if (options.signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");
-    if (/^\/api\/(?:sync(?:\?|$)|workspaces\/[^/]+\/sync(?:\?|$))/.test(path)) {
-      await activeEdbCache?.flush();
-    }
     const source = typeof Request === "function" && input instanceof Request ? input : null;
     const headers = new Headers(source?.headers || {});
     new Headers(options.headers || {}).forEach((value, name) => headers.set(name, value));
@@ -242,121 +237,6 @@
       console.warn("Unable to submit native beacon", error);
     });
     return true;
-  }
-
-  class NativeEdbCache {
-    constructor() {
-      const common = globalThis.MeEdbCache.create({ indexedDB: {}, IDBKeyRange: {} });
-      this.available = true;
-      this.disabledReason = "";
-      this.renderManager = common.renderManager.bind(this);
-      this.pendingWrites = [];
-      this.writeDrain = null;
-      this.chunkBytes = 1024 * 1024;
-    }
-
-    async loadMetadata(edbIds) {
-      await this.flush();
-      return invoke("cache_load_metadata", {
-        edbIds: [...new Set((edbIds || []).filter(Boolean).map(String))],
-      });
-    }
-
-    async loadSession(metadata) {
-      const events = [];
-      const totalCount = Number(metadata.eventCount || 0);
-      let startOrder = 0;
-      while (startOrder < totalCount) {
-        const chunk = await invoke("cache_load_chunk", {
-          edbId: metadata.edbId,
-          startOrder,
-          byteLimit: this.chunkBytes,
-        });
-        if (chunk.edbId !== metadata.edbId
-            || chunk.startOrder !== startOrder
-            || chunk.nextOrder <= startOrder
-            || chunk.nextOrder > totalCount
-            || chunk.totalCount !== totalCount
-            || chunk.mutationRevision !== metadata.mutationRevision
-            || chunk.lastEventHash !== metadata.lastEventHash) {
-          throw new Error("Native EDB cache returned an invalid chunk");
-        }
-        events.push(...chunk.events);
-        startOrder = chunk.nextOrder;
-        if (Boolean(chunk.done) !== (startOrder === totalCount)) {
-          throw new Error("Native EDB cache returned an invalid continuation state");
-        }
-      }
-      return { ...metadata, events };
-    }
-
-    async loadSessions(edbIds) {
-      const metadata = await this.loadMetadata(edbIds);
-      const entries = [];
-      for (const entry of metadata) {
-        try { entries.push(await this.loadSession(entry)); }
-        catch (error) {
-          console.warn("Unable to restore native EDB cache", error);
-          await this.discardSession(entry.edbId).catch(() => {});
-        }
-      }
-      return entries;
-    }
-
-    async listSessions() {
-      await this.flush();
-      return invoke("cache_list");
-    }
-
-    saveSession(session) {
-      const edbId = String(session?.edbId || "");
-      const delta = session?.delta;
-      if (!edbId || !delta) return;
-      this.pendingWrites.push({
-        edbId,
-        startOrder: delta.startOrder,
-        eventCount: delta.eventCount,
-        expectedEventCount: delta.expectedEventCount,
-        expectedMutationRevision: delta.expectedMutationRevision,
-        mutationRevision: session.mutationRevision,
-        lastEventHash: session.lastEventHash,
-        reset: Boolean(delta.reset),
-        events: [...(delta.events || [])],
-        gatewayLabel: session.gatewayLabel || "",
-        workspaceLabel: session.workspaceLabel || "",
-        sessionLabel: session.sessionLabel || "",
-      });
-      if (!this.writeDrain) this.writeDrain = Promise.resolve().then(() => this.drainWrites());
-    }
-
-    async drainWrites() {
-      try {
-        while (this.pendingWrites.length) {
-          const session = this.pendingWrites.shift();
-          try { await invoke("cache_save_batch", { session }); }
-          catch (error) { console.warn("Unable to persist native EDB cache", error); }
-        }
-      } finally {
-        this.writeDrain = null;
-        if (this.pendingWrites.length) this.writeDrain = Promise.resolve().then(() => this.drainWrites());
-      }
-    }
-
-    async flush() {
-      while (this.writeDrain) await this.writeDrain;
-    }
-
-    async discardSession(edbId) {
-      if (!edbId) return;
-      const key = String(edbId);
-      this.pendingWrites = this.pendingWrites.filter((write) => write.edbId !== key);
-      await this.flush();
-      await invoke("cache_remove", { edbId: key });
-    }
-
-    removeSession(edbId) {
-      return this.discardSession(edbId);
-    }
   }
 
   function clientPlatform() {
@@ -518,20 +398,6 @@
     return windowReadyPromise;
   }
 
-  function nativeCacheAgents(snapshot, scope) {
-    return new Map((snapshot.agents || [])
-      .filter((agent) => agent.edb_id)
-      .map((agent) => [String(agent.edb_id), { agent, scope }]));
-  }
-
-  function mapNativeCacheEntries(entries, snapshot, scope) {
-    const agents = nativeCacheAgents(snapshot, scope);
-    return entries.flatMap((entry) => {
-      const match = agents.get(String(entry.edbId || ""));
-      return match ? [{ ...entry, key: entry.edbId, scope: match.scope, agentId: match.agent.id }] : [];
-    });
-  }
-
   const runtime = {
     capabilities: Object.freeze({
       multipleWorkspaces: true,
@@ -542,7 +408,6 @@
       windowBorderStyle: clientPlatform() !== "ios",
       pageTitle: "ME Client",
       brandTitle: "ME Client",
-      cacheStorageLabel: "ME Client",
       sessionSectionTitle: "聊天",
       newSessionLabel: "新建聊天",
     }),
@@ -587,17 +452,6 @@
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ workspace_id: workspaceId, agent_id: agentId }),
       });
-    },
-    createEdbCache() {
-      if (!activeEdbCache) activeEdbCache = new NativeEdbCache();
-      return activeEdbCache;
-    },
-    async loadCachedSessions(cache, snapshot, scope) {
-      const entries = await cache.loadSessions([...nativeCacheAgents(snapshot, scope).keys()]);
-      return mapNativeCacheEntries(entries, snapshot, scope);
-    },
-    cacheKey(_scope, _agentId, edbId) {
-      return String(edbId || "");
     },
     async downloadFile(path, filename, { signal, onProgress } = {}) {
       if (signal?.aborted) throw new DOMException("The operation was aborted", "AbortError");

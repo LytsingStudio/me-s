@@ -83,6 +83,8 @@ x64 安装程序固定使用当前用户目录：
 
 安装目录会加入用户 `PATH`，开始菜单会创建 ME Client 与卸载入口。如果当前窗口尚未识别命令，请重新打开终端。
 
+也可以从 [Releases](https://github.com/LytsingStudio/me-s/releases/latest) 下载 `ME-windows-x86_64-portable.zip`，解压后直接运行其中的三个程序。此方式不添加 PATH、快捷方式或卸载入口，配置和会话数据的位置与安装版相同。
+
 安装 ME 不会覆盖或删除已有的 `me`/`me.exe`。旧 `me` 与当前 ME 可以同时存在，并共同使用现有的 me 全局配置目录和工作区格式。
 
 ### 从源码构建
@@ -282,9 +284,13 @@ me-s update
 me-gateway update
 ```
 
-更新器会解析最新公开 ME Release，选择当前系统与架构对应的一个完整产品包，下载 `SHA256SUMS` 并验证整包，然后调用平台安装器一起升级或修复 `me-s`、`me-gateway` 和 `me-client`。macOS 使用通用 pkg，Linux 使用对应架构的 `.run`，Windows 在发起命令的进程退出后静默运行 NSIS 安装器。
+更新器会选择最新正式版本，下载完整产品包与 `SHA256SUMS`，验证后一起升级或修复 `me-s`、`me-gateway` 和 `me-client`。macOS 使用通用 pkg，Linux 使用对应架构的 `.run`。
 
-即使版本号已经是 latest，只要任一 CLI 缺失、两项 CLI 没有精确报告当前产品版本，或客户端文件缺失，update 都会执行同版本修复。安装与更新不会修改全局模型配置、凭据、工作区 `.me`、EDB 或 Gateway 远端资源。
+Windows 使用 portable ZIP 更新当前程序所在目录，不再运行 setup。请先正常退出同一目录中的其他 ME 程序，再执行更新命令。程序会在发起命令的进程退出后备份、替换并验证全部三个程序；普通替换或验证失败时恢复原文件，失败原因保存在安装目录的 `.me-update-error.log`。如恢复未能完成，日志会给出保留的备份位置。
+
+**Windows 首次迁移：**旧版本的更新命令仍使用旧机制。请先手动安装本版 setup，或关闭 ME 后用 portable 包完整覆盖三个程序；之后的 `update` 才会使用新方式。
+
+同版本下发现缺失或损坏组件时，update 仍会修复完整产品。安装与更新不修改模型配置、凭据、工作区或会话记录；portable 更新也保留安装版已有的 PATH、快捷方式和卸载入口。
 
 ## 配置模型
 
@@ -344,19 +350,20 @@ bun test tests/gateway_webui.test.js tests/webui_*.test.js tests/me_client.test.
 sh tests/install_scripts.sh
 ```
 
-跨平台发行资产完全由 Apple Silicon macOS 主机本地构建，不使用 GitHub Actions 或外部 Windows 构建机。首次初始化或依赖输入变化后，需要显式运行 `./build.sh --online`，并提供可联网的 Rust、Bun、Docker/Colima、LLVM、`cargo-xwin`、NSIS `makensis` 和 7-Zip 环境；初始化完成后，日常运行 `./build.sh` 默认严格离线，一次生成 macOS universal pkg、Windows x86_64 NSIS setup、Linux x86_64/arm64 `.run` 与 `SHA256SUMS`。
+跨平台发行资产完全由 Apple Silicon macOS 主机本地构建，不使用 GitHub Actions 或外部 Windows 构建机。首次初始化或依赖输入变化后显式运行 `./build.sh --online`；日常 `./build.sh` 默认严格离线，一次生成 macOS universal pkg、Windows x86_64 setup 和 portable ZIP、Linux x86_64/arm64 `.run` 共五包与 `SHA256SUMS`。
 
 - macOS：原生构建 arm64/x86_64 CLI 与 Tauri universal App，再生成一个 pkg；
-- Windows：通过 `cargo-xwin`/LLVM 交叉构建 MSVC ABI x64 的三个 PE 程序，再由 macOS `makensis` 生成 NSIS setup；
+- Windows：通过 `cargo-xwin`/LLVM 交叉构建三个 x64 程序，同一组程序同时打包为 NSIS setup 与 portable ZIP；
 - Linux：首次通过 `./build.sh --online` 为两个架构初始化固定的本地 builder image，以及持久的 Cargo、target 和内嵌 Python runtime 缓存；builder image 预置 AppImage 工具及固定校验的 type-2 runtime，后续使用相同 Docker runtime 环境直接复用，不重复安装或下载系统、Rust、Zig、Bun、Tauri、Python/AppImage runtime 和项目依赖。
 
 `./build.sh` 和 `./build.sh --offline` 都严格要求 host/Linux 工具、当前依赖集合及 AppImage runtime 已初始化：host Cargo 使用 offline，Linux 容器禁用网络；缺失任何资源都会直接失败，只有显式 `./build.sh --online` 才允许初始化或下载。所有模式均先在临时 staging 完成全部构建和静态验收，成功后才原子替换 `dist/`，因此只清理旧发行包，并保留 `.build-cache`、Cargo、xwin、Docker image/volume、内嵌 Python runtime 和依赖编译缓存。构建不会运行 Windows/Linux 目标程序、AppImage、`.run` 或安装器。
 
-`./release.sh` 不执行任何构建或依赖初始化，只验证干净且已推送的 `s` 分支、`BUILD-MANIFEST.json` 与当前 commit、四包静态结构及 SHA-256，然后创建 tag 并上传现有 `dist/`。Release 恰好包含：
+`./release.sh` 不执行构建或依赖初始化，只验证干净且已推送的 `s` 分支、`BUILD-MANIFEST.json` 与当前 commit、五包静态结构及 SHA-256，然后创建 tag 并上传现有 `dist/`。Release 恰好包含：
 
 ```text
 ME-macos-universal.pkg
 ME-windows-x86_64-setup.exe
+ME-windows-x86_64-portable.zip
 ME-linux-x86_64.run
 ME-linux-arm64.run
 SHA256SUMS

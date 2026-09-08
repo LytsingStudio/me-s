@@ -4,7 +4,6 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 const { createTranscriptBottomFollower } = require("../src/webui/transcript.js");
-require("../src/webui/edb-cache.js");
 const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 

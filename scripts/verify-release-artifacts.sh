@@ -7,10 +7,11 @@ VERSION="$(node "$ROOT_DIR/scripts/product-version.cjs" --print)"
 PACKAGE_ASSETS=(
     ME-macos-universal.pkg
     ME-windows-x86_64-setup.exe
+    ME-windows-x86_64-portable.zip
     ME-linux-x86_64.run
     ME-linux-arm64.run
 )
-EXPECTED_ASSETS=$'BUILD-MANIFEST.json\nME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-setup.exe\nSHA256SUMS'
+EXPECTED_ASSETS=$'BUILD-MANIFEST.json\nME-linux-arm64.run\nME-linux-x86_64.run\nME-macos-universal.pkg\nME-windows-x86_64-portable.zip\nME-windows-x86_64-setup.exe\nSHA256SUMS'
 
 for command in file lipo node pkgutil shasum tar xcrun xmllint; do
     command -v "$command" >/dev/null 2>&1 || { echo "error: missing static verification dependency: $command" >&2; exit 1; }
@@ -39,7 +40,7 @@ for asset in "${PACKAGE_ASSETS[@]}"; do
 done
 
 MANIFEST="$DIST_DIR/SHA256SUMS"
-[[ $(wc -l <"$MANIFEST" | tr -d ' ') -eq 4 ]] || { echo "error: SHA256SUMS must contain exactly four entries" >&2; exit 1; }
+[[ $(wc -l <"$MANIFEST" | tr -d ' ') -eq 5 ]] || { echo "error: SHA256SUMS must contain exactly five entries" >&2; exit 1; }
 for asset in "${PACKAGE_ASSETS[@]}"; do
     [[ $(grep -Ec "^[0-9a-f]{64}  ${asset//./\\.}$" "$MANIFEST") -eq 1 ]] || {
         echo "error: SHA256SUMS must contain one exact entry for $asset" >&2
@@ -105,6 +106,21 @@ for binary in me-s.exe me-gateway.exe me-client.exe; do
     xcrun llvm-objdump --file-headers "$WORK/windows/$binary" | grep -F 'file format coff-x86-64' >/dev/null
 done
 [[ -s "$WORK/windows/Uninstall ME.exe" ]] || { echo "error: Windows setup does not contain an uninstaller" >&2; exit 1; }
+
+WINDOWS_PORTABLE="$DIST_DIR/ME-windows-x86_64-portable.zip"
+file "$WINDOWS_PORTABLE" | grep -F 'Zip archive data' >/dev/null
+PORTABLE_FILES="$(tar -tf "$WINDOWS_PORTABLE" | LC_ALL=C sort)"
+[[ "$PORTABLE_FILES" == $'me-client.exe\nme-gateway.exe\nme-s.exe' ]] || {
+    echo "error: Windows portable payload file set is invalid" >&2; exit 1;
+}
+"$SEVENZIP" t "$WINDOWS_PORTABLE" >/dev/null
+"$SEVENZIP" x -y -o"$WORK/windows-portable" "$WINDOWS_PORTABLE" >/dev/null
+for binary in me-s.exe me-gateway.exe me-client.exe; do
+    [[ -f "$WORK/windows-portable/$binary" && ! -L "$WORK/windows-portable/$binary" ]] || exit 1
+    cmp "$WORK/windows/$binary" "$WORK/windows-portable/$binary" || {
+        echo "error: Windows setup and portable contain different $binary files" >&2; exit 1;
+    }
+done
 
 verify_linux_run() {
     local package=$1

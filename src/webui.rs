@@ -58,7 +58,6 @@ const THEME_JS: &str = include_str!("webui/theme.js");
 const THEME_CSS: &str = include_str!("webui/theme.css");
 const TRANSCRIPT_JS: &str = include_str!("webui/transcript.js");
 const TOOL_PRESENTERS_JS: &str = include_str!("webui/tool-presenters.js");
-const EDB_CACHE_JS: &str = include_str!("webui/edb-cache.js");
 const MARKDOWN_JS: &str = include_str!("webui/markdown.js");
 const MARKDOWN_IT_JS: &str = include_str!("webui/vendor/markdown-it.min.js");
 const KATEX_JS: &str = include_str!("webui/vendor/katex.min.js");
@@ -834,7 +833,6 @@ pub(crate) fn shared_public_asset(path: &str) -> Option<HttpResponse> {
         "/file-manager.js" => ("text/javascript; charset=utf-8", FILE_MANAGER_JS),
         "/transcript.js" => ("text/javascript; charset=utf-8", TRANSCRIPT_JS),
         "/tool-presenters.js" => ("text/javascript; charset=utf-8", TOOL_PRESENTERS_JS),
-        "/edb-cache.js" => ("text/javascript; charset=utf-8", EDB_CACHE_JS),
         "/markdown.js" => ("text/javascript; charset=utf-8", MARKDOWN_JS),
         "/markdown-it.js" => ("text/javascript; charset=utf-8", MARKDOWN_IT_JS),
         "/katex.js" => ("text/javascript; charset=utf-8", KATEX_JS),
@@ -3424,21 +3422,14 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_loads_the_raw_edb_cache_before_the_application() {
-        let cache_script = INDEX_HTML.find("/edb-cache.js").unwrap();
-        let app_script = INDEX_HTML.find("/app.js").unwrap();
-        assert!(cache_script < app_script);
+    fn embedded_webui_uses_projections_and_removes_legacy_cache() {
+        assert!(!INDEX_HTML.contains("/edb-cache.js"));
+        assert!(public_asset("/edb-cache.js").is_none());
         assert!(INDEX_HTML.contains("id=\"open-settings\""));
-        assert!(EDB_CACHE_JS.contains("const DB_NAME = \"me-edb-cache\""));
-        assert!(EDB_CACHE_JS.contains("keyPath: [\"sessionKey\", \"order\"]"));
-        assert!(
-            APP_JS
-                .contains("cache_metadata_only: !usesUiProjection() && !state.edbCacheInitialized")
-        );
-        assert!(APP_JS.contains("const RAW_EDB_DECODING_PREFERENCE = \"me-raw-edb-decoding\""));
-        assert!(APP_JS.contains("return !state.rawEdbDecoding"));
-        assert!(APP_JS.contains("if (payload.reset || events.length > 0) {"));
-        assert!(APP_JS.contains("persistAgentEdb(meta, store, Boolean(payload.reset), {"));
+        assert!(APP_JS.contains("ui_projection: true"));
+        assert!(APP_JS.contains("deleteDatabase(\"me-edb-cache\")"));
+        assert!(!APP_JS.contains("cache_metadata_only"));
+        assert!(!APP_JS.contains("function projectChat("));
     }
 
     #[test]
@@ -3570,7 +3561,6 @@ mod tests {
         ));
         assert!(APP_JS.contains("const PORTRAIT_LAYOUT = matchMedia(\"(orientation: portrait)\")"));
         assert!(APP_JS.contains("agent.title || agent.id"));
-        assert!(APP_JS.contains("function toolIsChatVisible(name)"));
     }
 
     #[test]
@@ -3619,33 +3609,22 @@ mod tests {
             CHAT_ACTIVITY_TOOL_NAMES,
             &[crate::agent_toolbox::WORKER_WAIT]
         );
-        assert!(APP_JS.contains("state.snapshot.tool_visibility"));
-        assert!(APP_JS.contains("_hiddenTools: new Set()"));
-        assert!(APP_JS.contains("!toolIsChatVisible(value.name)"));
+        assert!(APP_JS.contains("const activity = wait.activity || null;"));
         assert!(APP_JS.contains("function renderWorkerActivity(wait)"));
         assert!(APP_JS.contains("function workerWaitIsVisible(wait)"));
-        assert!(APP_JS.contains("function workerActivityIndex(worker)"));
         assert!(APP_JS.contains("function updateWorkerActivityNode(node, wait)"));
         assert!(APP_JS.contains("node.className = `worker-activity ${view.status}`"));
         assert!(APP_JS.contains("data-worker-tool="));
         assert!(!APP_JS.contains("workerActivityCache.clear()"));
-        assert!(APP_JS.contains("kind === \"ManagerPrompt\""));
-        assert!(APP_JS.contains("index.byPromptId.get(targetTurnId)"));
         assert!(APP_JS.contains("? \"已完成\""));
         assert!(APP_JS.contains("? \"未完成\" : \"正在执行\""));
         assert!(!APP_JS.contains("Worker 正在执行"));
         assert!(!APP_JS.contains("Worker 已完成"));
         assert!(!APP_JS.contains("Worker 已中断"));
         assert!(!APP_JS.contains("Worker 未完成"));
-        assert!(APP_JS.contains("brief: toolBrief(tool),"));
-        assert!(
-            APP_JS
-                .contains("return MeToolPresenters.summarize(tool.name, tool.args || {}).summary;")
-        );
         assert!(APP_JS.contains("<span class=\"worker-tool-marker\">●</span>"));
         assert!(!APP_JS.contains("Worker 执行完成"));
         assert!(!APP_JS.contains("Worker 执行失败"));
-        assert!(APP_JS.contains("agent.parent_agent_id === state.selectedAgent"));
         assert!(STYLE_CSS.contains(".worker-activity-tools"));
         assert!(STYLE_CSS.contains(".worker-tool-name { color: var(--text); font-weight: 400; }"));
         assert!(STYLE_CSS.contains("grid-template-columns: 15px max-content minmax(0, 1fr)"));
@@ -3670,7 +3649,7 @@ mod tests {
         ));
         assert!(APP_JS.contains("MeToolPresenters.renderDetails(view.details)"));
         assert!(APP_JS.contains("function updateToolCardNode(node, tool, followsTool ="));
-        assert!(APP_JS.contains("tool.updates.push(value.content)"));
+        assert!(APP_JS.contains("updates: tool.updates || [],"));
         assert!(STYLE_CSS.contains(
             ".tool-header { display: grid; grid-template-columns: 15px max-content minmax(0, 1fr) auto"
         ));
@@ -3823,7 +3802,7 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_context_usage_drawer_estimates_categories_and_confirms_clear() {
+    fn embedded_webui_context_usage_drawer_displays_projection_and_confirms_clear() {
         assert!(INDEX_HTML.contains("id=\"context-drawer-backdrop\""));
         assert!(INDEX_HTML.contains("id=\"context-ring\""));
         assert!(INDEX_HTML.contains("id=\"context-percent\""));
@@ -3831,9 +3810,7 @@ mod tests {
         assert!(INDEX_HTML.contains("id=\"context-clear\""));
         assert!(INDEX_HTML.contains("id=\"compact-summary-backdrop\""));
         assert!(INDEX_HTML.contains("id=\"compact-summary-content\""));
-        assert!(APP_JS.contains("function estimateContextBreakdown(events, usage, memoryContent)"));
-        assert!(APP_JS.contains("kind === \"ContextUsageEstimate\""));
-        assert!(APP_JS.contains("value.api_state_event_id === boundaryId"));
+        assert!(APP_JS.contains("function projectedContextBreakdown(store)"));
         assert!(APP_JS.contains("系统提示词"));
         assert!(APP_JS.contains("上下文压缩"));
         assert!(APP_JS.contains("label: \"记忆\""));
@@ -3857,8 +3834,6 @@ mod tests {
         assert!(APP_JS.contains("state.contextCompactContent"));
         assert!(APP_JS.contains("state.contextCompactAnalysis"));
         assert!(APP_JS.contains("state.contextMemoryContent"));
-        assert!(APP_JS.contains("function latestCompactPreview(events)"));
-        assert!(APP_JS.contains("value.stage === \"Analysis\""));
         assert!(APP_JS.contains("function compactPreviewMarkdown(analysis, summary)"));
         assert!(APP_JS.contains("## Analysis"));
         assert!(APP_JS.contains("## 压缩摘要"));
@@ -3944,14 +3919,13 @@ mod tests {
 
     #[test]
     fn embedded_webui_exposes_clone_regenerate_and_local_clone_selection() {
-        assert!(APP_JS.contains("finalAnswerEventId: value.id"));
+        assert!(APP_JS.contains("final_answer_event_id: message.finalAnswerEventId"));
         assert!(APP_JS.contains("class=\"clone-turn\""));
         assert!(APP_JS.contains("class=\"regenerate-turn\""));
         assert!(APP_JS.contains("command: \"clone_agent\""));
         assert!(APP_JS.contains("command: \"regenerate\""));
         assert!(APP_JS.contains("if (id) state.pendingAgentSelection = id"));
         assert!(STYLE_CSS.contains(".turn-actions button"));
-        assert!(APP_JS.contains("`克隆完成。新会话：${value.title}`"));
     }
 
     #[test]
@@ -3968,7 +3942,7 @@ mod tests {
 
     #[test]
     fn embedded_webui_synchronizes_runtime_owned_input_drafts() {
-        assert!(APP_JS.contains("function observePromptSubmission(meta, store)"));
+        assert!(APP_JS.contains("function pendingPromptReachedProjection(store)"));
         assert!(APP_JS.contains("if (store.pendingPromptSubmission) return false;"));
         assert!(APP_JS.contains("function observeInputDraft(meta, store)"));
         assert!(APP_JS.contains("function adoptInputDraft(agentId, store, revision, content)"));
@@ -4021,26 +3995,22 @@ mod tests {
         assert!(!INDEX_HTML.contains("role=\"progressbar\""));
         assert!(!STYLE_CSS.contains(".connection-overlay"));
         assert!(!STYLE_CSS.contains(".event-recovery-progress-fill"));
-        assert!(STYLE_CSS.contains(".agent-load-progress"));
-        assert!(APP_JS.contains("function eventRecoveryProgress(recovery, localEventCount)"));
+        assert!(!STYLE_CSS.contains(".agent-load-progress"));
+        assert!(APP_JS.contains("ui_projection: true"));
         assert!(APP_JS.contains("function agentLoadingState(workspaceId, agentId)"));
         assert!(APP_JS.contains("api(\"/api/sync\""));
         assert!(!APP_JS.contains("new WebSocket"));
         assert!(APP_JS.contains("if (state.syncInFlight"));
         assert!(APP_JS.contains("HTTP_SYNC_TIMEOUT_MS"));
         assert!(APP_JS.contains("function failHttpSync(title, error)"));
-        assert!(APP_JS.contains("function httpSyncProgressSignature()"));
-        assert!(
-            APP_JS.contains("const madeProgress = progressBefore !== httpSyncProgressSignature()")
-        );
-        assert!(APP_JS.contains("scheduleHttpSync((message.more_events && madeProgress)"));
+        assert!(APP_JS.contains("await synchronizeProjectionBucket("));
         assert!(APP_JS.contains("HTTP_SYNC_ACTIVE_MS = 250"));
         assert!(APP_JS.contains("HTTP_SYNC_IDLE_MS = 1000"));
         assert!(APP_JS.contains("typeof PORTRAIT_LAYOUT.addListener === \"function\""));
         assert!(!APP_JS.contains(".at(-1)"));
         assert!(!APP_JS.contains(".inert ="));
         assert!(APP_JS.contains("snapshot_revision:"));
-        assert!(APP_JS.contains("mutation_revision: store.mutationRevision"));
+        assert!(APP_JS.contains("projection_revision: store.projectionRevision"));
         assert!(APP_JS.contains("Math.min(RECONNECT_MAX_MS"));
     }
 
@@ -4127,7 +4097,7 @@ mod tests {
 
     #[test]
     fn sidebar_agent_uses_turn_lifecycle_and_stronger_three_second_sweep() {
-        assert!(APP_JS.contains("if (kind === \"AgentTurn\") summary.turnState = value.state;"));
+        assert!(APP_JS.contains("store.summary = projectionSummary(projectionState.summary)"));
         assert!(
             APP_JS.contains("const active = !loadingState.loading && sidebarAgentActive(summary);")
         );
@@ -4163,9 +4133,7 @@ mod tests {
             "@media (prefers-reduced-motion: reduce) { .agent-dot.loading, .agent-dot.active { animation: none; }"
         ));
         assert!(APP_JS.contains("row.classList.toggle(\"session-loading\", loadingState.loading)"));
-        assert!(APP_JS.contains(
-            "percent: Math.floor(eventRecoveryProgress(store.loadProgress, store.eventCount) * 100)"
-        ));
+        assert!(!APP_JS.contains("eventRecoveryProgress"));
         assert!(!APP_JS.contains("item.disabled = startupLoading"));
         assert!(!APP_JS.contains("deleteButton.disabled = startupLoading"));
         assert!(!APP_JS.contains("startupPending: true"));
@@ -4181,17 +4149,14 @@ mod tests {
     }
 
     #[test]
-    fn embedded_webui_projects_appended_events_incrementally() {
+    fn embedded_webui_installs_bounded_projections_incrementally() {
         assert!(APP_JS.contains("pendingRender: emptyRenderRequest()"));
-        assert!(APP_JS.contains("projectedOrder: 0"));
-        assert!(APP_JS.contains("needsReplay: raw"));
         assert!(APP_JS.contains("store.projectionChanges || emptyProjectionChanges()"));
         assert!(APP_JS.contains("/api/ui-projections/"));
-        assert!(APP_JS.contains("store.events.slice(store.projectedOrder)"));
-        assert!(APP_JS.contains("consumeChatEvents(store.projection, appended)"));
-        assert!(APP_JS.contains("consumeWorkMapEvents(store.workmap, appended)"));
-        assert!(APP_JS.contains("workmap._records.clear()"));
-        assert!(APP_JS.contains("chatAppendNeedsReplay(appended)"));
+        assert!(APP_JS.contains("PROJECTION_RANGE_CHUNK = 64"));
+        assert!(APP_JS.contains("PROJECTION_RANGE_LIMIT = 192"));
+        assert!(!APP_JS.contains("store.events"));
+        assert!(!APP_JS.contains("hydrateEdbCache"));
         assert!(APP_JS.contains("function renderIncremental(request)"));
         assert!(APP_JS.contains("api(\"/api/sync\""));
         assert!(APP_JS.contains("method: \"POST\""));
@@ -4200,39 +4165,13 @@ mod tests {
         assert!(!APP_JS.contains("/api/events/"));
         assert!(!APP_JS.contains("/api/terminals/"));
         assert!(!APP_JS.contains("/api/terminal/"));
-        assert!(APP_JS.contains(
-            "status: !bulkRecoveryPending && !forceRecoveredReplay && apiActivityChanged"
-        ));
         assert!(APP_JS.contains("receivedSseEvents"));
         assert!(APP_JS.contains("if (request.status || changes.status) renderStatus()"));
-        assert!(APP_JS.contains("else if (request.workerEvents && state.view.kind === \"chat\")"));
-        assert!(APP_JS.contains("function refreshWorkerActivityCards()"));
         assert!(APP_JS.contains("function showView(view)"));
-        let sync_agent_events = APP_JS
-            .split_once("function syncAgentEvents(meta, payload) {")
-            .and_then(|(_, tail)| tail.split_once("\nfunction observeInputDraft("))
-            .map(|(body, _)| body)
-            .expect("syncAgentEvents function should exist");
-        assert!(!sync_agent_events.contains("renderAll();"));
-        let cache_hydration = APP_JS
-            .split_once("async function hydrateEdbCache(snapshot) {")
-            .and_then(|(_, tail)| tail.split_once("\nfunction persistAgentEdb("))
-            .map(|(body, _)| body)
-            .expect("hydrateEdbCache function should exist");
-        assert_eq!(cache_hydration.matches("renderAll();").count(), 1);
-        assert_eq!(APP_JS.matches("renderAll();").count(), 6);
+        assert!(APP_JS.contains("function synchronizeProjectionStore("));
+        assert!(APP_JS.contains("function installProjectionState("));
         assert!(APP_JS.contains("if (changes.workmap)"));
-        assert!(APP_JS.contains("while (cache.nextOrder < events.length)"));
-        assert!(APP_JS.contains("store.needsReplay = true"));
-        assert!(APP_JS.contains("function projectAgentSummary(events)"));
-        assert!(APP_JS.contains("updateAgentSummary(store.summary, events)"));
         assert!(APP_JS.contains("const summary = bucket.stores.get(agent.id)?.summary"));
-        assert_eq!(
-            APP_JS
-                .matches("store.projection = projectChat(store.events)")
-                .count(),
-            2
-        );
         assert!(!APP_JS.contains("projectionDirty"));
         assert!(!APP_JS.contains("renderPending"));
         assert!(APP_JS.contains("if (!inputHasPriority()) flushPendingRender()"));
@@ -4254,7 +4193,6 @@ mod tests {
         assert!(APP_JS.contains("for (let index = start; index < end; index += 1)"));
         assert!(APP_JS.contains("transcriptVirtualizer.update(messages"));
         assert!(!APP_JS.contains("projection.messages.filter((message) =>"));
-        assert!(APP_JS.contains("projection._messageByKey.get(`tool:${node.dataset.workerWait}`)"));
         assert!(APP_JS.contains("function markPendingPromptConfirmation(store, changes)"));
         assert!(APP_JS.contains("return markPendingPromptConfirmation(store, changes)"));
     }
@@ -4319,14 +4257,6 @@ mod tests {
 
     #[test]
     fn embedded_webui_places_completed_turn_elapsed_after_the_final_answer() {
-        assert!(APP_JS.contains("_turnStartedAt: new Map()"));
-        assert!(APP_JS.contains("_lastAssistantByPrompt: new Map()"));
-        assert!(APP_JS.contains("case \"AgentTurn\""));
-        assert!(APP_JS.contains("if (stateName === \"completed\")"));
-        assert!(
-            APP_JS.contains("projection.messages[projection.messages.length - 1] === assistant")
-        );
-        assert!(APP_JS.contains("kind: \"turn-toolbar\""));
         assert!(APP_JS.contains("function formatTurnElapsed(ms)"));
         assert!(APP_JS.contains("function formatTurnCompletedAt(timestamp, now = Date.now())"));
         assert!(
@@ -4335,12 +4265,7 @@ mod tests {
         assert!(APP_JS.contains(
             "daysAgo === 0 ? \"今天\" : daysAgo === 1 ? \"昨天\" : daysAgo === 2 ? \"前天\""
         ));
-        assert!(APP_JS.contains("_turnContextBaseline: new Map()"));
-        assert!(APP_JS.contains(
-            "function completedTurnContextGrowth(completedApiUsage, promptId, contextBaseline)"
-        ));
         assert!(APP_JS.contains("function formatTurnTokens(tokens)"));
-        assert!(APP_JS.contains("tokenCount: completedTurnContextGrowth("));
         assert!(APP_JS.contains("`${hours}h ${String(minutes).padStart(2, \"0\")}m ${String(seconds).padStart(2, \"0\")}s`"));
         assert!(APP_JS.contains("return `${seconds}s`;"));
         assert!(APP_JS.contains("aria-label=\"本轮用时\""));

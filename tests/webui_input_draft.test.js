@@ -4,7 +4,6 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
-require("../src/webui/edb-cache.js");
 const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 function loadDraftRuntime(options = {}) {
@@ -18,7 +17,7 @@ function loadDraftRuntime(options = {}) {
     `${source.slice(0, eventBindings)}
     return {
       api, state, elements, observeInputDraft, saveDraft, beginInputComposition, endInputComposition,
-      projectChat, pendingPromptReachedProjection, promptSubmissionBoundary,
+      pendingPromptReachedProjection, promptSubmissionBoundary,
       commandResultIsUnknown, cancelPendingPromptSubmission, finishPendingPromptSubmission, sendCommand,
       restoreDraft, flushDraftBeforePageCloses, queueDraftUpdate, runDraftSync, pauseDraftSyncForSubmission,
       autoSizeInput,
@@ -132,10 +131,6 @@ function jsonResponse(payload) {
 
 async function flushMicrotasks(turns = 12) {
   for (let index = 0; index < turns; index += 1) await Promise.resolve();
-}
-
-function event(kind, id, value = {}) {
-  return { [kind]: { id, timestamp_ms: id * 10, ...value } };
 }
 
 describe("WebUI authoritative input draft synchronization", () => {
@@ -287,30 +282,29 @@ describe("WebUI authoritative input draft synchronization", () => {
     expect(elements.input.value).toBe(pending.displayContent);
   });
 
-  test("only a matching authoritative UserPrompt or FollowUpPrompt after the boundary confirms pending", () => {
-    const { projectChat, pendingPromptReachedProjection } = loadDraftRuntime();
+  test("only a matching authoritative user projection after the boundary confirms pending", () => {
+    const { pendingPromptReachedProjection } = loadDraftRuntime();
     const pending = { content: "相同正文", displayContent: "相同正文", afterEventId: 10 };
-    const reached = (events) => pendingPromptReachedProjection({
-      pendingPromptSubmission: pending,
-      projection: projectChat(events),
+    const reached = (message) => pendingPromptReachedProjection({
+      pendingPromptSubmission: pending, projection: { messages: [message] },
     });
-
-    expect(reached([event("UserPrompt", 10, { content: "相同正文" })])).toBe(false);
-    expect(reached([event("UserPrompt", 11, { content: "其他正文" })])).toBe(false);
-    expect(reached([event("ManagerPrompt", 11, { content: "相同正文" })])).toBe(false);
-    expect(reached([event("UserPrompt", 11, { content: "相同正文" })])).toBe(true);
-    expect(reached([event("FollowUpPrompt", 12, { content: "相同正文" })])).toBe(true);
+    const message = { kind: "user", key: "user:11", eventId: 11, content: "相同正文" };
+    expect(reached({ ...message, eventId: 10 })).toBe(false);
+    expect(reached({ ...message, content: "其他正文" })).toBe(false);
+    expect(reached({ ...message, key: "agent-prompt:11" })).toBe(false);
+    expect(reached({ ...message, kind: "assistant" })).toBe(false);
+    expect(reached(message)).toBe(true);
+    expect(reached({ ...message, key: "user:12", eventId: 12 })).toBe(true);
   });
 
-  test("submission boundary prefers projection authority, then snapshot and raw Events", () => {
+  test("submission boundary prefers projection authority, then snapshot", () => {
     const { promptSubmissionBoundary } = loadDraftRuntime();
-    const store = { events: [event("AssistResponse", 7, { content: "done" })] };
+    const store = {};
     expect(promptSubmissionBoundary({ last_event_id: 9 }, {
       ...store, projectionState: { last_event_id: 11 },
     })).toBe(11);
     expect(promptSubmissionBoundary({ last_event_id: 9 }, store)).toBe(9);
-    expect(promptSubmissionBoundary({}, store)).toBe(7);
-    expect(promptSubmissionBoundary({}, { events: [] })).toBe(-1);
+    expect(promptSubmissionBoundary({}, store)).toBe(-1);
   });
 
   test("authoritative completion adopts the latest Runtime draft and resumes synchronization", () => {

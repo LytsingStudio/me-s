@@ -3,7 +3,6 @@
 const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
-require("../src/webui/edb-cache.js");
 const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 function loadSendShortcutRuntime(cookie = "", location = { protocol: "http:", port: "38199" }) {

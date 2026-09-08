@@ -7,6 +7,7 @@ const { join } = require("node:path");
 const PACKAGE_ASSETS = [
   "ME-macos-universal.pkg",
   "ME-windows-x86_64-setup.exe",
+  "ME-windows-x86_64-portable.zip",
   "ME-linux-x86_64.run",
   "ME-linux-arm64.run",
 ];

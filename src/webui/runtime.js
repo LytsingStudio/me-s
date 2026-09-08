@@ -14,7 +14,6 @@
       nativeDownload: false,
       pageTitle: "ME-S",
       brandTitle: "ME-S",
-      cacheStorageLabel: "当前浏览器",
       sessionSectionTitle: "会话",
       newSessionLabel: "新建会话",
     }),
@@ -43,15 +42,6 @@
     },
     persistSelection() {
       return Promise.resolve();
-    },
-    createEdbCache() {
-      return globalThis.MeEdbCache.create();
-    },
-    loadCachedSessions(cache, _snapshot, scope) {
-      return cache.loadScope(scope);
-    },
-    cacheKey(scope, agentId) {
-      return globalThis.MeEdbCache.sessionKey(scope, agentId);
     },
   };
 

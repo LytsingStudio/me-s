@@ -4,7 +4,6 @@ const { describe, expect, test } = require("bun:test");
 const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
-require("../src/webui/edb-cache.js");
 const { installDirectFrontendRuntime } = require("./webui_runtime_stub.js");
 
 function loadToolPresenters() {
@@ -21,27 +20,13 @@ function loadProjectionRuntime() {
   const factory = new Function("document", "performance", "matchMedia", "MeToolPresenters", `${source.slice(0, eventBindings)}
     return {
       state,
-      emptyProjection,
-      projectChat,
-      consumeChatEvents,
-      chatAppendNeedsReplay,
-      emptyWorkMap,
-      projectWorkMap,
-      consumeWorkMapEvents,
-      workerActivityIndex,
-      applyCompactApiActivity,
-      estimateContextBreakdown,
+      createAgentStore, installProjectionState, applyCompactApiActivity, projectedContextBreakdown,
+      workerActivityView, messageRenderRevision,
       toolBrief,
       renderToolCard,
       toolImageItems,
       updateToolImageGallery,
       renderMessageHtml,
-      eventRecoveryBacklog,
-      shouldUseBulkEventRecovery,
-      createEventRecovery,
-      eventRecoveryProgress,
-      eventRecoveryMatches,
-      selectedEventRecoveryReady,
     };`);
   const runtime = factory(
     { querySelector: () => null, documentElement: { classList: { toggle() {} } } },
@@ -49,41 +34,10 @@ function loadProjectionRuntime() {
     () => ({ matches: false, addEventListener: () => {} }),
     loadToolPresenters(),
   );
-  runtime.state.snapshot.tool_visibility = {
-    hidden_names: ["SetTitle"],
-    hidden_prefixes: ["WorkMap.", "Worker."],
-    activity_names: ["Worker.Wait"],
-  };
   return runtime;
 }
 
-function event(kind, id, value = {}) {
-  return { [kind]: { id, timestamp_ms: id * 10, ...value } };
-}
-
-function visibleProjection(projection) {
-  return {
-    messages: projection.messages,
-    apiState: projection.apiState,
-    apiUsage: projection.apiUsage,
-    model: projection.model,
-    effort: projection.effort,
-    turnState: projection.turnState,
-  };
-}
-
-function assertIncrementalChatMatchesReplay(runtime, events) {
-  let projection = runtime.emptyProjection();
-  const prefix = [];
-  for (const next of events) {
-    prefix.push(next);
-    if (runtime.chatAppendNeedsReplay([next])) projection = runtime.projectChat(prefix);
-    else runtime.consumeChatEvents(projection, [next]);
-    expect(visibleProjection(projection)).toEqual(visibleProjection(runtime.projectChat(prefix)));
-  }
-}
-
-describe("WebUI incremental event projections", () => {
+describe("WebUI projection presentation", () => {
   test("View and Send show ordered previews while collapsed and preserve a stable gallery", () => {
     const runtime = loadProjectionRuntime();
     runtime.state.selectedAgent = "main";
@@ -176,237 +130,77 @@ describe("WebUI incremental event projections", () => {
     expect(styles).toContain(".notice-content, .session-content { color: var(--muted); line-height: 1.55;");
   });
 
-  test("uses the persisted normalized context categories", () => {
+  test("uses normalized context categories and optional previews from projection state", () => {
     const runtime = loadProjectionRuntime();
-    const usage = { input_tokens: 9_000, output_tokens: 1_000, total_tokens: 10_000 };
-    const events = [
-      event("ModelChanged", 1, { model: "model-a", cause: "Initial" }),
-      event("UserPrompt", 2, { content: "tiny prompt" }),
-      event("ApiStateUpdate", 3, {
-        api_call_id: 3, prompt_id: 2, state: "Completed", usage,
-      }),
-      event("ContextUsageEstimate", 4, {
-        api_state_event_id: 3,
-        values: { system: 6_000, compact: 0, memory: 0, user: 2_000, model: 1_000, tool: 1_000 },
-      }),
-    ];
-    expect(runtime.estimateContextBreakdown(events, usage, null).values).toEqual({
-      system: 6_000,
-      compact: 0,
-      memory: 0,
-      user: 2_000,
-      model: 1_000,
-      tool: 1_000,
+    const context = { total: 10000,
+      values: { system: 6000, compact: 0, memory: 0, user: 2000, model: 1000, tool: 1000 },
+      compact_content: "summary", compact_analysis: "analysis", memory_content: "history" };
+    const store = runtime.createAgentStore({ id: "main" });
+    runtime.installProjectionState(store, { agent_id: "main", revision: "1", count: 0, context });
+    expect(runtime.projectedContextBreakdown(store)).toEqual({
+      total: 10000, values: context.values, compactContent: "summary",
+      compactAnalysis: "analysis", memoryContent: "history",
     });
   });
 
-  test("matches full replay throughout a streamed tool turn", () => {
+  test("applies transient Compact SSE counts to the resident notice and keeps stage updates", () => {
     const runtime = loadProjectionRuntime();
-    assertIncrementalChatMatchesReplay(runtime, [
-      event("ModelChanged", 1, { model: "model-a", cause: "Initial" }),
-      event("ReasoningEffortChanged", 2, { effort: "high", cause: "Initial" }),
-      event("UserPrompt", 3, { content: "hello" }),
-      event("ApiStateUpdate", 4, { api_call_id: "api-1", prompt_id: 3, state: "Requesting" }),
-      event("AssistResponse", 5, { prompt_id: 3, content: "I will check.\n", finished: false }),
-      event("ToolCall", 6, {
-        id: 6, api_call_id: "api-1", prompt_id: 3, name: "Terminal.Create", arguments: "{}",
-      }),
-      event("ApiStateUpdate", 7, {
-        api_call_id: "api-1", prompt_id: 3, state: "Completed",
-        usage: { input_tokens: 10, output_tokens: 5, total_tokens: 15 },
-      }),
-      event("ToolInfoUpdate", 8, { tool_call_id: 6, content: { kind: "text", value: "ready\n" } }),
-      event("ToolCallResult", 9, { tool_call_id: 6, state: "Succeeded", exit_code: 0, detail: "{}" }),
-      event("ApiStateUpdate", 10, { api_call_id: "api-2", prompt_id: 3, state: "Requesting" }),
-      event("AssistResponse", 11, { prompt_id: 3, content: "done", finished: false }),
-      event("AssistResponse", 12, { prompt_id: 3, content: "!", finished: true }),
-      event("ApiStateUpdate", 13, {
-        api_call_id: "api-2", prompt_id: 3, state: "Completed",
-        usage: { input_tokens: 20, output_tokens: 8, total_tokens: 28 },
-      }),
-      event("AgentTurn", 14, { turn_id: 1, prompt_id: 3, state: "Completed" }),
-    ]);
-  });
-
-  test("reports the earliest changed message instead of invalidating all history", () => {
-    const runtime = loadProjectionRuntime();
-    const projection = runtime.emptyProjection();
-    const user = runtime.consumeChatEvents(projection, [
-      event("UserPrompt", 1, { content: "hello" }),
-    ]);
-    expect(user.transcriptFrom).toBe(0);
-
-    const firstLine = runtime.consumeChatEvents(projection, [
-      event("AssistResponse", 2, { prompt_id: 1, content: "line one\n", finished: false }),
-    ]);
-    expect(firstLine.transcriptFrom).toBe(1);
-
-    const secondLine = runtime.consumeChatEvents(projection, [
-      event("AssistResponse", 3, { prompt_id: 1, content: "line two", finished: false }),
-    ]);
-    expect(secondLine.transcriptFrom).toBe(1);
-
-    const toolCall = runtime.consumeChatEvents(projection, [event("ToolCall", 4, {
-      id: 4, api_call_id: "api-1", prompt_id: 1, name: "Terminal.Create", arguments: "{}",
-    })]);
-    expect(toolCall.transcriptFrom).toBe(2);
-    const toolUpdate = runtime.consumeChatEvents(projection, [
-      event("ToolInfoUpdate", 5, { tool_call_id: 4, content: { kind: "text", value: "ready" } }),
-    ]);
-    expect(toolUpdate.transcriptFrom).toBe(2);
-  });
-
-  test("projects Compact stages and applies transient SSE activity without persisting it", () => {
-    const runtime = loadProjectionRuntime();
-    const events = [
-      event("CompactStateUpdate", 1, {
-        compact_id: 1, tool_call_id: 0, prompt_id: 0,
-        kind: "MainAgentMultiTurn", total_stages: 6, state: "Started", stage: null,
-      }),
-      event("ApiStateUpdate", 2, {
-        api_call_id: 100, prompt_id: 0, state: "Completed",
-        usage: { input_tokens: 20_000, output_tokens: 1_234, total_tokens: 21_234 },
-      }),
-      event("CompactStateUpdate", 3, {
-        compact_id: 1, tool_call_id: 0, prompt_id: 0,
-        kind: "MainAgentMultiTurn", total_stages: 6,
-        state: "StageCompleted", stage: "Analysis",
-      }),
-      event("ApiStateUpdate", 4, {
-        api_call_id: 101, prompt_id: 0, state: "Error", detail: "network",
-        usage: { input_tokens: 20_000, output_tokens: 2_366, total_tokens: 22_366 },
-      }),
-      event("ApiStateUpdate", 5, {
-        api_call_id: 101, prompt_id: 0, state: "Interrupted", detail: "closed",
-      }),
-      event("CompactStateUpdate", 6, {
-        compact_id: 1, tool_call_id: 0, prompt_id: 0,
-        kind: "MainAgentMultiTurn", total_stages: 6,
-        state: "Failed", stage: null, detail: "failed",
-      }),
-    ];
-    const projection = runtime.emptyProjection();
-    runtime.consumeChatEvents(projection, events.slice(0, 1));
-    expect(projection.messages[0].content).toBe("正在压缩 (1/6) ...");
-    for (const [kind, total, expected] of [
-      ["ManagerMultiTurn", 7, "正在压缩 (1/7) ..."],
-      ["WorkerSingleTurn", 1, "正在压缩 (1/1) ..."],
-    ]) {
-      const kindProjection = runtime.emptyProjection();
-      runtime.consumeChatEvents(kindProjection, [event("CompactStateUpdate", 20, {
-        compact_id: 20, tool_call_id: 19, prompt_id: 18,
-        kind, total_stages: total, state: "Started", stage: null,
-      })]);
-      expect(kindProjection.messages[0].content).toBe(expected);
-    }
-    runtime.consumeChatEvents(projection, events.slice(1, 2));
-    expect(projection.messages[0].content).toBe("正在压缩 (1/6) ...");
-    runtime.applyCompactApiActivity(projection, { active: true, receivedSseEvents: 37 });
-    expect(projection.messages[0].content).toBe("正在压缩 (1/6) ... ↓ 37");
-    runtime.applyCompactApiActivity(projection, { active: false, receivedSseEvents: 0 });
-    expect(projection.messages[0].content).toBe("正在压缩 (1/6) ...");
-    runtime.consumeChatEvents(projection, events.slice(2, 3));
-    expect(projection.messages[0].content).toBe("正在压缩 (2/6) ...");
-    runtime.consumeChatEvents(projection, events.slice(3, 4));
-    expect(projection.messages[0].content).toBe("正在压缩 (2/6) ...");
-    runtime.consumeChatEvents(projection, events.slice(4));
-    expect(projection.messages[0].content).toBe("压缩失败");
-    expect(visibleProjection(projection)).toEqual(visibleProjection(runtime.projectChat(events)));
-
-    for (const [state, expected] of [
-      ["Completed", "上下文已压缩"],
-      ["Interrupted", "压缩中断"],
-    ]) {
-      const terminal = [events[0], event("CompactStateUpdate", 2, {
-        compact_id: 1, tool_call_id: 0, prompt_id: 0,
-        kind: "MainAgentMultiTurn", state, stage: null, detail: "terminal",
-      })];
-      expect(runtime.projectChat(terminal).messages[0].content).toBe(expected);
+    for (const [kind, total] of [["MainAgentMultiTurn", 6], ["ManagerMultiTurn", 7], ["WorkerSingleTurn", 1]]) {
+      const store = runtime.createAgentStore({ id: "main" });
+      for (let stage = 1; stage <= total; stage++) {
+        const notice = { key: "compact:1", revision: stage, kind: "notice", content: `正在压缩 (${stage}/${total}) ...` };
+        runtime.installProjectionState(store, {
+          agent_id: "main", revision: String(stage), count: 1, changed_from: 0,
+          compact_activity: { compact_id: 1, kind, total_stages: total, stage, message_key: notice.key },
+        }, { agent_id: "main", revision: String(stage), count: 1, start: 0, end: 1, projections: [notice] });
+        const projection = store.projection;
+        const changes = runtime.applyCompactApiActivity(projection, { active: true, receivedSseEvents: 37 });
+        expect(changes.transcriptFrom).toBe(0);
+        expect(projection.messages[0].content).toBe(`正在压缩 (${stage}/${total}) ... ↓ 37`);
+        expect(runtime.applyCompactApiActivity(projection, { active: true, receivedSseEvents: 37 }).transcript).toBe(false);
+        runtime.applyCompactApiActivity(projection, { active: false, receivedSseEvents: 0 });
+        expect(projection.messages[0].content).toBe(`正在压缩 (${stage}/${total}) ...`);
+      }
+      for (const [index, content] of ["上下文已压缩", "压缩中断", "压缩失败"].entries()) {
+        const revision = `end-${index}`;
+        runtime.installProjectionState(store, { agent_id: "main", revision, count: 1, changed_from: 0 },
+          { agent_id: "main", revision, count: 1, start: 0, end: 1,
+            projections: [{ key: "compact:1", revision, kind: "notice", content }] });
+        expect(runtime.applyCompactApiActivity(store.projection, { active: true, receivedSseEvents: 99 }).transcript).toBe(false);
+        expect(store.projection.messages[0].content).toBe(content);
+      }
     }
   });
 
-  test("replays only when an appended event invalidates visible history", () => {
+  test("installs WorkMap with the projection revision without deriving mutation records", () => {
     const runtime = loadProjectionRuntime();
-    const events = [
-      event("UserPrompt", 1, { content: "retry this" }),
-      event("ApiStateUpdate", 2, { api_call_id: "bad", prompt_id: 1, state: "Requesting" }),
-      event("AssistResponse", 3, { prompt_id: 1, content: "discard me", finished: false }),
-      event("ApiStateUpdate", 4, { api_call_id: "bad", prompt_id: 1, state: "Error", detail: "network" }),
-      event("ApiStateUpdate", 5, { api_call_id: "bad", prompt_id: 1, state: "Retrying", retry_count: 1, retry_limit: 10 }),
-      event("ApiStateUpdate", 6, { api_call_id: "good", prompt_id: 1, state: "Requesting" }),
-      event("AssistResponse", 7, { prompt_id: 1, content: "keep me", finished: true }),
-      event("ApiStateUpdate", 8, { api_call_id: "good", prompt_id: 1, state: "Completed" }),
-      event("ContextCleared", 9),
-      event("UserPrompt", 10, { content: "after clear" }),
-      event("ToolCall", 11, {
-        id: 11, api_call_id: "compact-api", prompt_id: 10, name: "Compact", arguments: "{}",
-      }),
-      event("ToolCallResult", 12, { tool_call_id: 11, state: "Succeeded", detail: "{}" }),
-      event("CompactStateUpdate", 13, { state: "Completed", tool_call_id: 11, prompt_id: 10 }),
-    ];
-    expect(runtime.chatAppendNeedsReplay([events[1]])).toBe(false);
-    expect(runtime.chatAppendNeedsReplay([events[3]])).toBe(true);
-    expect(runtime.chatAppendNeedsReplay([events[8]])).toBe(true);
-    expect(runtime.chatAppendNeedsReplay([events[12]])).toBe(true);
-    assertIncrementalChatMatchesReplay(runtime, events);
+    const store = runtime.createAgentStore({ id: "main" });
+    const workmap = { memory: { facts: [], agreements: [] }, history: [], recordCount: 2, current: {
+      objective: { id: "objective-1", title: "Ship", state: "active" },
+      plans: [{ plan: { id: "plan-1", title: "Build", state: "active", order: 0 }, notes: [] }],
+    } };
+    runtime.installProjectionState(store, { agent_id: "main", revision: "1", count: 0, workmap });
+    expect(store.workmap).toBe(workmap);
+    expect(store.projectionChanges.workmap).toBe(true);
+    const next = structuredClone(workmap);
+    next.current.plans[0].plan.state = "completed";
+    next.current.plans[0].notes.push({ id: "note-1", content: "verified" });
+    runtime.installProjectionState(store, { agent_id: "main", revision: "2", count: 0, workmap: next });
+    expect(store.workmap).toBe(next);
+    expect(store.projectionRevision).toBe("2");
   });
 
-  test("updates WorkMap from appended mutation records", () => {
+  test("renders embedded worker activity without reading another session", () => {
     const runtime = loadProjectionRuntime();
-    const first = event("WorkMapMutation", 1, { mutation: { records: [
-      { kind: "objective", record: { id: "objective-1", title: "Ship", state: "active", created_at_ms: 1 } },
-      { kind: "plan", record: { id: "plan-1", objective_id: "objective-1", title: "Build", state: "active", order: 0 } },
-    ] } });
-    const second = event("WorkMapMutation", 2, { mutation: { records: [
-      { kind: "plan", record: { id: "plan-1", objective_id: "objective-1", title: "Build", state: "completed", order: 0 } },
-      { kind: "note", record: { id: "note-1", plan_id: "plan-1", kind: "finding", content: "verified", sequence: 0 } },
-    ] } });
-    const incremental = runtime.emptyWorkMap();
-    expect(runtime.consumeWorkMapEvents(incremental, [first])).toBe(true);
-    expect(runtime.consumeWorkMapEvents(incremental, [second])).toBe(true);
-    expect({ ...incremental, _records: undefined })
-      .toEqual({ ...runtime.projectWorkMap([first, second]), _records: undefined });
-  });
-
-  test("locks the 100 Event recovery boundary and fixed high-water mark", () => {
-    const runtime = loadProjectionRuntime();
-    expect(runtime.eventRecoveryBacklog(99, 0)).toBe(99);
-    expect(runtime.eventRecoveryBacklog(100, 0)).toBe(100);
-    expect(runtime.eventRecoveryBacklog(101, 0)).toBe(101);
-    expect(runtime.shouldUseBulkEventRecovery(99, 0)).toBe(false);
-    expect(runtime.shouldUseBulkEventRecovery(100, 0)).toBe(false);
-    expect(runtime.shouldUseBulkEventRecovery(101, 0)).toBe(true);
-    expect(runtime.shouldUseBulkEventRecovery(151, 50)).toBe(true);
-
-    const recovery = runtime.createEventRecovery("main", 7, 151, 50);
-    expect(recovery).toEqual({ agentId: "main", mutationRevision: 7, startEventCount: 50, targetEventCount: 151 });
-    expect(runtime.eventRecoveryProgress(recovery, 50)).toBe(0);
-    expect(runtime.eventRecoveryProgress(recovery, 101)).toBe(51 / 101);
-    expect(runtime.eventRecoveryProgress(recovery, 151)).toBe(1);
-    expect(runtime.eventRecoveryProgress(recovery, 220)).toBe(1);
-    expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 150)).toBe(false);
-    expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 151)).toBe(true);
-    expect(runtime.selectedEventRecoveryReady(recovery, "main", 7, 220)).toBe(true);
-    expect(runtime.eventRecoveryMatches(recovery, "other", 7)).toBe(false);
-    expect(runtime.eventRecoveryMatches(recovery, "main", 8)).toBe(false);
-    expect(runtime.createEventRecovery("main", 7, 150, 50)).toBeNull();
-  });
-
-  test("advances one Worker activity index without rescanning its prefix", () => {
-    const runtime = loadProjectionRuntime();
-    const events = [event("ManagerPrompt", 1, { content: "inspect" })];
-    runtime.state.stores.set("worker-1", { events, mutationRevision: 0 });
-    const worker = { id: "worker-1" };
-    const index = runtime.workerActivityIndex(worker);
-    events.push(event("ToolCall", 2, {
-      id: 2, api_call_id: "api-1", prompt_id: 1, name: "File.Read", arguments: "{}",
-    }));
-    events.push(event("ToolCallResult", 3, {
-      tool_call_id: 2, state: "Succeeded", detail: "read file",
-    }));
-    expect(runtime.workerActivityIndex(worker)).toBe(index);
-    expect(index.turns).toHaveLength(1);
-    expect(index.turns[0].tools).toHaveLength(1);
-    expect(index.turns[0].tools[0].result.state).toBe("Succeeded");
+    const wait = { id: 7, revision: 1, activity: { revision: 1, state: "running",
+      tools: [{ id: 8, name: "File.Read", args: { path: "file.txt" }, result: null }],
+    } };
+    const message = { key: "tool:7", kind: "worker-activity", tool: wait };
+    expect(runtime.workerActivityView(wait)).toMatchObject({ status: "running", title: "正在执行" });
+    const previous = runtime.messageRenderRevision(message, false);
+    wait.activity = { revision: 2, state: "completed", tools: [{ ...wait.activity.tools[0], result: { state: "Succeeded" } }] };
+    expect(runtime.workerActivityView(wait)).toMatchObject({ status: "succeeded", title: "已完成" });
+    expect(runtime.messageRenderRevision(message, false)).not.toBe(previous);
+    expect(runtime.state.stores.size).toBe(0);
   });
 });

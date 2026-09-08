@@ -20,7 +20,6 @@ const assets = [
   [resolve(webuiRoot, "transcript.js"), "transcript.js"],
   [resolve(webuiRoot, "tool-presenters.js"), "tool-presenters.js"],
   [resolve(webuiRoot, "image-gallery.js"), "image-gallery.js"],
-  [resolve(webuiRoot, "edb-cache.js"), "edb-cache.js"],
   [resolve(webuiRoot, "file-manager.js"), "file-manager.js"],
   [resolve(webuiRoot, "session-terminal.js"), "session-terminal.js"],
   [resolve(webuiRoot, "remote-control.js"), "remote-control.js"],
