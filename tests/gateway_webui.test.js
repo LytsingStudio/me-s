@@ -81,6 +81,10 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
       blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
       modelSettingsHtml: typeof modelSettingsHtml === "function" ? modelSettingsHtml : null,
       persistGatewaySelection: typeof persistGatewaySelection === "function" ? persistGatewaySelection : null,
+      loadDirectoryListing, renderDirectoryBrowser,
+      configureDirectoryTest(request, notify) {
+        api = request; toast = notify; renderDirectoryRows = () => {};
+      },
       directoryParentRequest: typeof directoryParentRequest === "function" ? directoryParentRequest : null,
       directoryEntryType: typeof directoryEntryType === "function" ? directoryEntryType : null,
       formatDirectorySize: typeof formatDirectorySize === "function" ? formatDirectorySize : null,
@@ -1234,6 +1238,108 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(app).toContain("${escapeHtml(runtimeCapabilities.brandTitle)}");
     expect(index).not.toContain("智能工作台");
     expect(styles).not.toContain(".login-brand span");
+  });
+
+  function directoryHarness(mode = "open", roots = false) {
+    const runtime = loadRuntime("../src/webui/app.js");
+    const node = (disabled = false) => ({
+      disabled, value: "", listeners: {},
+      classList: { add() {}, remove() {}, toggle() {} },
+      addEventListener(type, callback) { this.listeners[type] = callback; },
+      focus() {},
+    });
+    const input = node();
+    const form = node();
+    const up = node(roots);
+    const nodes = { ".directory-current-path": input, ".directory-current": form, ".directory-browser": node() };
+    runtime.elements.modalContent = {
+      innerHTML: "", querySelector: (selector) => nodes[selector] || null,
+      querySelectorAll: (selector) => selector === "[data-directory-control]" ? [input, up] : [],
+    };
+    runtime.elements.modalConfirm = node(roots);
+    const listing = { path: roots ? null : "/start", parent: null, root_selector: roots, entries: [] };
+    const directory = { mode, listing, pathDraft: listing.path || "", searchQuery: "", sortKey: "name", sortDirection: "asc", workspaceName: "project" };
+    runtime.state.modal = { directory, busy: false };
+    return { runtime, directory, input, form, up };
+  }
+
+  test("directory address submit only browses in both open and create modes", async () => {
+    for (const mode of ["open", "create"]) {
+      const { runtime, directory, input, form } = directoryHarness(mode);
+      const calls = [];
+      const notices = [];
+      runtime.configureDirectoryTest(async (path, options) => {
+        calls.push([path, JSON.parse(options.body)]);
+        return { path: "/目录 with spaces", parent: "/", entries: [] };
+      }, (message) => notices.push(message));
+      runtime.renderDirectoryBrowser();
+      expect(runtime.elements.modalContent.innerHTML).toContain('<form class="directory-current">');
+      expect(runtime.elements.modalContent.innerHTML).toContain('aria-label="目录路径"');
+      input.value = "   ";
+      form.listeners.submit({ preventDefault() {} });
+      expect(calls).toHaveLength(0);
+      expect(notices).toEqual(["请输入目录路径"]);
+      let prevented = false;
+      input.listeners.keydown({ key: "Enter", isComposing: true, preventDefault() { prevented = true; } });
+      expect(prevented).toBe(true);
+      input.value = "  /目录 with spaces  ";
+      input.listeners.input();
+      runtime.renderDirectoryBrowser();
+      expect(runtime.elements.modalContent.innerHTML).toContain('value="  /目录 with spaces  "');
+      form.listeners.submit({ preventDefault() {} });
+      expect(runtime.elements.modalConfirm.disabled).toBe(true);
+      await Promise.resolve();
+      expect(calls).toEqual([["/api/gateway/directories", { path: "/目录 with spaces", roots: false }]]);
+      expect(directory.listing.path).toBe("/目录 with spaces");
+      expect(directory.pathDraft).toBe("/目录 with spaces");
+      expect(directory.workspaceName).toBe("project");
+      expect(runtime.state.modal.directory).toBe(directory);
+      expect(runtime.elements.modalConfirm.disabled).toBe(false);
+    }
+  });
+
+  test("directory navigation keeps the original listing and draft on error and serializes requests", async () => {
+    const { runtime, directory, input, up } = directoryHarness("open", true);
+    const notices = [];
+    let reject;
+    let requests = 0;
+    runtime.configureDirectoryTest(() => { requests++; return new Promise((_, fail) => { reject = fail; }); }, (message) => notices.push(message));
+    runtime.renderDirectoryBrowser();
+    expect(runtime.elements.modalContent.innerHTML).toContain('placeholder="此电脑 · 输入目录路径"');
+    expect(input.disabled).toBe(false);
+    const original = directory.listing;
+    directory.pathDraft = "/missing";
+    const pending = runtime.loadDirectoryListing(directory.pathDraft);
+    await runtime.loadDirectoryListing("/other");
+    expect(requests).toBe(1);
+    expect(input.disabled).toBe(true);
+    reject(new Error("Path is not a directory"));
+    await pending;
+    expect(directory.listing).toBe(original);
+    expect(directory.pathDraft).toBe("/missing");
+    expect(directory.loading).toBe(false);
+    expect(input.disabled).toBe(false);
+    expect(up.disabled).toBe(true);
+    expect(runtime.elements.modalConfirm.disabled).toBe(true);
+    expect(notices).toEqual(["Path is not a directory"]);
+  });
+
+  test("directory navigation ignores a late result after the modal is replaced", async () => {
+    for (const fail of [false, true]) {
+      const { runtime, directory } = directoryHarness();
+      const notices = [];
+      let resolve, reject;
+      runtime.configureDirectoryTest(() => new Promise((ok, error) => { resolve = ok; reject = error; }), (message) => notices.push(message));
+      const pending = runtime.loadDirectoryListing("/late");
+      runtime.state.modal = { kind: "other" };
+      runtime.elements.modalConfirm.disabled = true;
+      if (fail) reject(new Error("late failure"));
+      else resolve({ path: "/late", entries: [] });
+      await pending;
+      expect(directory.listing.path).toBe("/start");
+      expect(runtime.elements.modalConfirm.disabled).toBe(true);
+      expect(notices).toEqual([]);
+    }
   });
 
   test("sorts, filters, and formats host directory metadata without recursion", () => {

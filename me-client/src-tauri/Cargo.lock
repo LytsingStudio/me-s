@@ -1983,7 +1983,7 @@ dependencies = [
 
 [[package]]
 name = "me-client"
-version = "0.1.100"
+version = "0.1.101"
 dependencies = [
  "base64 0.22.1",
  "flate2",

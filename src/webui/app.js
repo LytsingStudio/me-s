@@ -4152,7 +4152,7 @@ async function openDirectoryBrowser(mode) {
       html: `<div class="directory-browser"></div>`,
       directory: {
         mode, listing, selectedPath: null, searchQuery: "", sortKey: "name", sortDirection: "asc",
-        workspaceName: "", creatingFolder: false,
+        workspaceName: "", creatingFolder: false, pathDraft: listing.path || "", loading: false,
       },
       onOpen: renderDirectoryBrowser,
       onConfirm: async () => {
@@ -4205,11 +4205,14 @@ function openWorkspaceInitializationConfirm(directoryModal, path) {
 
 async function loadDirectoryListing(path, roots = false, preserveState = false) {
   const directory = state.modal?.directory;
-  if (!directory) return;
+  if (!directory || directory.loading || state.modal.busy) return;
+  directory.loading = true;
   const browser = elements.modalContent.querySelector(".directory-browser");
-  const controls = [...elements.modalContent.querySelectorAll("[data-directory-control]")];
+  const controls = [...elements.modalContent.querySelectorAll("[data-directory-control]")]
+    .map((control) => ({ control, disabled: control.disabled }));
   browser?.classList.add("loading");
-  controls.forEach((control) => { control.disabled = true; });
+  controls.forEach(({ control }) => { control.disabled = true; });
+  elements.modalConfirm.disabled = true;
   try {
     const listing = await api("/api/gateway/directories", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -4218,14 +4221,20 @@ async function loadDirectoryListing(path, roots = false, preserveState = false) 
     if (state.modal?.directory !== directory) return;
     const previousSelection = preserveState ? directory.selectedPath : null;
     directory.listing = listing;
+    directory.pathDraft = listing.path || "";
     directory.selectedPath = (listing.entries || []).some((entry) => entry.path === previousSelection) ? previousSelection : null;
     if (!preserveState) directory.searchQuery = "";
     directory.creatingFolder = false;
     renderDirectoryBrowser();
   } catch (error) {
-    browser?.classList.remove("loading");
-    controls.forEach((control) => { control.disabled = false; });
-    toast(error.message, true);
+    if (state.modal?.directory === directory) toast(error.message, true);
+  } finally {
+    directory.loading = false;
+    if (state.modal?.directory === directory) {
+      browser?.classList.remove("loading");
+      controls.forEach(({ control, disabled }) => { control.disabled = disabled; });
+      elements.modalConfirm.disabled = !directory.listing.path || state.modal.busy;
+    }
   }
 }
 
@@ -4248,11 +4257,12 @@ function renderDirectoryBrowser() {
     <div class="directory-toolbar">
       <div class="directory-navigation">
         <button type="button" class="directory-control directory-up" aria-label="返回上一级" title="返回上一级" ${parentRequest ? "data-directory-up" : "disabled"} data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 18-6-6 6-6"/></svg></button>
-        <div class="directory-current">
+        <form class="directory-current">
           <span class="directory-location-icon">${locationIcon}</span>
-          <span class="directory-current-path" title="${escapeAttr(currentLocation)}">${escapeHtml(currentLocation)}</span>
+          <input class="directory-current-path" type="text" value="${escapeAttr(directory.pathDraft ?? listing.path ?? "")}" placeholder="${rootSelector ? "此电脑 · 输入目录路径" : "输入或粘贴目录路径"}" aria-label="目录路径" title="${escapeAttr(currentLocation)}" autocomplete="off" spellcheck="false" data-directory-control>
           <span class="directory-count"></span>
-        </div>
+          <button type="submit" class="directory-control directory-go" title="前往" aria-label="前往" data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M5 12h14m-6-6 6 6-6 6"/></svg></button>
+        </form>
       </div>
       <div class="directory-tools">
         <button type="button" class="directory-control directory-new-folder" aria-label="新建文件夹" title="新建文件夹" ${listing.path ? "data-directory-new-folder" : "disabled"} data-directory-control><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 7h6l2 2h9v9.5a2 2 0 0 1-2 2h-15z"/><path d="M12 12v6m-3-3h6"/></svg></button>
@@ -4277,7 +4287,18 @@ function renderDirectoryBrowser() {
     </div>
     ${directory.mode === "create" ? `<label class="directory-name">工作区名称<input id="new-workspace-name" type="text" autocomplete="off" value="${escapeAttr(directory.workspaceName)}" placeholder="例如：my-project"></label>` : `<div class="directory-selection-summary"><span class="directory-target">当前目录将作为工作区打开。</span><span class="directory-selected-item"></span></div>`}
   </div>`;
-  elements.modalConfirm.disabled = !listing.path;
+  elements.modalConfirm.disabled = directory.loading || !listing.path;
+  const pathInput = elements.modalContent.querySelector(".directory-current-path");
+  pathInput.addEventListener("input", () => { directory.pathDraft = pathInput.value; });
+  pathInput.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && event.isComposing) event.preventDefault();
+  });
+  elements.modalContent.querySelector(".directory-current").addEventListener("submit", (event) => {
+    event.preventDefault();
+    const path = pathInput.value.trim();
+    if (!path) { toast("请输入目录路径", true); return; }
+    void loadDirectoryListing(path);
+  });
   elements.modalContent.querySelector("[data-directory-up]")?.addEventListener("click", () => {
     void loadDirectoryListing(parentRequest.path, parentRequest.roots);
   });

@@ -1,6 +1,6 @@
 [package]
 name = "me-client"
-version = "0.1.100"
+version = "0.1.101"
 description = "Native client for ME Gateway"
 authors = ["Lytsing Studio"]
 license = "MIT"

@@ -825,10 +825,12 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .directory-control:hover:not(:disabled), .directory-control:focus-visible { border-color: var(--border-bright); background: var(--panel-3); color: var(--text); outline: 0; box-shadow: 0 0 0 3px var(--accent-ring); }
 .directory-control:disabled { opacity: .3; cursor: default; box-shadow: none; }
 .directory-control svg, .directory-entry-enter svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
-.directory-current { display: grid; min-width: 0; height: 34px; grid-template-columns: 24px minmax(0, 1fr) auto; box-sizing: border-box; align-items: center; gap: 8px; padding: 0 8px 0 6px; border: 1px solid var(--border); border-radius: 9px; background: linear-gradient(180deg, var(--directory-control-top), var(--directory-control-bottom)); color: var(--muted); box-shadow: inset 0 1px var(--directory-inner-highlight); }
+.directory-current { display: grid; min-width: 0; height: 34px; grid-template-columns: 24px minmax(0, 1fr) auto 28px; box-sizing: border-box; align-items: center; gap: 6px; padding: 0 3px 0 6px; border: 1px solid var(--border); border-radius: 9px; background: linear-gradient(180deg, var(--directory-control-top), var(--directory-control-bottom)); color: var(--muted); box-shadow: inset 0 1px var(--directory-inner-highlight); }
+.directory-current:focus-within { border-color: var(--border-bright); box-shadow: 0 0 0 3px var(--accent-ring); }
+.directory-current .directory-go { width: 28px; height: 28px; border: 0; background: transparent; box-shadow: none; }
 .directory-location-icon { display: grid; width: 24px; height: 24px; place-items: center; border: 1px solid var(--accent-ring); border-radius: 7px; background: var(--accent-faint); }
 .directory-location-icon .directory-file-icon { width: 15px; height: 15px; }
-.directory-current-path { min-width: 0; overflow: hidden; color: var(--muted); font: 11px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.directory-current-path { width: 100%; min-width: 0; padding: 0; border: 0; outline: 0; background: transparent; color: var(--text); font: 12px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 .directory-count { padding: 3px 7px; border: 1px solid var(--hover-fill); border-radius: 999px; background: var(--hover-fill-soft); color: var(--dim); font-size: 10px; line-height: 1; white-space: nowrap; }
 .directory-search { display: grid; width: min(230px, 28vw); min-width: 150px; height: 34px; grid-template-columns: 18px minmax(0, 1fr) 22px; box-sizing: border-box; align-items: center; gap: 5px; padding: 0 5px 0 9px; border: 1px solid var(--border); border-radius: 9px; background: var(--directory-control-bottom); color: var(--dim); }
 .directory-search:focus-within { border-color: var(--border-bright); box-shadow: 0 0 0 3px var(--accent-ring); }
