@@ -527,7 +527,7 @@ function persistWorkspaceDisclosure(disclosure, storage = browserLocalStorage())
 }
 
 function workspaceExpanded(workspaceId, disclosure = state.workspaceDisclosure) {
-  return disclosure.get(String(workspaceId)) !== false;
+  return disclosure.get(String(workspaceId)) === true;
 }
 
 function setWorkspaceExpanded(workspaceId, expanded, disclosure = state.workspaceDisclosure, storage = browserLocalStorage()) {
@@ -1449,6 +1449,9 @@ async function requestBackgroundProjectionSync() {
 function applyGatewaySnapshot(snapshot) {
   state.gateway = snapshot;
   const ids = new Set((snapshot.workspaces || []).map((workspace) => workspace.id));
+  // Only a loaded workspace list can identify obsolete disclosure preferences.
+  pruneWorkspaceDisclosure(new Set((snapshot.workspaces || [])
+    .filter((workspace) => !workspace.builtin).map((workspace) => workspace.id)));
   for (const workspace of snapshot.workspaces || []) gatewayWorkspaceState(workspace.id);
   for (const notice of snapshot.notices || []) {
     if (Number(notice.id) > state.lastNoticeId) toast(notice.message, true);
@@ -2544,8 +2547,6 @@ function renderAgents() {
   const chat = workspaces.find((workspace) => workspace.builtin);
   elements.addAgent.disabled = !workspaceMetadataReady(chat?.id || "chat");
   const external = workspaces.filter((workspace) => !workspace.builtin);
-  const externalIds = new Set(external.map((workspace) => workspace.id));
-  pruneWorkspaceDisclosure(externalIds);
   if (!external.length) {
     if (!elements.workspaceList.querySelector(":scope > .empty-state")) {
       elements.workspaceList.innerHTML = `<div class="empty-state">暂无工作区</div>`;

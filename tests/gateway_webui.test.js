@@ -77,6 +77,12 @@ function loadRuntime(relative, runtimeAdapter = globalThis.MeFrontendRuntime, cl
       workspaceExpanded: typeof workspaceExpanded === "function" ? workspaceExpanded : null,
       setWorkspaceExpanded: typeof setWorkspaceExpanded === "function" ? setWorkspaceExpanded : null,
       pruneWorkspaceDisclosure: typeof pruneWorkspaceDisclosure === "function" ? pruneWorkspaceDisclosure : null,
+      setConnectionPhase, applyGatewaySnapshot, renderAgents,
+      configureDisclosureTest(storage, createGroup) {
+        browserLocalStorage = () => storage;
+        state.workspaceDisclosure = readWorkspaceDisclosure();
+        createWorkspaceGroup = createGroup; renderWorkspaceAgentRows = () => {};
+      },
       resolveEditedDefaultModel: typeof resolveEditedDefaultModel === "function" ? resolveEditedDefaultModel : null,
       blankGatewayModel: typeof blankGatewayModel === "function" ? blankGatewayModel : null,
       modelSettingsHtml: typeof modelSettingsHtml === "function" ? modelSettingsHtml : null,
@@ -1069,7 +1075,7 @@ describe("ME Gateway WebUI semantic compatibility", () => {
       removeItem(key) { values.delete(key); },
     };
     const disclosure = gateway.readWorkspaceDisclosure(storage);
-    expect(gateway.workspaceExpanded("w-one", disclosure)).toBe(true);
+    expect(gateway.workspaceExpanded("w-one", disclosure)).toBe(false);
     expect(gateway.setWorkspaceExpanded("w-one", false, disclosure, storage)).toBe(true);
     expect(gateway.workspaceExpanded("w-one", disclosure)).toBe(false);
     const restored = gateway.readWorkspaceDisclosure(storage);
@@ -1077,7 +1083,15 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     gateway.setWorkspaceExpanded("w-two", true, restored, storage);
     expect(gateway.pruneWorkspaceDisclosure(new Set(["w-two"]), restored, storage)).toBe(true);
     expect([...restored]).toEqual([["w-two", true]]);
-    expect(gateway.readWorkspaceDisclosure({ getItem() { return "not-json"; } })).toEqual(new Map());
+    expect(gateway.workspaceExpanded("w-two", gateway.readWorkspaceDisclosure(storage))).toBe(true);
+    for (const raw of [null, "not-json", "null", "[]", "42", '{"w-one":"true"}']) {
+      const invalid = gateway.readWorkspaceDisclosure({ getItem() { return raw; } });
+      expect(gateway.workspaceExpanded("w-one", invalid)).toBe(false);
+    }
+    expect(gateway.workspaceExpanded("w-one", gateway.readWorkspaceDisclosure(null))).toBe(false);
+    expect(gateway.workspaceExpanded("w-one", gateway.readWorkspaceDisclosure({
+      getItem() { throw new Error("storage unavailable"); },
+    }))).toBe(false);
 
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     expect(source).toContain('const WORKSPACE_DISCLOSURE_STORAGE_KEY = "me-gateway.workspace-disclosure.v1";');
@@ -1085,6 +1099,71 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(source).toContain("setWorkspaceExpanded(workspace.id, !workspaceExpanded(workspace.id));");
     expect(source).not.toContain("expandedWorkspaces");
     expect(source).not.toContain("/api/gateway/workspaces/${encodeURIComponent(workspace.id)}/expanded");
+  });
+
+  test("preserves Workspace disclosure during startup and prunes only loaded workspace lists", () => {
+    const gateway = loadRuntime("../src/webui/app.js");
+    const key = "me-gateway.workspace-disclosure.v1";
+    const saved = JSON.stringify({ "w-one": false, "w-two": true, removed: true });
+    const values = new Map([[key, saved]]);
+    const storage = {
+      getItem(key) { return values.get(key) ?? null; },
+      setItem(key, value) { values.set(key, value); },
+      removeItem(key) { values.delete(key); },
+    };
+    const node = () => {
+      const parts = new Map();
+      return {
+        dataset: {}, classList: { toggle() {} },
+        setAttribute(name, value) { this[name] = value; },
+        querySelector(selector) {
+          if (!parts.has(selector)) parts.set(selector, node());
+          return parts.get(selector);
+        },
+      };
+    };
+    gateway.configureDisclosureTest(storage, (workspace) => {
+      const group = node(); group.dataset.workspaceGroup = workspace.id; return group;
+    });
+    gateway.elements.addAgent = {};
+    gateway.elements.workspaceList = {
+      children: [], querySelector() { return null; },
+      append(group) {
+        group.remove = () => this.children.splice(this.children.indexOf(group), 1);
+        this.children.push(group);
+      },
+      get lastElementChild() { return this.children.at(-1); },
+    };
+    expect(gateway.state.gateway.workspaces).toEqual([]);
+    gateway.setConnectionPhase("failed");
+    gateway.renderAgents();
+    expect(storage.getItem(key)).toBe(saved);
+    expect(gateway.workspaceExpanded("w-one")).toBe(false);
+    expect(gateway.workspaceExpanded("w-two")).toBe(true);
+    expect(gateway.state.workspaceDisclosure.has("removed")).toBe(true);
+
+    const workspaces = [
+      { id: "chat", builtin: true },
+      { id: "w-one", name: "One" }, { id: "w-two", name: "Two" }, { id: "w-new", name: "New" },
+    ];
+    gateway.applyGatewaySnapshot({ workspaces });
+    expect(JSON.parse(storage.getItem(key))).toEqual({ "w-one": false, "w-two": true });
+    expect(gateway.workspaceExpanded("w-new")).toBe(false);
+    const groups = gateway.elements.workspaceList.children;
+    expect(groups.map((group) => group.querySelector("[data-workspace-select]")["aria-expanded"]))
+      .toEqual(["false", "true", "false"]);
+    expect(groups.map((group) => group.querySelector("[data-workspace-agents]").hidden))
+      .toEqual([true, false, true]);
+    gateway.setConnectionPhase("reconnecting");
+    expect(JSON.parse(storage.getItem(key))).toEqual({ "w-one": false, "w-two": true });
+
+    gateway.setWorkspaceExpanded("w-new", true);
+    gateway.setWorkspaceExpanded("w-two", false);
+    expect([...gateway.readWorkspaceDisclosure()]).toEqual([["w-new", true], ["w-one", false], ["w-two", false]]);
+    gateway.applyGatewaySnapshot({ workspaces: [workspaces[0], workspaces[2]] });
+    expect(JSON.parse(storage.getItem(key))).toEqual({ "w-two": false });
+    gateway.applyGatewaySnapshot({ workspaces: [workspaces[0]] });
+    expect(storage.getItem(key)).toBe(null);
   });
 
 
