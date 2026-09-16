@@ -1028,7 +1028,6 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .file-manager-header > span, .file-manager-header > button { min-width: 0; height: 34px; padding: 0 10px; border: 0; border-right: 1px solid var(--border); background: transparent; color: inherit; text-align: left; cursor: pointer; }
 .file-manager-header > button:hover, .file-manager-header > button.active { background: var(--hover-fill); color: var(--text); }
 .file-manager-header > button.active::after { content: attr(data-direction); margin-left: 5px; color: var(--accent); font-size: 14px; font-weight: 800; line-height: 1; }
-.file-manager-list { min-height: 100%; }
 .file-manager-entry { min-height: 38px; border-bottom: 1px solid color-mix(in srgb, var(--border) 72%, transparent); color: var(--muted); font-size: 12px; user-select: none; touch-action: manipulation; }
 .file-manager-entry:hover { background: var(--hover-fill); }
 .file-manager-entry.selected { background: var(--selected-bg); color: var(--text); }

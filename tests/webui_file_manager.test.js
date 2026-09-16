@@ -160,3 +160,162 @@ describe("per-session host file manager", () => {
     expect(hostFiles).toContain("filesystem_lock: Arc<Mutex<()>>");
   });
 });
+
+function fileManagerHarness() {
+  let now = 0;
+  const timers = [];
+  const notifications = [];
+  const node = () => {
+    const children = new Map(), classes = new Set();
+    return {
+      innerHTML: "", value: "", scrollTop: 0,
+      classList: {
+        add: (value) => classes.add(value), remove: (value) => classes.delete(value),
+        contains: (value) => classes.has(value), toggle() {},
+      },
+      addEventListener() {}, querySelectorAll() { return []; },
+      querySelector(selector) {
+        if (!children.has(selector)) children.set(selector, node());
+        return children.get(selector);
+      },
+    };
+  };
+  const sandbox = {};
+  new Function("globalThis", "setTimeout", controller)(sandbox, (callback, ms) => timers.push({ callback, at: now + ms }));
+  const manager = sandbox.MeFileManager.create({
+    container: node(),
+    request: async (_path, options) => ({ path: JSON.parse(options.body).path, parent: "/", entries: [] }),
+    notify: (...args) => notifications.push(args),
+  });
+  const view = {
+    identity: { key: "workspace:session", agentId: "session" },
+    path: "/old", roots: false, entries: [], selection: new Set(), anchor: null,
+    search: "", sortKey: "name", sortDirection: "asc", history: [], loaded: false,
+    loading: false, error: "", job: null, upload: null, download: null, clipboard: null, pollToken: 0,
+  };
+  manager.state = view;
+  manager.identity = view.identity;
+  return { manager, view, notifications, timers, tick(ms) {
+    now += ms;
+    for (let index = 0; index < timers.length;) {
+      if (timers[index].at > now) { index += 1; continue; }
+      timers.splice(index, 1)[0].callback();
+    }
+  } };
+}
+
+function finishedFileJob(state = "completed") {
+  return { operation_id: "job-one", kind: "copy", state, stats: { items: 1, bytes: 4 },
+    processed_items: 1, processed_bytes: 4, results: [], cancellable: false };
+}
+
+describe("file manager scroll and completed task lifecycle", () => {
+  test("first load and successful directory changes reset only the file viewport; refresh and failures preserve it", async () => {
+    const { manager, view } = fileManagerHarness();
+    manager.tableWrap.scrollTop = 35;
+    await manager.load("/old", false);
+    expect(manager.tableWrap.scrollTop).toBe(0);
+    manager.tableWrap.scrollTop = 120;
+    await manager.handleAction("refresh");
+    expect(manager.tableWrap.scrollTop).toBe(120);
+    await manager.navigate("/new", false);
+    expect(manager.tableWrap.scrollTop).toBe(0);
+    expect(view.history).toEqual([{ path: "/old", roots: false }]);
+    manager.tableWrap.scrollTop = 90;
+    await manager.goBack();
+    expect(manager.tableWrap.scrollTop).toBe(0);
+    manager.tableWrap.scrollTop = 60;
+    manager.request = async () => { throw new Error("not accessible"); };
+    expect(await manager.navigate("/missing", false)).toBe(false);
+    expect(manager.tableWrap.scrollTop).toBe(60);
+    expect(view.path).toBe("/old");
+    expect(sharedStyle).not.toContain(".file-manager-list { min-height: 100%; }");
+  });
+
+  test("successful file jobs show 100% for one second without dismissing new tasks or another session", async () => {
+    const { manager, view, tick } = fileManagerHarness();
+    view.job = finishedFileJob();
+    await manager.pollJob(view, "job-one");
+    expect(manager.taskPanel.innerHTML).toContain("width:100%");
+    expect(manager.taskPanel.classList.contains("hidden")).toBe(false);
+    tick(999);
+    expect(view.job).not.toBe(null);
+    tick(1);
+    expect(view.job).toBe(null);
+    expect(manager.taskPanel.classList.contains("hidden")).toBe(true);
+
+    view.job = finishedFileJob();
+    await manager.pollJob(view, "job-one");
+    const newer = { ...finishedFileJob("running"), operation_id: "job-two" };
+    view.job = newer;
+    tick(1000);
+    expect(view.job).toBe(newer);
+
+    view.job = finishedFileJob();
+    await manager.pollJob(view, "job-one");
+    manager.state = { ...view, job: newer };
+    manager.renderTask();
+    const displayed = manager.taskPanel.innerHTML;
+    tick(1000);
+    expect(view.job).toBe(null);
+    expect(manager.state.job).toBe(newer);
+    expect(manager.taskPanel.innerHTML).toBe(displayed);
+  });
+
+  test("numeric 100% cannot dismiss a running, failed or cancelled job", async () => {
+    for (const state of ["running", "failed", "cancelled"]) {
+      const { manager, view, tick, timers } = fileManagerHarness();
+      view.job = finishedFileJob(state);
+      manager.renderTask();
+      if (state !== "running") await manager.pollJob(view, "job-one");
+      expect(timers).toHaveLength(0);
+      tick(1000);
+      expect(view.job.state).toBe(state);
+      expect(manager.taskPanel.classList.contains("hidden")).toBe(false);
+    }
+  });
+
+  test("uploads wait for finish confirmation and retain completed progress for one second, including empty files", async () => {
+    for (const content of ["data", ""]) {
+      const { manager, view, tick, timers } = fileManagerHarness();
+      manager.request = async (path) => {
+        if (path.endsWith("/create")) return { upload: { upload_id: "upload-one", state: "uploading" } };
+        if (path.endsWith("/finish")) {
+          expect(timers).toHaveLength(0);
+          expect(view.upload.completed).not.toBe(true);
+          return { state: "completed" };
+        }
+        return { path: "/old", entries: [] };
+      };
+      await manager.uploadFiles([new File([content], "file.txt")]);
+      expect(view.upload.completed).toBe(true);
+      expect(manager.taskPanel.innerHTML).toContain("100%");
+      expect(manager.taskPanel.innerHTML).not.toContain('data-file-action="cancel-task"');
+      tick(999);
+      expect(view.upload).not.toBe(null);
+      tick(1);
+      expect(view.upload).toBe(null);
+      expect(manager.taskPanel.classList.contains("hidden")).toBe(true);
+    }
+  });
+
+  test("download completion waits for verified save, then dismisses at one second", async () => {
+    const { manager, view, tick, timers } = fileManagerHarness();
+    view.selection.add("/old/file.txt");
+    manager.request = async () => ({ download_id: "download-one", filename: "file.txt", state: "ready", size_bytes: 4 });
+    manager.downloadFile = async (_download, _identity, { onProgress }) => {
+      onProgress(4);
+      expect(timers).toHaveLength(0);
+      expect(view.download.completed).not.toBe(true);
+      return { path: "/saved/file.txt" };
+    };
+    await manager.downloadSelected();
+    expect(view.download.completed).toBe(true);
+    expect(manager.taskPanel.innerHTML).toContain("100%");
+    tick(999);
+    expect(view.download).not.toBe(null);
+    tick(1);
+    expect(view.download).toBe(null);
+    expect(manager.taskPanel.classList.contains("hidden")).toBe(true);
+  });
+});

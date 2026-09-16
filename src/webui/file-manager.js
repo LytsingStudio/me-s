@@ -120,6 +120,7 @@
       this.pathInput = this.container.querySelector(".file-manager-path");
       this.searchInput = this.container.querySelector(".file-manager-search");
       this.list = this.container.querySelector(".file-manager-list");
+      this.tableWrap = this.container.querySelector(".file-manager-table-wrap");
       this.selectionLabel = this.container.querySelector(".file-manager-selection");
       this.taskPanel = this.container.querySelector(".file-manager-task");
       this.uploadInput = this.container.querySelector(".file-manager-upload-input");
@@ -267,6 +268,7 @@
       const identity = view?.identity;
       if (!view || !identity?.key) return false;
       const previous = view.loaded ? { path: view.path, roots: view.roots } : null;
+      let resetScroll = false;
       view.loading = true;
       view.error = "";
       if (this.state === view) this.render();
@@ -277,6 +279,7 @@
           view.history.push(previous);
           if (view.history.length > NAVIGATION_HISTORY_LIMIT) view.history.splice(0, view.history.length - NAVIGATION_HISTORY_LIMIT);
         }
+        resetScroll = !previous || !sameLocation(previous, next);
         view.path = next.path;
         view.parent = listing.parent;
         view.roots = next.roots;
@@ -291,7 +294,10 @@
         return false;
       } finally {
         view.loading = false;
-        if (this.state === view) this.render();
+        if (this.state === view) {
+          this.render();
+          if (resetScroll) this.tableWrap.scrollTop = 0;
+        }
       }
     }
 
@@ -408,13 +414,13 @@
       }
       this.taskPanel.classList.remove("hidden");
       if (transfer) {
-        const percent = transfer.total ? Math.min(100, Math.round((transfer.done / transfer.total) * 100)) : 0;
-        this.taskPanel.innerHTML = `<div class="file-manager-task-head"><strong>${escapeHtml(transfer.label)}</strong><button type="button" data-file-action="cancel-task">取消</button></div>
+        const percent = transfer.completed ? 100 : transfer.total ? Math.min(100, Math.round((transfer.done / transfer.total) * 100)) : 0;
+        this.taskPanel.innerHTML = `<div class="file-manager-task-head"><strong>${escapeHtml(transfer.label)}</strong>${transfer.completed ? "" : '<button type="button" data-file-action="cancel-task">取消</button>'}</div>
           <div class="file-manager-progress"><span style="width:${percent}%"></span></div>
           <div class="file-manager-task-meta">${percent}% · ${formatBytes(transfer.done)} / ${formatBytes(transfer.total)}</div>`;
         return;
       }
-      const itemPercent = job.stats?.items ? Math.min(100, Math.round((job.processed_items / job.stats.items) * 100)) : 0;
+      const itemPercent = job.state === "completed" ? 100 : job.stats?.items ? Math.min(100, Math.round((job.processed_items / job.stats.items) * 100)) : 0;
       const terminal = TERMINAL_STATES.has(job.state);
       const results = (job.results || []).map((result) => `<li class="${escapeAttr(result.status)}"><strong>${escapeHtml(baseName(result.source))}</strong><span>${escapeHtml(result.status === "succeeded" ? "成功" : result.status === "skipped" ? "已跳过" : result.status === "partial" ? "部分完成" : "失败")}</span>${result.error ? `<small>${escapeHtml(result.error)}</small>` : ""}</li>`).join("");
       this.taskPanel.innerHTML = `<div class="file-manager-task-head"><strong>${jobTitle(job.kind)} · ${stateLabel(job.state)}</strong>${job.cancellable ? '<button type="button" data-file-action="cancel-task">取消</button>' : ""}</div>
@@ -422,6 +428,18 @@
         <div class="file-manager-task-meta">${job.processed_items || 0} / ${job.stats?.items || 0} 项 · ${formatBytes(job.processed_bytes)} / ${formatBytes(job.stats?.bytes)}${job.current_path ? ` · ${escapeHtml(baseName(job.current_path))}` : ""}</div>
         ${job.error ? `<p class="file-manager-task-error">${escapeHtml(job.error)}</p>` : ""}
         ${terminal && results ? `<ul class="file-manager-results">${results}</ul>` : ""}`;
+    }
+
+    completeTask(view, field, task = view[field]) {
+      if (task.completed) return;
+      task.completed = true;
+      if (this.state === view) this.renderTask();
+      setTimeout(() => {
+        // A completed task must not dismiss a newer operation or another session's panel.
+        if (view[field] !== task) return;
+        view[field] = null;
+        if (this.state === view) this.renderTask();
+      }, 1000);
     }
 
     setDisabled(action, disabled) {
@@ -613,6 +631,7 @@
           if (!view.clipboard.sources.length) view.clipboard = null;
         }
       }
+      if (view.job?.operation_id === operationId && view.job.state === "completed") this.completeTask(view, "job");
       await this.load(view.path, view.roots, view);
     }
 
@@ -627,7 +646,7 @@
           if (view.upload?.cancelled) break;
         }
       }
-      view.upload = null;
+      if (!view.upload?.completed) view.upload = null;
       if (this.state === view) this.renderTask();
       await this.load(view.path, false, view);
     }
@@ -674,6 +693,7 @@
         }
         const finished = await this.call("/api/files/uploads/finish", { upload_id: upload.upload_id }, view.identity);
         if (finished.state !== "completed") throw new Error(finished.error || "上传未完整完成");
+        this.completeTask(view, "upload");
       } catch (error) {
         await this.call("/api/files/uploads/cancel", { upload_id: upload.upload_id }, view.identity).catch(() => {});
         throw error;
@@ -719,8 +739,8 @@
           },
         });
         this.notify(saved?.path ? `已保存到 ${saved.path}` : "下载已就绪", "success");
-        view.download = null;
-        if (this.state === view) this.renderTask();
+        task.done = task.total;
+        this.completeTask(view, "download", task);
       } catch (error) {
         view.download = null;
         if (this.state === view) this.renderTask();
