@@ -134,13 +134,10 @@ impl UsageState {
         let range_start = (today - Days::new(29)).to_string();
         let range_end = today.to_string();
         let same_account = account.is_some() && account == self.account_id.as_deref();
-        let days: Vec<_> = self
-            .days
+        let days = same_account.then(|| self.days.clone()).unwrap_or_default();
+        let rolling_days: Vec<_> = days
             .iter()
-            .filter(|day| {
-                same_account && day.start_date >= range_start && day.start_date <= range_end
-            })
-            .cloned()
+            .filter(|day| day.start_date >= range_start && day.start_date <= range_end)
             .collect();
         UsageSnapshot {
             status: if account.is_none() {
@@ -158,7 +155,8 @@ impl UsageState {
             range_start,
             seven_day_start: (today - Days::new(6)).to_string(),
             range_end,
-            total_tokens: (!days.is_empty()).then(|| days.iter().map(|day| day.tokens).sum()),
+            total_tokens: (!rolling_days.is_empty())
+                .then(|| rolling_days.iter().map(|day| day.tokens).sum()),
             days,
         }
     }
@@ -245,7 +243,7 @@ fn parse_days(bytes: &[u8], today: NaiveDate) -> Result<Vec<UsageDay>> {
         if day.start_date != date.to_string() {
             return Err("usage date must be YYYY-MM-DD".into());
         }
-        if date < today - Days::new(29) || date > today {
+        if date > today {
             continue;
         }
         total = total
@@ -297,7 +295,7 @@ mod tests {
     }
 
     #[test]
-    fn rolling_days_include_today_preserve_gaps_and_zero_without_extrapolation() {
+    fn all_historical_days_are_retained_while_totals_stay_rolling() {
         let today = date("2026-03-01");
         let days = parse_days(
             &profile(json!([
@@ -312,19 +310,19 @@ mod tests {
         .unwrap();
         assert_eq!(
             days.iter().map(|day| day.tokens).collect::<Vec<_>>(),
-            vec![10, 42, 0]
+            vec![900, 10, 42, 0]
         );
         let mut state = UsageState::default();
         state.apply("a".into(), Ok(days));
         let snapshot = state.snapshot(Some("a"), today);
         assert_eq!(snapshot.total_tokens, Some(52));
-        assert_eq!(snapshot.days.len(), 3);
+        assert_eq!(snapshot.days.len(), 4);
+        assert_eq!(snapshot.days[0].start_date, "2026-01-30");
         assert_eq!(snapshot.range_start, "2026-01-31");
         assert_eq!(snapshot.seven_day_start, "2026-02-23");
-        assert_eq!(
-            state.snapshot(Some("a"), today + Days::new(1)).total_tokens,
-            Some(42)
-        );
+        let next_day = state.snapshot(Some("a"), today + Days::new(1));
+        assert_eq!(next_day.total_tokens, Some(42));
+        assert_eq!(next_day.days.len(), 4);
         state.apply("a".into(), Ok(vec![]));
         assert_eq!(state.snapshot(Some("a"), today).total_tokens, None);
     }

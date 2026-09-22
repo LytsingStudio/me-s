@@ -904,17 +904,16 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .codex-usage-period { margin: 0 0 3px; color: var(--dim); font-size: 11px; line-height: 1.6; }
 .codex-usage-heading { padding-top: 18px; border-top: 1px solid var(--border); }
 .codex-usage-chart { display: grid; gap: 14px; margin-top: 16px; }
-.codex-usage-day { display: grid; grid-template-columns: 36px minmax(20px, 1fr) max-content; align-items: center; gap: 12px; min-width: 0; font-variant-numeric: tabular-nums; }
+.codex-usage-day { display: grid; grid-template-columns: 76px minmax(20px, 1fr) max-content; align-items: center; gap: 12px; min-width: 0; font-variant-numeric: tabular-nums; }
 .codex-usage-value { min-width: 104px; color: var(--text); font-size: 11px; text-align: right; white-space: nowrap; }
 .codex-usage-track { height: 6px; overflow: hidden; border-radius: 3px; background: var(--hover-fill); }
 .codex-usage-bar { display: block; height: 100%; border-radius: inherit; background: var(--accent); opacity: .75; }
-.codex-usage-date { color: var(--muted); font-size: 11px; }
+.codex-usage-date { color: var(--muted); font-size: 11px; white-space: nowrap; }
 .codex-usage-error { margin: 0 0 16px; color: var(--muted); font-size: 12px; }
-.codex-usage-details { margin: 20px 0 14px; padding-top: 16px; border-top: 1px solid var(--border); font-size: 12px; }
-.codex-usage-details summary { cursor: pointer; color: var(--muted); }
-.codex-usage-details table { width: 100%; margin-top: 12px; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-.codex-usage-details th, .codex-usage-details td { padding: 9px 0; border-bottom: 1px solid var(--border); text-align: left; }
-.codex-usage-details th:last-child, .codex-usage-details td:last-child { text-align: right; }
+.codex-usage-details { margin: 18px 0 14px; font-size: 12px; }
+.codex-usage-details summary { width: max-content; cursor: pointer; color: var(--muted); transition: color 120ms ease; }
+.codex-usage-details summary:hover, .codex-usage-details[open] summary { color: var(--text); }
+.codex-usage-details .codex-usage-more { margin-top: 14px; }
 .settings-version-list { margin: 0; border-top: 1px solid var(--border); }
 .settings-version-row { display: flex; align-items: baseline; justify-content: space-between; gap: 18px; padding: 12px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
 .settings-version-row dt { color: var(--muted); }

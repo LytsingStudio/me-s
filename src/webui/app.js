@@ -4526,43 +4526,38 @@ async function bindLocalPreferenceSettings(container = elements.modalContent) {
 function codexUsageHtml(usage) {
   if (usage.status === "logged_out") return '<p class="settings-help">Codex 未登录</p>';
   if (usage.status === "loading") return '<p class="settings-help">等待更新</p>';
-  const days = Array.isArray(usage.days) ? usage.days : [];
+  const days = Array.isArray(usage.days) ? usage.days.slice().sort((left, right) => right.start_date.localeCompare(left.start_date)) : [];
   const formatTokens = (tokens) => Number(tokens).toLocaleString("zh-CN");
   const updated = usage.updated_at ? `<p class="settings-help">更新于 ${escapeHtml(new Date(usage.updated_at).toLocaleString("zh-CN"))}</p>` : "";
   const error = usage.status === "error" ? '<p class="codex-usage-error">暂时无法更新</p>' : "";
   if (!days.length) return `${error}${usage.status === "error" ? "" : '<p class="settings-help">暂无用量数据</p>'}${updated}`;
-  const byDate = new Map(days.map((day) => [day.start_date, day.tokens]));
-  const recent = Array.from({ length: 7 }, (_, index) => {
-    const date = new Date(`${usage.seven_day_start}T00:00:00Z`);
-    date.setUTCDate(date.getUTCDate() + index);
-    const key = date.toISOString().slice(0, 10);
-    return { date: key, tokens: byDate.get(key) };
-  });
-  const recentDays = recent.filter((day) => day.tokens != null);
-  const recentTotal = recentDays.length ? formatTokens(recentDays.reduce((total, day) => total + day.tokens, 0)) : "—";
-  const maximum = Math.max(1, ...recent.map((day) => day.tokens ?? 0));
-  const chart = recent.map((day) => {
-    const available = day.tokens != null;
-    const value = available ? formatTokens(day.tokens) : "—";
-    const label = `${day.date}：${available ? `${value} tokens` : "暂无数据"}`;
+  const sevenDays = days.filter((day) => day.start_date >= usage.seven_day_start && day.start_date <= usage.range_end);
+  const thirtyDays = days.filter((day) => day.start_date >= usage.range_start && day.start_date <= usage.range_end);
+  const sevenDayTotal = sevenDays.length ? formatTokens(sevenDays.reduce((total, day) => total + day.tokens, 0)) : "—";
+  const thirtyDayTotal = usage.total_tokens == null ? "—" : formatTokens(usage.total_tokens);
+  const maximum = Math.max(1, ...days.map((day) => day.tokens));
+  const renderDays = (entries) => entries.map((day) => {
+    const value = formatTokens(day.tokens);
+    const label = `${day.start_date}：${value} tokens`;
     return `<div class="codex-usage-day" title="${escapeAttr(label)}" aria-label="${escapeAttr(label)}">
-      <span class="codex-usage-date">${day.date.slice(5).replace("-", "/")}</span>
-      <div class="codex-usage-track"><span class="codex-usage-bar" style="width:${day.tokens > 0 ? Math.max(2, day.tokens / maximum * 100) : 0}%"></span></div>
+      <span class="codex-usage-date">${escapeHtml(day.start_date)}</span>
+      <div class="codex-usage-track"><span class="codex-usage-bar" style="width:${day.tokens / maximum * 100}%"></span></div>
       <span class="codex-usage-value">${value}</span>
     </div>`;
   }).join("");
-  const rows = days.slice().reverse().map((day) => `<tr><td>${escapeHtml(day.start_date)}</td><td>${formatTokens(day.tokens)}</td></tr>`).join("");
+  const initialDays = days.slice(0, 10);
+  const remainingDays = days.slice(10);
+  const more = remainingDays.length ? `<details class="codex-usage-details"><summary>显示更多</summary><div class="codex-usage-chart codex-usage-more">${renderDays(remainingDays)}</div></details>` : "";
   return `${error}<div class="codex-usage-summary">
-      <div class="codex-usage-total"><div class="codex-usage-label"><span>近 30 天</span><small>tokens</small></div><strong>${formatTokens(usage.total_tokens)}</strong>
-        <p class="codex-usage-period">${escapeHtml(usage.range_start)} — ${escapeHtml(usage.range_end)}</p><p class="settings-help">已有 ${days.length} 天数据</p>
+      <div class="codex-usage-total"><div class="codex-usage-label"><span>近 30 天</span><small>tokens</small></div><strong>${thirtyDayTotal}</strong>
+        <p class="codex-usage-period">${escapeHtml(usage.range_start)} — ${escapeHtml(usage.range_end)}</p><p class="settings-help">已有 ${thirtyDays.length} 天数据</p>
       </div>
-      <div class="codex-usage-total"><div class="codex-usage-label"><span>近 7 天</span><small>tokens</small></div><strong>${recentTotal}</strong>
-        <p class="codex-usage-period">${escapeHtml(usage.seven_day_start)} — ${escapeHtml(usage.range_end)}</p><p class="settings-help">已有 ${recentDays.length} 天数据</p>
+      <div class="codex-usage-total"><div class="codex-usage-label"><span>近 7 天</span><small>tokens</small></div><strong>${sevenDayTotal}</strong>
+        <p class="codex-usage-period">${escapeHtml(usage.seven_day_start)} — ${escapeHtml(usage.range_end)}</p><p class="settings-help">已有 ${sevenDays.length} 天数据</p>
       </div>
     </div>
-    <div class="codex-usage-heading"><span>近 7 天每日用量</span><small>tokens</small></div>
-    <div class="codex-usage-chart">${chart}</div>
-    <details class="codex-usage-details"><summary>近 30 天每日用量</summary><table><thead><tr><th>日期</th><th>Tokens</th></tr></thead><tbody>${rows}</tbody></table></details>${updated}`;
+    <div class="codex-usage-heading"><span>详细用量</span><small>tokens</small></div>
+    <div class="codex-usage-chart">${renderDays(initialDays)}</div>${more}${updated}`;
 }
 
 async function bindCodexUsageSettings(container) {

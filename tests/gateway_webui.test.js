@@ -1892,8 +1892,15 @@ describe("backend-owned Codex usage settings", () => {
   const sample = {
     status: "ready", updated_at: "2026-03-01T12:00:00+08:00",
     range_start: "2026-01-31", seven_day_start: "2026-02-23", range_end: "2026-03-01",
-    days: [{ start_date: "2026-01-31", tokens: 12 }, { start_date: "2026-02-28", tokens: 123456 }, { start_date: "2026-03-01", tokens: 0 }],
-    total_tokens: 123468,
+    days: [
+      { start_date: "2026-02-24", tokens: 500 }, { start_date: "2025-12-01", tokens: 900000 },
+      { start_date: "2026-02-20", tokens: 100 }, { start_date: "2026-03-01", tokens: 0 },
+      { start_date: "2026-02-26", tokens: 700 }, { start_date: "2026-02-22", tokens: 300 },
+      { start_date: "2026-01-31", tokens: 12 }, { start_date: "2026-02-28", tokens: 123456 },
+      { start_date: "2026-02-23", tokens: 400 }, { start_date: "2026-02-27", tokens: 800 },
+      { start_date: "2026-02-21", tokens: 200 }, { start_date: "2026-02-25", tokens: 600 },
+    ],
+    total_tokens: 127068,
   };
 
   test("shared direct, gateway and client settings show usage only after login", () => {
@@ -1908,45 +1915,59 @@ describe("backend-owned Codex usage settings", () => {
     }
   });
 
-  test("actual tokens, seven dates, partial thirty-day totals, and missing values stay distinct", () => {
+  test("detailed usage is newest-first, defaults to ten bars, and expands without rescaling", () => {
     const runtime = loadRuntime("../src/webui/app.js");
     const html = runtime.codexUsageHtml(sample);
-    expect(html).toContain("123,468");
-    expect(html).toContain("已有 3 天数据");
-    expect(html).toContain('<span>近 7 天</span><small>tokens</small></div><strong>123,456</strong>');
-    expect(html).toContain("2026-02-23 — 2026-03-01</p><p class=\"settings-help\">已有 2 天数据");
+    expect(html).toContain("127,068");
+    expect(html).toContain("已有 11 天数据");
+    expect(html).toContain('<span>近 7 天</span><small>tokens</small></div><strong>126,456</strong>');
+    expect(html).toContain("2026-02-23 — 2026-03-01</p><p class=\"settings-help\">已有 7 天数据");
     expect(html.match(/class="codex-usage-total"/g)).toHaveLength(2);
-    expect(html).toContain('class="codex-usage-summary"');
-    expect(html).toContain("近 7 天每日用量");
-    expect(html.match(/class="codex-usage-day"/g)).toHaveLength(7);
-    expect(html).toContain("2026-02-23：暂无数据");
-    expect(html).toContain("2026-03-01：0 tokens");
-    expect(html).toContain("2026-02-28：123,456 tokens");
+    expect(html).toContain("详细用量");
+    expect(html).not.toContain("近 7 天每日用量");
+    expect(html.match(/class="codex-usage-day"/g)).toHaveLength(12);
+    const initial = html.slice(0, html.indexOf('<details class="codex-usage-details">'));
+    expect(initial.match(/class="codex-usage-day"/g)).toHaveLength(10);
+    expect(initial.indexOf("2026-03-01")).toBeLessThan(initial.indexOf("2026-02-28"));
+    expect(initial.indexOf("2026-02-28")).toBeLessThan(initial.indexOf("2026-02-27"));
+    expect(initial).not.toContain("2026-01-31：12 tokens");
+    expect(html).toContain("<summary>显示更多</summary>");
+    expect(html).toContain("2026-01-31：12 tokens");
+    expect(html).toContain("2025-12-01：900,000 tokens");
+    expect(html).toContain('style="width:100%"');
+    expect(html).not.toContain("1,027,068");
     expect(html).toContain("更新于");
-    expect(runtime.codexUsageHtml({ ...sample, status: "error" })).toContain("123,468");
+    expect(runtime.codexUsageHtml({ ...sample, status: "error" })).toContain("127,068");
     expect(runtime.codexUsageHtml({ ...sample, status: "error" })).toContain("暂时无法更新");
+    const tenDays = runtime.codexUsageHtml({ ...sample, days: sample.days.slice(0, 10) });
+    expect(tenDays).not.toContain("显示更多");
     const empty = runtime.codexUsageHtml({ ...sample, days: [], total_tokens: null });
     expect(empty).toContain("暂无用量数据");
     expect(empty).not.toContain("codex-usage-total");
   });
 
-  test("seven-day totals distinguish absent data from reported zero and include both date boundaries", () => {
+  test("summary totals distinguish absent data from reported zero and include both date boundaries", () => {
     const runtime = loadRuntime("../src/webui/app.js");
-    const render = (days) => runtime.codexUsageHtml({ ...sample, days });
-    const absent = render([sample.days[0]]);
+    const render = (days, total_tokens = sample.total_tokens) => runtime.codexUsageHtml({ ...sample, days, total_tokens });
+    const oldDay = sample.days.find((day) => day.start_date === "2025-12-01");
+    const zeroDay = sample.days.find((day) => day.start_date === "2026-03-01");
+    const absent = render([oldDay], null);
+    expect(absent).toContain('<span>近 30 天</span><small>tokens</small></div><strong>—</strong>');
     expect(absent).toContain('<span>近 7 天</span><small>tokens</small></div><strong>—</strong>');
-    expect(absent).toContain("已有 0 天数据");
-    const zero = render([sample.days[2]]);
-    expect(zero).toContain('<span>近 7 天</span><small>tokens</small></div><strong>0</strong>');
-    expect(zero).toContain("已有 1 天数据");
+    expect(absent.match(/已有 0 天数据/g)).toHaveLength(2);
+    const zero = render([zeroDay], 0);
+    expect(zero.match(/<strong>0<\/strong>/g)).toHaveLength(2);
+    expect(zero.match(/已有 1 天数据/g)).toHaveLength(2);
     const boundary = render([
       { start_date: "2026-02-22", tokens: 100 },
       { start_date: "2026-02-23", tokens: 2 },
       { start_date: "2026-03-01", tokens: 3 },
-    ]);
+    ], 105);
     expect(boundary).toContain('<span>近 7 天</span><small>tokens</small></div><strong>5</strong>');
     const css = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");
     expect(css).toContain(".codex-usage-total strong { font-size: 14px; font-weight: 600;");
+    expect(css).toContain("grid-template-columns: 76px minmax(20px, 1fr) max-content");
+    expect(css).not.toContain(".codex-usage-details table");
   });
 
   test("cache reads are throttled, preserve editor input, and stop on detached settings", async () => {
@@ -1966,12 +1987,12 @@ describe("backend-owned Codex usage settings", () => {
     await runtime.bindCodexUsageSettings(container);
     expect(calls).toBe(1);
     expect(input.value).toBe("unsaved");
-    expect(target.innerHTML).toContain("123,468");
+    expect(target.innerHTML).toContain("127,068");
     expect(timers).toHaveLength(1);
     expect(timers[0].delay).toBe(60000);
     runtime.setSettingsRequest(async () => { throw new Error("network"); });
     await timers.shift().callback();
-    expect(target.innerHTML).toContain("123,468");
+    expect(target.innerHTML).toContain("127,068");
     expect(target.innerHTML).toContain("暂时无法更新");
     target.isConnected = false;
     await timers.shift().callback();
