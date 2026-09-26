@@ -2682,6 +2682,11 @@ impl MainAgent {
                 })
             } else {
                 image_toolbox::load(&call.arguments, &self.workspace).and_then(|loaded| {
+                    image_toolbox::validate_view_dimensions(&loaded.metadata)?;
+                    let original_width = loaded.metadata.width;
+                    let original_height = loaded.metadata.height;
+                    let projection =
+                        image_toolbox::model_context_projection(original_width, original_height);
                     let metadata = image_toolbox::metadata_value(&loaded);
                     let image_event_id = edb
                         .append_image_content(
@@ -2689,14 +2694,25 @@ impl MainAgent {
                             loaded.metadata.source,
                             loaded.metadata.mime_type,
                             loaded.metadata.format,
-                            loaded.metadata.width,
-                            loaded.metadata.height,
+                            original_width,
+                            original_height,
                             loaded.data,
                         )
                         .map_err(|error| ToolboxExecutionError::Protocol(error.to_string()))?;
                     on_event(edb)
                         .map_err(|error| ToolboxExecutionError::Protocol(error.to_string()))?;
-                    Ok(json!({"image_event_id": image_event_id, "image": metadata}))
+                    let mut result = json!({
+                        "image_event_id": image_event_id,
+                        "image": metadata,
+                        "scale": projection.scale,
+                    });
+                    if (projection.width, projection.height) != (original_width, original_height) {
+                        result["tip"] = Value::String(format!(
+                            "The image was automatically resized for visual inspection to {}x{} at scale {:.6}.",
+                            projection.width, projection.height, projection.scale
+                        ));
+                    }
+                    Ok(result)
                 })
             }
         } else if call.name == image_toolbox::SEND_TOOL_NAME {
@@ -7225,6 +7241,7 @@ fn push_provider_context_item(
 }
 
 fn image_context_message(image: &crate::event::ImageContentEvent) -> Result<Value> {
+    let projection = image_toolbox::model_context_projection(image.width, image.height);
     let png = image_toolbox::model_context_png(image.data.as_ref()).map_err(|error| {
         format!(
             "cannot project ImageContentEvent {} from {} as PNG: {error}",
@@ -7232,20 +7249,28 @@ fn image_context_message(image: &crate::event::ImageContentEvent) -> Result<Valu
         )
     })?;
     let data_url = format!("data:image/png;base64,{}", STANDARD.encode(png));
+    let text = if (projection.width, projection.height) != (image.width, image.height) {
+        format!(
+            "Stored image content from {} ({}x{}, {}, sha256 {}). The image was automatically resized for visual inspection to {}x{} at scale {:.6}.",
+            image.source,
+            image.width,
+            image.height,
+            image.format,
+            image.content_sha256,
+            projection.width,
+            projection.height,
+            projection.scale
+        )
+    } else {
+        format!(
+            "Stored image content from {} ({}x{}, {}, sha256 {}).",
+            image.source, image.width, image.height, image.format, image.content_sha256
+        )
+    };
     Ok(json!({
         "role": "user",
         "content": [
-            {
-                "type": "text",
-                "text": format!(
-                    "Stored image content from {} ({}x{}, {}, sha256 {}).",
-                    image.source,
-                    image.width,
-                    image.height,
-                    image.format,
-                    image.content_sha256
-                )
-            },
+            {"type": "text", "text": text},
             {
                 "type": "image_url",
                 "image_url": {"url": data_url}

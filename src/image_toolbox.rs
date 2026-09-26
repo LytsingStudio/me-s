@@ -23,6 +23,11 @@ pub const SEND_TOOL_NAME: &str = "Image.Send";
 pub const MAX_SEND_IMAGES: usize = 16;
 pub const WEB_BROWSER_SNAPSHOT_TOOL_NAME: &str = "WebBrowser.Snapshot";
 const MAX_IMAGE_BYTES: usize = 60 * 1024 * 1024;
+const MAX_IMAGE_DIMENSION: u32 = 8_192;
+const MODEL_CONTEXT_MAX_PIXELS: u64 = 3_500_000;
+const MODEL_CONTEXT_IMAGE_PATCH_SIZE: u64 = 32;
+const MODEL_CONTEXT_MAX_PATCHES: u64 = 30_000;
+const MODEL_CONTEXT_TARGET_PATCHES: u64 = MODEL_CONTEXT_MAX_PATCHES - 2_000;
 
 #[derive(Clone, Debug, Serialize)]
 pub struct ImageMetadata {
@@ -43,6 +48,13 @@ pub struct ImageMetadata {
 pub struct LoadedImage {
     pub metadata: ImageMetadata,
     pub data: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ModelContextProjection {
+    pub width: u32,
+    pub height: u32,
+    pub scale: f64,
 }
 
 pub fn model_supports_images(model: &crate::config::ModelConfig) -> bool {
@@ -77,12 +89,12 @@ pub fn image_content_limit(tool_name: &str, arguments: &str) -> usize {
 pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String, String)) {
     let info_route = "Inspect an image's encoded format, dimensions, color layout, byte size, and content hash without adding the image to model context.";
     let view_route = if image_input_supported {
-        "Load an image into the conversation so you can inspect its visual content. Use Image.Info when metadata alone is sufficient."
+        "Load an image into the conversation so you can inspect its visual content. Images over 3.5 million pixels are automatically resized proportionally for visual inspection, and the result reports the applied scale. Images whose original width or height exceeds 8192 pixels are rejected. Use Image.Info when metadata alone is sufficient."
     } else {
         "The current model does not support image input. Image.View will reject calls until an image-capable model is selected; Image.Info and Image.Send remain available."
     };
     let view_instructions = if image_input_supported {
-        "Loads the complete image from the supplied URL or local path, validates it, and stores it in the conversation for you to inspect. The image remains available even if the source disappears. The user can also preview it and save the original from the tool card. Use Image.Send instead when only the user needs to see the image."
+        "Loads the complete image from the supplied URL or local path, validates it, and stores it in the conversation for you to inspect. Images over 3.5 million pixels are automatically resized proportionally only for visual inspection, and the result reports the applied scale and a tip when resizing occurs. Images whose original width or height exceeds 8192 pixels are rejected. The original image remains available even if the source disappears. The user can also preview it and save the original from the tool card. Use Image.Send instead when only the user needs to see the image."
     } else {
         "Unavailable with the current model because it does not accept image input. Select an image-capable model before calling this tool. The restriction is enforced by the runtime."
     };
@@ -145,7 +157,9 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
             "required": ["image_event_id", "image"],
             "properties": {
                 "image_event_id": {"type": "integer"},
-                "image": metadata_schema.clone()
+                "image": metadata_schema.clone(),
+                "scale": {"type": "number", "minimum": 0.0, "maximum": 1.0},
+                "tip": {"type": "string"}
             },
             "additionalProperties": false
         }),
@@ -277,8 +291,84 @@ pub fn metadata_value(image: &LoadedImage) -> Value {
     serde_json::to_value(&image.metadata).expect("ImageMetadata serialization cannot fail")
 }
 
+pub fn validate_view_dimensions(metadata: &ImageMetadata) -> Result<(), ToolboxExecutionError> {
+    if metadata.width <= MAX_IMAGE_DIMENSION && metadata.height <= MAX_IMAGE_DIMENSION {
+        return Ok(());
+    }
+    Err(ToolboxExecutionError::Tool {
+        code: "image_dimensions_too_large".into(),
+        message: format!(
+            "Image.View accepts images whose original width and height are each at most {MAX_IMAGE_DIMENSION} pixels; received {}x{}",
+            metadata.width, metadata.height
+        ),
+        retryable: false,
+        tip: Some(format!(
+            "Use an image whose original width and height are both at most {MAX_IMAGE_DIMENSION} pixels."
+        )),
+    })
+}
+
+fn model_context_patch_count(width: u32, height: u32) -> u64 {
+    u64::from(width).div_ceil(MODEL_CONTEXT_IMAGE_PATCH_SIZE)
+        * u64::from(height).div_ceil(MODEL_CONTEXT_IMAGE_PATCH_SIZE)
+}
+fn scaled_dimension(value: u32, scale: f64) -> u32 {
+    (f64::from(value) * scale).floor().max(1.0) as u32
+}
+fn model_context_dimensions(width: u32, height: u32) -> (u32, u32) {
+    let pixels = u64::from(width) * u64::from(height);
+    let pixel_scale = if pixels > MODEL_CONTEXT_MAX_PIXELS {
+        (MODEL_CONTEXT_MAX_PIXELS as f64 / pixels as f64).sqrt()
+    } else {
+        1.0
+    };
+    let mut target_width = scaled_dimension(width, pixel_scale);
+    let mut target_height = scaled_dimension(height, pixel_scale);
+    if model_context_patch_count(target_width, target_height) > MODEL_CONTEXT_TARGET_PATCHES {
+        let patch_scale = (MODEL_CONTEXT_TARGET_PATCHES as f64
+            / model_context_patch_count(target_width, target_height) as f64)
+            .sqrt();
+        target_width = scaled_dimension(target_width, patch_scale);
+        target_height = scaled_dimension(target_height, patch_scale);
+    }
+    while model_context_patch_count(target_width, target_height) > MODEL_CONTEXT_TARGET_PATCHES {
+        if target_width >= target_height && target_width > 1 {
+            target_width -= 1;
+        } else if target_height > 1 {
+            target_height -= 1;
+        } else {
+            break;
+        }
+    }
+    (target_width, target_height)
+}
+pub fn model_context_projection(width: u32, height: u32) -> ModelContextProjection {
+    let (target_width, target_height) = model_context_dimensions(width, height);
+    let scale = if (target_width, target_height) == (width, height) {
+        1.0
+    } else {
+        (f64::from(target_width) / f64::from(width))
+            .min(f64::from(target_height) / f64::from(height))
+    };
+    ModelContextProjection {
+        width: target_width,
+        height: target_height,
+        scale,
+    }
+}
 pub fn model_context_png(data: &[u8]) -> std::result::Result<Vec<u8>, image::ImageError> {
     let image = image::load_from_memory(data)?;
+    let (width, height) = image.dimensions();
+    let projection = model_context_projection(width, height);
+    let image = if (projection.width, projection.height) == (width, height) {
+        image
+    } else {
+        image.resize(
+            projection.width,
+            projection.height,
+            image::imageops::FilterType::Triangle,
+        )
+    };
     let mut encoded = std::io::Cursor::new(Vec::new());
     image.write_to(&mut encoded, ImageFormat::Png)?;
     Ok(encoded.into_inner())
@@ -552,6 +642,48 @@ mod tests {
         }
     }
 
+    #[test]
+    fn model_context_projection_keeps_small_images_and_bounds_large_inputs() {
+        let small = model_context_projection(3, 2);
+        assert_eq!((small.width, small.height), (3, 2));
+        assert_eq!(small.scale, 1.0);
+        let pixel_limited = model_context_projection(2_048, 2_048);
+        assert!(pixel_limited.scale < 1.0);
+        assert!(
+            u64::from(pixel_limited.width) * u64::from(pixel_limited.height)
+                <= MODEL_CONTEXT_MAX_PIXELS
+        );
+        let patch_limited = model_context_projection(7_680, 7_840);
+        assert!(model_context_patch_count(7_680, 7_840) > MODEL_CONTEXT_MAX_PATCHES);
+        assert!(
+            model_context_patch_count(patch_limited.width, patch_limited.height)
+                <= MODEL_CONTEXT_TARGET_PATCHES
+        );
+        assert!(patch_limited.width < 7_680);
+        assert!(patch_limited.height < 7_840);
+    }
+    #[test]
+    fn view_rejects_original_dimensions_over_the_hard_limit() {
+        let metadata = ImageMetadata {
+            source: "test".into(),
+            format: "png".into(),
+            mime_type: "image/png".into(),
+            width: MAX_IMAGE_DIMENSION + 1,
+            height: 1,
+            aspect_ratio: 1.0,
+            color_type: "rgb".into(),
+            bits_per_pixel: 24,
+            has_alpha: false,
+            bytes: 1,
+            sha256: "test".into(),
+        };
+        let error = validate_view_dimensions(&metadata).unwrap_err();
+        assert!(matches!(
+            error,
+            ToolboxExecutionError::Tool { code, retryable: false, .. }
+                if code == "image_dimensions_too_large"
+        ));
+    }
     #[test]
     fn loads_data_file_and_http_urls_and_rejects_oversized_sources() {
         let root =
