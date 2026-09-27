@@ -22,8 +22,10 @@ pub const VIEW_TOOL_NAME: &str = "Image.View";
 pub const SEND_TOOL_NAME: &str = "Image.Send";
 pub const MAX_SEND_IMAGES: usize = 16;
 pub const WEB_BROWSER_SNAPSHOT_TOOL_NAME: &str = "WebBrowser.Snapshot";
-const MAX_IMAGE_BYTES: usize = 60 * 1024 * 1024;
+const MAX_IMAGE_BYTES: u64 = 60 * 1024 * 1024;
+const MAX_INFO_IMAGE_BYTES: u64 = 4 * 1024 * 1024 * 1024;
 const MAX_IMAGE_DIMENSION: u32 = 8_192;
+const MAX_INFO_IMAGE_DIMENSION: u32 = 16_384;
 const MODEL_CONTEXT_MAX_PIXELS: u64 = 3_500_000;
 const MODEL_CONTEXT_IMAGE_PATCH_SIZE: u64 = 32;
 const MODEL_CONTEXT_MAX_PATCHES: u64 = 30_000;
@@ -87,7 +89,7 @@ pub fn image_content_limit(tool_name: &str, arguments: &str) -> usize {
 }
 
 pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String, String)) {
-    let info_route = "Inspect an image's encoded format, dimensions, color layout, byte size, and content hash without adding the image to model context.";
+    let info_route = "Inspect an image's encoded format, dimensions, color layout, byte size, and content hash without adding the image to model context. Image.Info accepts images up to 4 GiB whose original width and height are each at most 16,384 pixels.";
     let view_route = if image_input_supported {
         "Load an image into the conversation so you can inspect its visual content. Images over 3.5 million pixels are automatically resized proportionally for visual inspection, and the result reports the applied scale. Images whose original width or height exceeds 8192 pixels are rejected. Use Image.Info when metadata alone is sufficient."
     } else {
@@ -141,7 +143,7 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
         input_schema: schema.clone(),
         output_schema: metadata_schema.clone(),
         result_token_limit: DEFAULT_TOOL_RESULT_TOKEN_LIMIT,
-        instructions: "Reads and decodes the image only far enough to return reliable metadata. It does not add image content to model context.".into(),
+        instructions: "Reads and decodes the image only far enough to return reliable metadata. It accepts source data up to 4 GiB and original width and height up to 16,384 pixels. It does not add image content to model context.".into(),
         route: info_route.into(),
         examples: r#"{"url":"./diagram.png"}
 {"url":"https://example.com/photo.webp"}"#.into(),
@@ -211,6 +213,20 @@ pub fn catalog_parts(image_input_supported: bool) -> (Vec<ToolboxTool>, (String,
 }
 
 pub fn load(arguments: &str, workspace: &Path) -> Result<LoadedImage, ToolboxExecutionError> {
+    let image = load_with_limit(arguments, workspace, MAX_INFO_IMAGE_BYTES)?;
+    validate_info_dimensions(&image.metadata)?;
+    Ok(image)
+}
+
+pub fn load_view(arguments: &str, workspace: &Path) -> Result<LoadedImage, ToolboxExecutionError> {
+    load_with_limit(arguments, workspace, MAX_IMAGE_BYTES)
+}
+
+fn load_with_limit(
+    arguments: &str,
+    workspace: &Path,
+    max_bytes: u64,
+) -> Result<LoadedImage, ToolboxExecutionError> {
     let input: Value = serde_json::from_str(arguments)
         .map_err(|error| tool_error("invalid_arguments", error.to_string(), false))?;
     let url = input
@@ -218,11 +234,15 @@ pub fn load(arguments: &str, workspace: &Path) -> Result<LoadedImage, ToolboxExe
         .and_then(Value::as_str)
         .filter(|url| !url.trim().is_empty())
         .ok_or_else(|| tool_error("invalid_arguments", "url must be a non-empty string", false))?;
-    load_source(url, workspace)
+    load_source(url, workspace, max_bytes)
 }
 
-fn load_source(url: &str, workspace: &Path) -> Result<LoadedImage, ToolboxExecutionError> {
-    let data = read_source(url, workspace)?;
+fn load_source(
+    url: &str,
+    workspace: &Path,
+    max_bytes: u64,
+) -> Result<LoadedImage, ToolboxExecutionError> {
+    let data = read_source(url, workspace, max_bytes)?;
     let format = image::guess_format(&data)
         .map_err(|error| tool_error("unsupported_image", error.to_string(), false))?;
     let image = image::load_from_memory_with_format(&data, format)
@@ -271,10 +291,10 @@ pub fn load_send(
     workspace: &Path,
 ) -> Result<Vec<LoadedImage>, ToolboxExecutionError> {
     let mut images = Vec::new();
-    let mut total = 0;
+    let mut total = 0_u64;
     for source in send_sources(arguments)? {
-        let image = load_source(&source, workspace)?;
-        total += image.data.len();
+        let image = load_source(&source, workspace, MAX_IMAGE_BYTES)?;
+        total += image.data.len() as u64;
         if total > MAX_IMAGE_BYTES {
             return Err(tool_error(
                 "image_too_large",
@@ -289,6 +309,23 @@ pub fn load_send(
 
 pub fn metadata_value(image: &LoadedImage) -> Value {
     serde_json::to_value(&image.metadata).expect("ImageMetadata serialization cannot fail")
+}
+
+pub fn validate_info_dimensions(metadata: &ImageMetadata) -> Result<(), ToolboxExecutionError> {
+    if metadata.width <= MAX_INFO_IMAGE_DIMENSION && metadata.height <= MAX_INFO_IMAGE_DIMENSION {
+        return Ok(());
+    }
+    Err(ToolboxExecutionError::Tool {
+        code: "image_dimensions_too_large".into(),
+        message: format!(
+            "Image.Info accepts images whose original width and height are each at most {MAX_INFO_IMAGE_DIMENSION} pixels; received {}x{}",
+            metadata.width, metadata.height
+        ),
+        retryable: false,
+        tip: Some(format!(
+            "Use an image whose original width and height are both at most {MAX_INFO_IMAGE_DIMENSION} pixels."
+        )),
+    })
 }
 
 pub fn validate_view_dimensions(metadata: &ImageMetadata) -> Result<(), ToolboxExecutionError> {
@@ -436,9 +473,13 @@ pub(crate) fn preview_jpeg(
     Ok(bytes)
 }
 
-fn read_source(source: &str, workspace: &Path) -> Result<Vec<u8>, ToolboxExecutionError> {
+fn read_source(
+    source: &str,
+    workspace: &Path,
+    max_bytes: u64,
+) -> Result<Vec<u8>, ToolboxExecutionError> {
     if source.starts_with("data:") {
-        return decode_data_url(source);
+        return decode_data_url(source, max_bytes);
     }
     if source.starts_with("http://") || source.starts_with("https://") {
         let client = Client::builder()
@@ -452,15 +493,18 @@ fn read_source(source: &str, workspace: &Path) -> Result<Vec<u8>, ToolboxExecuti
             .map_err(|error| tool_error("image_request_failed", error.to_string(), true))?;
         if response
             .content_length()
-            .is_some_and(|length| length > MAX_IMAGE_BYTES as u64)
+            .is_some_and(|length| length > max_bytes)
         {
             return Err(tool_error(
                 "image_too_large",
-                format!("image exceeds the {MAX_IMAGE_BYTES} byte limit"),
+                format!(
+                    "image exceeds the {} byte limit",
+                    image_size_limit_label(max_bytes)
+                ),
                 false,
             ));
         }
-        return read_limited(response, source);
+        return read_limited(response, source, max_bytes);
     }
     let path = if source.starts_with("file:") {
         Url::parse(source)
@@ -477,10 +521,13 @@ fn read_source(source: &str, workspace: &Path) -> Result<Vec<u8>, ToolboxExecuti
     };
     let metadata = fs::metadata(&path)
         .map_err(|error| tool_error("image_read_failed", error.to_string(), false))?;
-    if metadata.len() > MAX_IMAGE_BYTES as u64 {
+    if metadata.len() > max_bytes {
         return Err(tool_error(
             "image_too_large",
-            format!("image exceeds the {MAX_IMAGE_BYTES} byte limit"),
+            format!(
+                "image exceeds the {} byte limit",
+                image_size_limit_label(max_bytes)
+            ),
             false,
         ));
     }
@@ -490,23 +537,27 @@ fn read_source(source: &str, workspace: &Path) -> Result<Vec<u8>, ToolboxExecuti
 fn read_limited(
     response: reqwest::blocking::Response,
     source: &str,
+    max_bytes: u64,
 ) -> Result<Vec<u8>, ToolboxExecutionError> {
     let mut data = Vec::new();
     response
-        .take(MAX_IMAGE_BYTES as u64 + 1)
+        .take(max_bytes.saturating_add(1))
         .read_to_end(&mut data)
         .map_err(|error| tool_error("image_request_failed", format!("{source}: {error}"), true))?;
-    if data.len() > MAX_IMAGE_BYTES {
+    if data.len() as u64 > max_bytes {
         return Err(tool_error(
             "image_too_large",
-            format!("image exceeds the {MAX_IMAGE_BYTES} byte limit"),
+            format!(
+                "image exceeds the {} byte limit",
+                image_size_limit_label(max_bytes)
+            ),
             false,
         ));
     }
     Ok(data)
 }
 
-fn decode_data_url(source: &str) -> Result<Vec<u8>, ToolboxExecutionError> {
+fn decode_data_url(source: &str, max_bytes: u64) -> Result<Vec<u8>, ToolboxExecutionError> {
     let (header, payload) = source
         .split_once(',')
         .ok_or_else(|| tool_error("invalid_arguments", "invalid data URL", false))?;
@@ -520,14 +571,25 @@ fn decode_data_url(source: &str) -> Result<Vec<u8>, ToolboxExecutionError> {
     let data = STANDARD
         .decode(payload)
         .map_err(|error| tool_error("invalid_arguments", error.to_string(), false))?;
-    if data.len() > MAX_IMAGE_BYTES {
+    if data.len() as u64 > max_bytes {
         return Err(tool_error(
             "image_too_large",
-            format!("image exceeds the {MAX_IMAGE_BYTES} byte limit"),
+            format!(
+                "image exceeds the {} byte limit",
+                image_size_limit_label(max_bytes)
+            ),
             false,
         ));
     }
     Ok(data)
+}
+
+fn image_size_limit_label(max_bytes: u64) -> &'static str {
+    match max_bytes {
+        MAX_IMAGE_BYTES => "60 MiB",
+        MAX_INFO_IMAGE_BYTES => "4 GiB",
+        _ => "configured",
+    }
 }
 
 fn normalized_source(source: &str, workspace: &Path) -> String {
@@ -685,6 +747,31 @@ mod tests {
         ));
     }
     #[test]
+    fn info_accepts_dimensions_at_limit_and_rejects_larger_images() {
+        let mut metadata = ImageMetadata {
+            source: "test".into(),
+            format: "png".into(),
+            mime_type: "image/png".into(),
+            width: MAX_INFO_IMAGE_DIMENSION,
+            height: MAX_INFO_IMAGE_DIMENSION,
+            aspect_ratio: 1.0,
+            color_type: "rgb".into(),
+            bits_per_pixel: 24,
+            has_alpha: false,
+            bytes: 1,
+            sha256: "test".into(),
+        };
+        assert!(validate_info_dimensions(&metadata).is_ok());
+        metadata.width += 1;
+        let error = validate_info_dimensions(&metadata).unwrap_err();
+        assert!(matches!(
+            error,
+            ToolboxExecutionError::Tool { code, retryable: false, .. }
+                if code == "image_dimensions_too_large"
+        ));
+    }
+
+    #[test]
     fn loads_data_file_and_http_urls_and_rejects_oversized_sources() {
         let root =
             std::env::temp_dir().join(format!("me-image-toolbox-protocols-{}", std::process::id()));
@@ -748,8 +835,8 @@ mod tests {
 
         let oversized = root.join("oversized.png");
         let file = fs::File::create(&oversized).unwrap();
-        file.set_len(MAX_IMAGE_BYTES as u64 + 1).unwrap();
-        let error = load(r#"{"url":"oversized.png"}"#, &root).unwrap_err();
+        file.set_len(MAX_IMAGE_BYTES + 1).unwrap();
+        let error = load_view(r#"{"url":"oversized.png"}"#, &root).unwrap_err();
         assert!(error.to_string().contains("image_too_large"));
         fs::remove_dir_all(root).unwrap();
     }

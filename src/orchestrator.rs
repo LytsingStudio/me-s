@@ -2681,7 +2681,7 @@ impl MainAgent {
                     tip: None,
                 })
             } else {
-                image_toolbox::load(&call.arguments, &self.workspace).and_then(|loaded| {
+                image_toolbox::load_view(&call.arguments, &self.workspace).and_then(|loaded| {
                     image_toolbox::validate_view_dimensions(&loaded.metadata)?;
                     let original_width = loaded.metadata.width;
                     let original_height = loaded.metadata.height;
