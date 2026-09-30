@@ -26,19 +26,25 @@ const DEVICE_AUTH_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 const MODEL_SOURCE_URL: &str =
     "https://developers.openai.com/api/docs/guides/latest-model?model=gpt-5.6-sol";
 
-const BASE_MODEL_NAMES: [&str; 4] = [
+const BASE_MODEL_NAMES: [&str; 7] = [
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-luna",
 ];
-const LEGACY_MODEL_NAMES: [&str; 4] = [
+const LEGACY_MODEL_NAMES: [&str; 7] = [
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-5.6-luna",
     "gpt-6-astra",
+    "gpt-6-sol",
+    "gpt-6.1-sol",
+    "gpt-6-luna",
 ];
-pub const MODEL_NAMES: [&str; 12] = [
+pub const MODEL_NAMES: [&str; 21] = [
     "gpt-5.6-sol-272k",
     "gpt-5.6-sol-512k",
     "gpt-5.6-sol-1000k",
@@ -51,6 +57,15 @@ pub const MODEL_NAMES: [&str; 12] = [
     "gpt-6-astra-272k",
     "gpt-6-astra-512k",
     "gpt-6-astra-1000k",
+    "gpt-6-sol-272k",
+    "gpt-6-sol-512k",
+    "gpt-6-sol-1000k",
+    "gpt-6.1-sol-272k",
+    "gpt-6.1-sol-512k",
+    "gpt-6.1-sol-1000k",
+    "gpt-6-luna-272k",
+    "gpt-6-luna-512k",
+    "gpt-6-luna-1000k",
 ];
 
 pub fn is_legacy_model_name(name: &str) -> bool {
@@ -413,7 +428,10 @@ fn model_config(
     reserve_output_context: bool,
     credential_file: &Path,
 ) -> ModelConfig {
-    let reasoning_efforts = if api_model == "gpt-5.6-luna" {
+    let reasoning_efforts = if matches!(
+        api_model,
+        "gpt-5.6-luna" | "gpt-6-sol" | "gpt-6.1-sol" | "gpt-6-luna"
+    ) {
         ["unset", "low", "medium", "high", "xhigh", "max"]
             .map(str::to_owned)
             .to_vec()
@@ -855,13 +873,13 @@ mod tests {
                 .collect::<Vec<_>>(),
             MODEL_NAMES
         );
-        assert_eq!(models.len(), 16);
+        assert_eq!(models.len(), 28);
         assert!(
             models
                 .iter()
                 .all(|model| model.capabilities.max_output_tokens == Some(128_000))
         );
-        for models in models[..12].chunks_exact(3) {
+        for models in models[..21].chunks_exact(3) {
             assert_eq!(models[0].capabilities.context_window, 272_000);
             assert_eq!(models[1].capabilities.context_window, 512_000);
             assert_eq!(models[2].capabilities.context_window, 1_000_000);
@@ -873,7 +891,7 @@ mod tests {
             assert_eq!(models[2].output_token_reservation(Some("unset")), 128_000);
             assert!(models.iter().all(|model| model.model == models[0].model));
         }
-        assert!(models[12..].iter().all(|model| {
+        assert!(models[21..].iter().all(|model| {
             is_hidden_legacy_model(model)
                 && model.capabilities.context_window == 512_000
                 && !model.reserve_output_context
@@ -887,6 +905,24 @@ mod tests {
         );
         assert!(
             !models[6]
+                .capabilities
+                .reasoning_efforts
+                .contains(&"ultra".to_owned())
+        );
+        assert!(
+            !models[12]
+                .capabilities
+                .reasoning_efforts
+                .contains(&"ultra".to_owned())
+        );
+        assert!(
+            !models[15]
+                .capabilities
+                .reasoning_efforts
+                .contains(&"ultra".to_owned())
+        );
+        assert!(
+            !models[18]
                 .capabilities
                 .reasoning_efforts
                 .contains(&"ultra".to_owned())
@@ -941,7 +977,7 @@ mod tests {
         };
 
         add_models_if_logged_in_at(&mut global, &path).unwrap();
-        assert_eq!(global.models.len(), 17);
+        assert_eq!(global.models.len(), 29);
         assert!(MODEL_NAMES.iter().all(|name| global.model(name).is_some()));
         assert_eq!(
             global
