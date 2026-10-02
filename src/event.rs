@@ -3439,8 +3439,28 @@ impl EventDataBase {
     pub fn append_workmap_mutation(
         &mut self,
         tool_call_id: EventId,
-        mut mutation: WorkMapMutation,
+        mutation: WorkMapMutation,
     ) -> Result<EventId> {
+        self.append_workmap_mutation_inner(tool_call_id, mutation, None)
+            .map(|(id, _, _)| id)
+    }
+
+    pub(crate) fn append_workmap_mutation_with_projection(
+        &mut self,
+        tool_call_id: EventId,
+        mutation: WorkMapMutation,
+        projection: &WorkMapProjection,
+    ) -> Result<(WorkMapProjection, WorkMapMutation)> {
+        self.append_workmap_mutation_inner(tool_call_id, mutation, Some(projection))
+            .map(|(_, projection, mutation)| (projection, mutation))
+    }
+
+    fn append_workmap_mutation_inner(
+        &mut self,
+        tool_call_id: EventId,
+        mut mutation: WorkMapMutation,
+        base_projection: Option<&WorkMapProjection>,
+    ) -> Result<(EventId, WorkMapProjection, WorkMapMutation)> {
         let Some(Event::ToolCall(call)) = self.get(tool_call_id) else {
             return Err(format!(
                 "WorkMapMutationEvent references invalid tool call {tool_call_id}"
@@ -3491,10 +3511,14 @@ impl EventDataBase {
             tool_call_id,
             mutation,
         };
-        let mut projection = WorkMapProjection::from_events(&self.events)?;
+        let mut projection = match base_projection {
+            Some(projection) => projection.clone(),
+            None => WorkMapProjection::from_events(&self.events)?,
+        };
         projection.apply(&event)?;
+        let mutation = event.mutation.clone();
         self.append(Event::WorkMapMutation(event))?;
-        Ok(id)
+        Ok((id, projection, mutation))
     }
 
     pub fn append_terminal_session_created(

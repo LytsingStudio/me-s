@@ -709,14 +709,26 @@ pub fn persisted_mutation_result(events: &[Event], tool_call_id: EventId) -> Opt
             _ => None,
         })?;
     let projection = WorkMapProjection::from_events(&events[..=index]).ok()?;
-    if event.mutation.operation == WorkMapOperation::PlanStateUpdated {
-        return Some(json!({"current": projection.current_snapshot()}));
+    Some(mutation_result(
+        &projection,
+        event.mutation.operation,
+        &event.mutation.records,
+    ))
+}
+
+fn mutation_result(
+    projection: &WorkMapProjection,
+    operation: WorkMapOperation,
+    records: &[WorkMapRecord],
+) -> Value {
+    if operation == WorkMapOperation::PlanStateUpdated {
+        return json!({"current": projection.current_snapshot()});
     }
-    Some(json!({
+    json!({
         "memory": projection.active_memory_snapshot(),
         "current": projection.current_snapshot(),
-        "records": event.mutation.records
-    }))
+        "records": records
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -894,7 +906,14 @@ fn start(
             &mut reserved,
         )));
     }
-    append_mutation(edb, tool_call_id, WorkMapOperation::Started, "", records)
+    append_mutation(
+        edb,
+        projection,
+        tool_call_id,
+        WorkMapOperation::Started,
+        "",
+        records,
+    )
 }
 
 fn update_plan_state(
@@ -985,6 +1004,7 @@ fn update_plan_state(
 
     append_mutation(
         edb,
+        projection,
         tool_call_id,
         WorkMapOperation::PlanStateUpdated,
         &mutation_reason,
@@ -1014,6 +1034,7 @@ fn add_note(
     };
     append_mutation(
         edb,
+        projection,
         tool_call_id,
         WorkMapOperation::NoteAdded,
         "",
@@ -1057,6 +1078,7 @@ fn change_plan(
     validate_plan(&plan).map_err(invalid_arguments)?;
     append_mutation(
         edb,
+        projection,
         tool_call_id,
         WorkMapOperation::PlanChanged,
         &input.reason,
@@ -1127,7 +1149,14 @@ fn add_plan(
         projection,
         &mut reserved,
     )));
-    append_mutation(edb, tool_call_id, WorkMapOperation::PlanAdded, "", records)
+    append_mutation(
+        edb,
+        projection,
+        tool_call_id,
+        WorkMapOperation::PlanAdded,
+        "",
+        records,
+    )
 }
 
 fn close_objective(
@@ -1165,6 +1194,7 @@ fn close_objective(
     }
     append_mutation(
         edb,
+        projection,
         tool_call_id,
         WorkMapOperation::ObjectiveClosed,
         &input.reason,
@@ -1189,6 +1219,7 @@ fn add_memory(
     );
     append_mutation(
         edb,
+        projection,
         tool_call_id,
         WorkMapOperation::MemoryAdded,
         "",
@@ -1242,6 +1273,7 @@ fn invalidate_memory(
     }
     append_mutation(
         edb,
+        projection,
         tool_call_id,
         WorkMapOperation::MemoryInvalidated,
         &input.reason,
@@ -1251,6 +1283,7 @@ fn invalidate_memory(
 
 fn append_mutation(
     edb: &mut EventDataBase,
+    projection: &WorkMapProjection,
     tool_call_id: EventId,
     operation: WorkMapOperation,
     reason: &str,
@@ -1261,10 +1294,14 @@ fn append_mutation(
         reason: reason.into(),
         records,
     };
-    edb.append_workmap_mutation(tool_call_id, mutation)
+    let (updated_projection, mutation) = edb
+        .append_workmap_mutation_with_projection(tool_call_id, mutation, projection)
         .map_err(protocol_error)?;
-    persisted_mutation_result(edb.events(), tool_call_id)
-        .ok_or_else(|| protocol_error("persisted WorkMap mutation is missing"))
+    Ok(mutation_result(
+        &updated_projection,
+        operation,
+        &mutation.records,
+    ))
 }
 
 fn new_objective(
