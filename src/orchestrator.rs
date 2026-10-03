@@ -1963,6 +1963,20 @@ impl MainAgent {
                 )?;
                 return Ok(());
             }
+            if matches!(
+                current_user_turn_state(edb.events())?,
+                Some(UserTurnState::Completed(completed_prompt_id))
+                    if completed_prompt_id == prompt_id
+            ) {
+                close_agent_turn(
+                    edb,
+                    prompt_id,
+                    AgentTurnState::Completed,
+                    "user turn completed before the Agent turn closed",
+                    on_event,
+                )?;
+                return Ok(());
+            }
             if apply_running_inputs_with_toolboxes(
                 &self.input_queue,
                 &mut self.effort,
@@ -9125,6 +9139,53 @@ mod tests {
         edb.append_api_state(final_call, prompt_id, ApiState::Completed, "")
             .unwrap();
         assert_eq!(active_user_turn_id(edb.events()).unwrap(), None);
+    }
+
+    #[test]
+    fn completed_user_turn_closes_before_pending_prompt_is_consumed() {
+        let mut edb = EventDataBase::new();
+        let mut agent = MainAgent::new(None);
+        initialize_main_for_test(&agent, &mut edb);
+        let prompt_id = edb.append_user_prompt("start").unwrap();
+        edb.append_agent_turn(prompt_id, prompt_id, AgentTurnState::Started, "")
+            .unwrap();
+        let api_call_id = edb.append_api_requesting(prompt_id).unwrap();
+        edb.append_api_state(api_call_id, prompt_id, ApiState::Streaming, "")
+            .unwrap();
+        edb.append_assist_response(prompt_id, "final", true)
+            .unwrap();
+        edb.append_api_state(api_call_id, prompt_id, ApiState::Completed, "")
+            .unwrap();
+        agent.submit_user_prompt("next turn".to_owned()).unwrap();
+        let mut models = ModelRuntime::from(unused_model_api());
+        agent
+            .run_agent_loop(prompt_id, &mut edb, &mut models, &mut |_| Ok(()))
+            .unwrap();
+        assert!(matches!(
+            latest_agent_turn(edb.events()).unwrap(),
+            Some(turn)
+                if turn.prompt_id == prompt_id && turn.state == AgentTurnState::Completed
+        ));
+        assert!(
+            append_next_main_input(
+                &agent.input_queue,
+                &mut agent.effort,
+                &mut edb,
+                &mut models,
+                &mut |_| Ok(()),
+            )
+            .unwrap()
+        );
+        assert!(edb.events().iter().any(|event| {
+            matches!(event, Event::UserPrompt(prompt) if prompt.content == "next turn")
+        }));
+        assert!(!edb.events().iter().any(|event| {
+            matches!(
+                event,
+                Event::FollowUpPrompt(follow_up)
+                    if follow_up.prompt_id == prompt_id && follow_up.content == "next turn"
+            )
+        }));
     }
 
     #[test]
