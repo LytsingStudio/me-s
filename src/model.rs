@@ -67,6 +67,9 @@ pub enum OpenAiStreamEvent {
         provider: String,
         item: Value,
     },
+    AssistantMessage {
+        phase: Option<String>,
+    },
     Done,
     Other,
 }
@@ -235,17 +238,19 @@ impl ModelApi {
         }
 
         body.insert("model".into(), Value::String(self.model.model.clone()));
-        body.insert(
-            "messages".into(),
-            Value::Array(
-                context
-                    .messages
-                    .iter()
-                    .filter(|message| message.get("_me_provider").is_none())
-                    .cloned()
-                    .collect(),
-            ),
-        );
+        let messages = context
+            .messages
+            .iter()
+            .filter(|message| message.get("_me_provider").is_none())
+            .map(|message| {
+                let mut message = message.clone();
+                if let Some(object) = message.as_object_mut() {
+                    object.remove("phase");
+                }
+                message
+            })
+            .collect();
+        body.insert("messages".into(), Value::Array(messages));
         body.insert("stream".into(), Value::Bool(stream));
         if stream {
             let stream_options = body
@@ -275,10 +280,12 @@ impl ModelApi {
         if let Some(effort) = effort {
             self.model.validate_effort(effort)?;
             if effort != UNSET_EFFORT {
-                body.insert(
-                    "reasoning".into(),
-                    json!({"effort": effort, "summary": "auto"}),
-                );
+                let reasoning = body.entry("reasoning").or_insert_with(|| json!({}));
+                let reasoning = reasoning
+                    .as_object_mut()
+                    .ok_or("model parameter reasoning must be an object")?;
+                reasoning.insert("effort".into(), Value::String(effort.into()));
+                reasoning.insert("summary".into(), Value::String("auto".into()));
             }
         }
         body.insert("model".into(), Value::String(self.model.model.clone()));
@@ -505,6 +512,21 @@ fn responses_stream_event(value: &Value) -> Result<OpenAiStreamEvent> {
                 item: value["item"].clone(),
             })
         }
+        Some("response.output_item.done")
+            if value.pointer("/item/type").and_then(Value::as_str) == Some("message")
+                && value.pointer("/item/role").and_then(Value::as_str) == Some("assistant") =>
+        {
+            let phase = value
+                .pointer("/item/phase")
+                .and_then(Value::as_str)
+                .map(str::to_owned);
+            if let Some(phase) = phase.as_deref()
+                && !matches!(phase, "commentary" | "final_answer")
+            {
+                return Err(format!("unsupported assistant phase {phase}").into());
+            }
+            Ok(OpenAiStreamEvent::AssistantMessage { phase })
+        }
         Some("response.completed") => Ok(OpenAiStreamEvent::Done),
         Some("response.failed" | "response.incomplete" | "error") => {
             let message = value
@@ -586,11 +608,26 @@ fn responses_input(messages: &[Value]) -> Result<(String, Vec<Value>)> {
                     }
                 }
                 if !content_parts.is_empty() {
-                    input.push(json!({
+                    let mut response_message = json!({
                         "type": "message",
                         "role": role,
                         "content": content_parts,
-                    }));
+                    });
+                    if role == "assistant" {
+                        let phase = message
+                            .get("phase")
+                            .and_then(Value::as_str)
+                            .or_else(|| {
+                                if message.get("tool_calls").is_some() {
+                                    Some("commentary")
+                                } else {
+                                    Some("final_answer")
+                                }
+                            })
+                            .unwrap();
+                        response_message["phase"] = Value::String(phase.to_owned());
+                    }
+                    input.push(response_message);
                 }
                 if role == "assistant"
                     && let Some(calls) = message.get("tool_calls").and_then(Value::as_array)
@@ -826,6 +863,19 @@ mod tests {
     }
 
     #[test]
+    fn openai_compatible_strips_responses_phase_metadata() {
+        let api = ModelApi::new(config()).unwrap();
+        let mut context = ModelContext::user("hello");
+        context.push_value(json!({
+            "role": "assistant",
+            "content": "done",
+            "phase": "final_answer",
+        }));
+        let body = api.request_body(&context, None, true).unwrap();
+        assert!(body["messages"][1].get("phase").is_none());
+    }
+
+    #[test]
     fn multimodal_messages_translate_to_codex_responses() {
         let data_url = format!("data:image/png;base64,{}", "A".repeat(200_000));
         let context = ModelContext {
@@ -1011,6 +1061,7 @@ mod tests {
         context.push_value(json!({
             "role": "assistant",
             "content": "working",
+            "phase": "commentary",
             "tool_calls": [{
                 "id": "call-1",
                 "type": "function",
@@ -1044,12 +1095,28 @@ mod tests {
         assert_eq!(body["reasoning"]["effort"], "high");
         assert_eq!(body["input"][0]["content"][0]["type"], "input_text");
         assert_eq!(body["input"][1]["content"][0]["type"], "output_text");
+        assert_eq!(body["input"][1]["phase"], "commentary");
         assert_eq!(body["input"][2]["type"], "function_call");
         assert_eq!(body["input"][2]["call_id"], "call-1");
         assert_eq!(body["input"][3]["type"], "function_call_output");
         assert_eq!(body["tools"][0]["type"], "function");
         assert_eq!(body["tools"][0]["name"], "Terminal_Interact");
         assert_eq!(body["parallel_tool_calls"], true);
+    }
+
+    #[test]
+    fn codex_reasoning_parameters_merge_when_effort_changes() {
+        let mut configured = codex_config();
+        configured.parameters =
+            toml::from_str(r#"reasoning = { context = "all_turns", vendor_flag = true }"#).unwrap();
+        let api = ModelApi::new(configured).unwrap();
+        let body = api
+            .request_body(&ModelContext::user("hello"), Some("high"), true)
+            .unwrap();
+        assert_eq!(body["reasoning"]["effort"], "high");
+        assert_eq!(body["reasoning"]["summary"], "auto");
+        assert_eq!(body["reasoning"]["context"], "all_turns");
+        assert_eq!(body["reasoning"]["vendor_flag"], true);
     }
 
     #[test]
@@ -1075,6 +1142,15 @@ mod tests {
                     name: Some("Terminal_Create".into()),
                     arguments: Some(r#"{"command":"pwd"}"#.into()),
                 }],
+            }
+        );
+        assert_eq!(
+            openai_stream_event(
+                r#"data: {"type":"response.output_item.done","item":{"type":"message","role":"assistant","phase":"final_answer","content":[]}}"#
+            )
+            .unwrap(),
+            OpenAiStreamEvent::AssistantMessage {
+                phase: Some("final_answer".into()),
             }
         );
         assert_eq!(

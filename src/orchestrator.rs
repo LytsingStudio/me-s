@@ -6099,6 +6099,7 @@ impl MainResponseBuffer {
                 self.provider_context_items.push((provider, item));
                 Ok(Vec::new())
             }
+            OpenAiStreamEvent::AssistantMessage { .. } => Ok(Vec::new()),
             OpenAiStreamEvent::Other => Ok(Vec::new()),
         }
     }
@@ -6213,6 +6214,7 @@ fn chatbot_model_context(
     )?;
 
     let mut assistant = String::new();
+    let mut assistant_finished = false;
     let mut projected_tool_batches = BTreeSet::new();
     for event in &effective {
         match event {
@@ -6236,7 +6238,7 @@ fn chatbot_model_context(
             | Event::CloneCompleted(_)
             | Event::ImageContent(_) => {}
             Event::UserPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", user_prompt_envelope(&prompt.content));
                 if first_user_prompt_id == Some(prompt.id) {
                     context.push(
@@ -6256,18 +6258,19 @@ fn chatbot_model_context(
                 .into());
             }
             Event::ParentAgentPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", parent_agent_prompt_envelope(&prompt.content));
             }
             Event::FollowUpPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", follow_up_prompt_envelope(&prompt.content));
             }
             Event::AssistResponse(response) => {
                 assistant.push_str(&response.content);
+                assistant_finished = response.finished;
             }
             Event::ModelContextItem(item) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 push_provider_context_item(&mut context, item)?;
             }
             Event::ToolCall(call) => {
@@ -6301,7 +6304,9 @@ fn chatbot_model_context(
                     "role": "assistant",
                     "content": content,
                     "tool_calls": tool_calls,
+                    "phase": "commentary",
                 }));
+                assistant_finished = false;
             }
             Event::ToolCallResult(result) => {
                 let Some(Event::ToolCall(call)) = prefix
@@ -6329,7 +6334,7 @@ fn chatbot_model_context(
                         )
                         .into());
                     }
-                    push_assistant(&mut context, &mut assistant);
+                    push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                     context.push(
                         "user",
                         system_prompt_injection_envelope(
@@ -6345,7 +6350,7 @@ fn chatbot_model_context(
             },
         }
     }
-    push_assistant(&mut context, &mut assistant);
+    push_assistant(&mut context, &mut assistant, &mut assistant_finished);
     Ok(context)
 }
 
@@ -6399,6 +6404,7 @@ fn preserve_chatbot_title_exchange_after_context_boundary(
     context.push_value(json!({
         "role": "assistant",
         "content": Value::Null,
+        "phase": "commentary",
         "tool_calls": [{
             "id": call.provider_call_id,
             "type": "function",
@@ -6469,6 +6475,7 @@ fn main_model_context_with_toolboxes_and_environment(
     context.push("system", system_prompt);
 
     let mut assistant = String::new();
+    let mut assistant_finished = false;
     let mut outputs: BTreeMap<EventId, Vec<ModelToolUpdate>> = BTreeMap::new();
     let mut images: BTreeMap<EventId, &crate::event::ImageContentEvent> = BTreeMap::new();
     let mut file_edit_scopes = FileEditScopeProjection::default();
@@ -6488,7 +6495,7 @@ fn main_model_context_with_toolboxes_and_environment(
             | Event::SystemPrompt(_)
             | Event::ContextUsageEstimate(_) => {}
             Event::UserPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", user_prompt_envelope(&prompt.content));
                 if first_user_prompt_id == Some(prompt.id) {
                     context.push(
@@ -6501,23 +6508,24 @@ fn main_model_context_with_toolboxes_and_environment(
                 }
             }
             Event::ManagerPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", manager_prompt_envelope(&prompt.content));
             }
             Event::ParentAgentPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", parent_agent_prompt_envelope(&prompt.content));
             }
             Event::FollowUpPrompt(prompt) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push("user", follow_up_prompt_envelope(&prompt.content));
             }
             Event::AssistResponse(response) => {
                 assistant.push_str(&response.content);
+                assistant_finished = response.finished;
             }
             Event::ApiStateUpdate(_) | Event::UserTurnAborted(_) => {}
             Event::ModelContextItem(item) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 push_provider_context_item(&mut context, item)?;
             }
             Event::ToolCall(call) => {
@@ -6550,8 +6558,10 @@ fn main_model_context_with_toolboxes_and_environment(
                 context.push_value(json!({
                     "role": "assistant",
                     "content": content,
-                    "tool_calls": tool_calls
+                    "tool_calls": tool_calls,
+                    "phase": "commentary",
                 }));
+                assistant_finished = false;
             }
             Event::ToolInfoUpdate(info) => {
                 let update = match &info.content {
@@ -6634,7 +6644,7 @@ fn main_model_context_with_toolboxes_and_environment(
             Event::AgentTitleChanged(_) => {}
             Event::CloneCompleted(_) => {}
             Event::WorkMapPendingReminder(_) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 context.push(
                     "user",
                     system_prompt_injection_envelope(
@@ -6644,7 +6654,7 @@ fn main_model_context_with_toolboxes_and_environment(
                 );
             }
             Event::CompactStateUpdate(update) => {
-                push_assistant(&mut context, &mut assistant);
+                push_assistant(&mut context, &mut assistant, &mut assistant_finished);
                 match update.state {
                     CompactState::Completed => {
                         context.push(
@@ -6694,7 +6704,7 @@ fn main_model_context_with_toolboxes_and_environment(
             | Event::ContextCleared(_) => {}
         }
     }
-    push_assistant(&mut context, &mut assistant);
+    push_assistant(&mut context, &mut assistant, &mut assistant_finished);
     Ok(context)
 }
 
@@ -6746,6 +6756,7 @@ fn preserve_title_exchange_after_context_boundary(
     context.push_value(json!({
         "role": "assistant",
         "content": Value::Null,
+        "phase": "commentary",
         "tool_calls": [{
             "id": call.provider_call_id,
             "type": "function",
@@ -7293,10 +7304,19 @@ fn image_context_message(image: &crate::event::ImageContentEvent) -> Result<Valu
     }))
 }
 
-fn push_assistant(context: &mut ModelContext, assistant: &mut String) {
+fn push_assistant(
+    context: &mut ModelContext,
+    assistant: &mut String,
+    assistant_finished: &mut bool,
+) {
     if !assistant.is_empty() {
-        context.push("assistant", std::mem::take(assistant));
+        context.push_value(json!({
+            "role": "assistant",
+            "content": std::mem::take(assistant),
+            "phase": if *assistant_finished {"final_answer"} else {"commentary"},
+        }));
     }
+    *assistant_finished = false;
 }
 
 #[cfg(test)]
@@ -8418,6 +8438,7 @@ mod tests {
             )
         );
         assert_eq!(context.messages[3]["content"], "a\nb");
+        assert_eq!(context.messages[3]["phase"], "final_answer");
         assert_eq!(
             context.messages[4]["content"],
             "<user_prompt>\ntwo\n</user_prompt>"
@@ -13151,6 +13172,7 @@ for line in sys.stdin:
             context.messages[3]["tool_calls"][0]["function"]["name"],
             terminal::API_LIST
         );
+        assert_eq!(context.messages[3]["phase"], "commentary");
         assert_eq!(context.messages[4]["role"], "tool");
         let tool_result: Value =
             serde_json::from_str(context.messages[4]["content"].as_str().unwrap()).unwrap();
@@ -13822,6 +13844,7 @@ for line in sys.stdin:
             .position(|message| message["role"] == "assistant")
             .unwrap();
         assert!(provider < assistant);
+        assert_eq!(context.messages[assistant]["phase"], "final_answer");
         assert_eq!(
             context.messages[provider]["item"]["encrypted_content"],
             "opaque"
