@@ -1062,7 +1062,8 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .file-manager-dialog-body { min-height: 0; flex: 1; overflow: auto; padding: 18px; color: var(--muted); line-height: 1.5; }
 .file-manager-dialog-body label { display: grid; gap: 7px; margin: 0 0 14px; color: var(--text); font-size: 12px; font-weight: 700; }
 .file-manager-dialog-body input[type="text"], .file-manager-dialog-body input:not([type]), .file-manager-dialog-body select { width: 100%; height: 38px; padding: 0 10px; border: 1px solid var(--border-bright); border-radius: 8px; outline: 0; background: var(--panel-2); color: var(--text); }
-.file-manager-dialog-body input:focus, .file-manager-dialog-body select:focus { border-color: var(--accent); }
+.file-manager-dialog-body textarea { width: 100%; min-height: 220px; box-sizing: border-box; padding: 10px; border: 1px solid var(--border-bright); border-radius: 8px; outline: 0; resize: vertical; background: var(--panel-2); color: var(--text); font: inherit; line-height: 1.5; }
+.file-manager-dialog-body input:focus, .file-manager-dialog-body select:focus, .file-manager-dialog-body textarea:focus { border-color: var(--accent); }
 .file-manager-dialog footer { display: flex; justify-content: flex-end; gap: 8px; padding: 12px 17px; border-top: 1px solid var(--border); }
 .file-manager-dialog footer button { min-width: 84px; min-height: 36px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); cursor: pointer; }
 .file-manager-dialog footer .primary-button { border-color: var(--primary-border); background: var(--primary-bg); color: var(--on-accent); }

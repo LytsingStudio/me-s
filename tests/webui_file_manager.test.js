@@ -82,7 +82,7 @@ describe("per-session host file manager", () => {
     const directoryClick = sharedApp.slice(directoryClickStart, directoryClickEnd);
     expect(directoryClick).toContain("updateDirectorySelection(directory, list, allEntries);");
     expect(directoryClick).not.toContain("renderDirectoryRows();");
-    for (const action of ["select-all", "mkdir", "rename", "copy-path", "copy", "cut", "paste", "move", "upload", "download", "delete"]) {
+    for (const action of ["select-all", "mkdir", "create-file", "rename", "copy-path", "copy", "cut", "paste", "move", "upload", "download", "delete"]) {
       expect(controller).toContain(`actionButton("${action}",`);
     }
     expect(sharedStyle).toContain(".file-manager-icon-button svg");
@@ -124,6 +124,16 @@ describe("per-session host file manager", () => {
     expect(controller.includes("anchor.href = this.downloadUrl")).toBe(false);
     expect(hostFiles).toContain("prepare_archive(worker_record, sources, temp_path, shutdown)");
     expect(hostFiles).toContain("archive.follow_symlinks(false)");
+  });
+
+  test("creates UTF-8 text files through the existing upload session and exposes conflict choices", () => {
+    expect(controller).toContain('actionButton("create-file", "新建文件")');
+    expect(controller).toContain("async createTextFile()");
+    expect(controller).toContain("new TextEncoder()");
+    expect(controller).toContain('this.uploadFile(view, file, `创建 ${name}`');
+    expect(controller).toContain('title: "处理同名文件"');
+    expect(controller).toContain('value=\"replace\">覆盖');
+    expect(controller).toContain('value=\"keep_both\">自动重命名');
   });
 
   test("uses server-normalized paths throughout file APIs and clipboard output", () => {

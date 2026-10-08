@@ -86,6 +86,7 @@
           <div class="file-manager-toolbar file-manager-actions" role="toolbar" aria-label="文件操作">
             ${actionButton("select-all", "全选")}
             ${actionButton("mkdir", "新建文件夹")}
+            ${actionButton("create-file", "新建文件")}
             ${actionButton("rename", "重命名")}
             ${actionButton("copy-path", "复制绝对路径")}
             ${actionButton("copy", "复制")}
@@ -344,6 +345,7 @@
       this.setDisabled("refresh", this.state.loading);
       this.setDisabled("select-all", !this.visibleEntries().length || this.state.loading);
       this.setDisabled("mkdir", !hasDirectory || this.state.loading);
+      this.setDisabled("create-file", !hasDirectory || this.state.loading);
       this.setDisabled("rename", selected !== 1 || this.state.loading);
       this.setDisabled("copy-path", selected === 0 || this.state.loading);
       this.setDisabled("copy", selected === 0 || this.state.loading);
@@ -501,6 +503,7 @@
         return this.renderSelection();
       }
       if (action === "mkdir") return this.mkdir();
+      if (action === "create-file") return this.createTextFile();
       if (action === "rename") return this.rename();
       if (action === "copy-path") return this.copySelectedPaths();
       if (action === "copy" || action === "cut") {
@@ -525,6 +528,27 @@
       } catch (error) {
         this.notify(error.message, "error");
       }
+    }
+
+    async createTextFile() {
+      const view = this.state;
+      const values = await this.openDialog({
+        title: "创建文件",
+        body: '<label>文件名<input name="name" required autocomplete="off" placeholder="例如：notes.txt"></label><label>文本内容<textarea name="content" rows="12" spellcheck="false" placeholder="输入文件内容"></textarea></label>',
+        confirm: "创建",
+      });
+      if (!values || !view?.path || view.roots) return;
+      const name = String(values.name || "").trim();
+      if (!name) { this.notify("请输入文件名", "error"); return; }
+      const file = new File([new TextEncoder().encode(String(values.content || ""))], name, { type: "text/plain;charset=utf-8" });
+      try {
+        await this.uploadFile(view, file, `创建 ${name}`, {
+          title: "处理同名文件",
+          body: `<p>当前目录已存在“${escapeHtml(name)}”。请选择处理方式。</p><label>处理方式<select name="policy"><option value="replace">覆盖</option><option value="keep_both">自动重命名</option></select></label>`,
+          confirm: "继续",
+        });
+        await this.load(view.path, false, view);
+      } catch (error) { this.notify(error.message, "error"); }
     }
 
     async mkdir() {
@@ -651,7 +675,7 @@
       await this.load(view.path, false, view);
     }
 
-    async uploadFile(view, file, label) {
+    async uploadFile(view, file, label, conflictOptions = null) {
       let created = await this.call("/api/files/uploads/create", {
         destination: view.path,
         name: file.name,
@@ -660,11 +684,12 @@
       }, view.identity);
       if (created.requires_confirmation) {
         if (this.state !== view) return;
-        const values = await this.openDialog({
+        const values = await this.openDialog(conflictOptions || {
           title: "处理上传冲突",
           body: `<p>目标目录已存在“${escapeHtml(file.name)}”。</p><label>处理方式<select name="policy"><option value="skip">跳过</option><option value="keep_both">保留两者</option><option value="replace">替换</option></select></label>`,
           confirm: "继续",
         });
+        if (!values) return;
         if (!values) return;
         created = await this.call("/api/files/uploads/create", {
           destination: view.path,
@@ -803,6 +828,7 @@
       go: '<path d="m9 18 6-6-6-6"/>',
       "select-all": '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="m8 12 2.5 2.5L16 9"/>',
       mkdir: '<path d="M3 6.5h7l2 2h9v10H3zM15 12v5M12.5 14.5h5"/>',
+      "create-file": '<path d="M6 3h8l4 4v14H6zM14 3v5h5M9 14h6M12 11v6"/>',
       rename: '<path d="m4 20 4.2-1 10-10a2.1 2.1 0 0 0-3-3l-10 10L4 20ZM13.8 7.2l3 3"/>',
       copy: '<rect x="8" y="8" width="11" height="11" rx="2"/><path d="M16 8V5a2 2 0 0 0-2-2H5a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h3"/>',
       "copy-path": '<path d="M10 13a4 4 0 0 0 5.7 0l2-2a4 4 0 0 0-5.7-5.7l-1 1M14 11a4 4 0 0 0-5.7 0l-2 2A4 4 0 0 0 12 18.7l1-1"/>',
