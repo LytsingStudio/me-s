@@ -1490,6 +1490,20 @@ describe("ME Gateway WebUI semantic compatibility", () => {
     expect(styles).toContain("overscroll-behavior-y: contain;");
   });
 
+  test("requires confirmation before cloning a turn", () => {
+    const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
+    const start = source.indexOf('  cloneButton.addEventListener("click", () => {');
+    const end = source.indexOf('  regenerateButton.addEventListener("click", () => {', start);
+    const cloneHandler = source.slice(start, end);
+    const confirmation = cloneHandler.indexOf("openConfirm(");
+    const command = cloneHandler.indexOf('command: "clone_agent"');
+    expect(confirmation).toBeGreaterThanOrEqual(0);
+    expect(command).toBeGreaterThan(confirmation);
+    expect(cloneHandler).toContain("克隆这条回复？");
+    expect(cloneHandler).toContain("将创建一个新的会话，复制截至这条回复的对话内容。当前会话不会被修改。");
+    expect(cloneHandler).toContain('"克隆"');
+  });
+
   test("balances short confirmation dialogs without resizing content modals", () => {
     const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
     const styles = readFileSync(join(import.meta.dir, "../src/webui/style.css"), "utf8");

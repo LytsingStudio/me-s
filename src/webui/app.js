@@ -3157,19 +3157,26 @@ function bindTurnToolbar(node, message) {
     regenerateButton.title = "只读会话";
     return;
   }
-  cloneButton.addEventListener("click", async () => {
-    const button = cloneButton;
-    button.disabled = true;
-    try {
-      const payload = await sendCommand({
-        command: "clone_agent",
-        agent_id: agentId,
-        final_answer_event_id: message.finalAnswerEventId,
-      });
-      const id = payload?.receipt?.agent_id;
-      if (id) state.pendingAgentSelection = id;
-    } catch (error) { toast(error.message, true); }
-    finally { button.disabled = false; }
+  cloneButton.addEventListener("click", () => {
+    openConfirm(
+      "克隆这条回复？",
+      "将创建一个新的会话，复制截至这条回复的对话内容。当前会话不会被修改。",
+      "克隆",
+      async () => {
+        const button = cloneButton;
+        button.disabled = true;
+        try {
+          const payload = await sendCommand({
+            command: "clone_agent",
+            agent_id: agentId,
+            final_answer_event_id: message.finalAnswerEventId,
+          });
+          const id = payload?.receipt?.agent_id;
+          if (id) state.pendingAgentSelection = id;
+        } catch (error) { toast(error.message, true); }
+        finally { button.disabled = false; }
+      },
+    );
   });
   regenerateButton.addEventListener("click", () => {
     openConfirm(
