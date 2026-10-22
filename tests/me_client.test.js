@@ -241,7 +241,12 @@ describe("ME Client native adapter", () => {
     expect(runtime).not.toContain('markDragRegion(document.querySelector?.(".heading-actions"))');
     expect(runtime).not.toContain('markDragRegion(document.querySelector?.("#create-workspace"))');
     expect(runtime).not.toContain('markDragRegion(document.querySelector?.("#open-workspace"))');
-    expect(runtime).toContain('"#login-screen, .view-tabs"');
+    expect(runtime).toContain('markDragRegion(document.querySelector?.("#login-screen"))');
+    expect(runtime).toContain('chrome.className = "client-tabs-chrome"');
+    expect(runtime).toContain('tabs.before(chrome)');
+    expect(runtime).toContain('chrome.append(tabs)');
+    expect(runtime).not.toContain('"#login-screen, .view-tabs"');
+    expect(runtime).not.toContain('markDragRegion(tabs)');
     expect(runtime).toContain('sidebarDragRegion.className = "client-sidebar-drag-region"');
     expect(runtime).toContain('if (/iPhone|iPad|iPod/i.test(identity)) return "ios"');
     expect(runtime).toContain('if (/Mac/i.test(identity)) return "macos"');
@@ -292,6 +297,11 @@ describe("ME Client native adapter", () => {
     expect(css).toContain("flex: 0 0 var(--client-chrome-height)");
     expect(css).toContain("margin-left: 88px");
     expect(css).toContain(".me-client-platform-windows .view-tabs");
+    expect(css).toContain("--view-tabs-end-space: 150px");
+    expect(css).not.toContain("padding-right: 150px");
+    expect(css).toMatch(/\.me-client-platform-linux \.client-window-controls\s*\{[^}]*background: var\(--bg\)/);
+    expect(css).toContain(".client-tabs-chrome {");
+    expect(css).toMatch(/@media \(orientation: portrait\)\s*\{[^}]*\.client-window-controls\s*\{ height: 52px/);
     expect(css).toContain("pointer-events: none;");
     expect(css).toContain("inset: 0;");
     expect(css).not.toContain("backdrop-filter");

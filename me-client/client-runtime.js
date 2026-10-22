@@ -319,8 +319,13 @@
         markDragRegion(workspaceTitle);
       }
     }
-    for (const element of document.querySelectorAll?.("#login-screen, .view-tabs") || []) {
-      markDragRegion(element);
+    markDragRegion(document.querySelector?.("#login-screen"));
+    const tabs = document.querySelector?.(".view-tabs");
+    if (tabs) {
+      const chrome = markDragRegion(document.createElement("div"));
+      chrome.className = "client-tabs-chrome";
+      tabs.before(chrome);
+      chrome.append(tabs);
     }
     globalThis.addEventListener?.("resize", scheduleWindowStateRefresh);
     void refreshWindowState();

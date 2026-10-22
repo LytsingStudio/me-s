@@ -255,8 +255,10 @@ button { color: inherit; }
 .primary-button:disabled, .ghost-button:disabled { opacity: .4; cursor: default; }
 
 
-.view-tabs { display: flex; align-items: flex-end; gap: 4px; min-height: 46px; padding: 0 25px; border-bottom: 1px solid var(--border); overflow-x: auto; }
-.view-tabs button { display: inline-flex; height: 38px; align-items: center; justify-content: center; padding: 0 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.view-tabs { display: flex; min-width: 0; align-items: flex-end; gap: 4px; min-height: 46px; padding: 0 25px; border-bottom: 1px solid var(--border); overflow-x: auto; overflow-y: hidden; overscroll-behavior-x: contain; scrollbar-width: none; }
+.view-tabs::-webkit-scrollbar { display: none; }
+.view-tabs::after { content: ""; flex: 0 0 var(--view-tabs-end-space, 0px); height: 1px; }
+.view-tabs button { display: inline-flex; flex: 0 0 auto; height: 38px; align-items: center; justify-content: center; padding: 0 11px; border: 0; border-bottom: 2px solid transparent; background: transparent; color: var(--muted); cursor: pointer; white-space: nowrap; }
 .view-tabs button:hover { color: var(--text); }
 .view-tabs button.active { color: var(--text); border-bottom-color: var(--violet); }
 #terminal-tabs { display: contents; }
@@ -637,7 +639,7 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
   .sidebar-heading { justify-content: space-between; padding: 10px 14px 8px 18px; }
   .sidebar-heading button { width: 38px; height: 38px; }
   .agent-list { display: grid; padding: 0 9px 10px; }
-  .view-tabs::-webkit-scrollbar, .statusbar::-webkit-scrollbar { display: none; }
+  .statusbar::-webkit-scrollbar { display: none; }
   .agent-item { justify-content: flex-start; width: 100%; min-height: 40px; max-width: none; padding: 7px 10px; }
   .agent-label { display: block; max-width: none; font-size: 14px; }
   .agent-delete { width: 38px; height: 38px; }

@@ -5235,9 +5235,19 @@ function renderMarkdown(source) {
   return globalThis.MeMarkdown.render(source);
 }
 
+function scrollViewTabs(event) {
+  const tabs = event.currentTarget;
+  if (event.ctrlKey || tabs.scrollWidth <= tabs.clientWidth) return;
+  const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
+  const unit = event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? tabs.clientWidth : 1;
+  tabs.scrollLeft += delta * unit;
+  event.preventDefault();
+}
+
 elements.tabs.querySelectorAll("button[data-view]").forEach((button) => button.addEventListener("click", () => {
   showView({ kind: button.dataset.view, sessionId: null });
 }));
+elements.tabs.addEventListener("wheel", scrollViewTabs, { passive: false });
 bindSidebarScrollbar(elements.sidebarScroll);
 elements.objective.addEventListener("click", toggleObjectiveDisclosure);
 elements.objective.addEventListener("keydown", toggleObjectiveDisclosure);

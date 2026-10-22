@@ -148,6 +148,15 @@ html.me-client-window-fullscreen body::after {
   background: var(--bg);
 }
 
+.client-tabs-chrome {
+  min-width: 0;
+  padding-top: 8px;
+}
+
+.me-client .client-tabs-chrome .view-tabs {
+  min-height: 38px;
+}
+
 .me-client .client-titlebar {
   position: absolute;
   z-index: 1000;
@@ -197,6 +206,8 @@ html.me-client-window-fullscreen body::after {
   left: 0;
   gap: 8px;
   padding-left: 13px;
+  padding-right: 13px;
+  background: var(--bg);
 }
 
 .me-client-platform-macos .client-sidebar-drag-region {
@@ -238,11 +249,20 @@ html.me-client-window-fullscreen body::after {
 .me-client-platform-windows .client-window-controls,
 .me-client-platform-linux .client-window-controls {
   right: 0;
+  height: 46px;
+  align-items: flex-start;
+  padding-left: 12px;
+  background: var(--bg);
 }
 
 .me-client-platform-windows .view-tabs,
 .me-client-platform-linux .view-tabs {
-  padding-right: 150px;
+  --view-tabs-end-space: 150px;
+}
+
+@media (orientation: portrait) {
+  .me-client-platform-windows .client-window-controls,
+  .me-client-platform-linux .client-window-controls { height: 52px; }
 }
 
 .me-client-platform-windows .client-window-control,
