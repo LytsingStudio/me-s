@@ -603,13 +603,18 @@
     return chunks.filter(Boolean).join("\n");
   }
 
+  function terminalWaitFields(value) {
+    const reasons = { shell_ready: "终端已就绪", command_completed: "命令已结束", output_idle: "输出暂时静止", max_wait: "已达到最长等待", session_ended: "终端已结束" };
+    return [["等待结果", reasons[value.wait_reason]], ["命令结果", typeof value.command_succeeded === "boolean" ? (value.command_succeeded ? "成功" : "失败") : ""], ["命令退出码", value.command_exit_code]];
+  }
+
   define("Terminal.Create", {
     title: "创建终端", icon: "terminal",
     summary: (input) => `${input.cwd || "."} · ${input.width ?? 120}×${input.height ?? 40}`,
     input: (input) => [fieldBlock("终端参数", [["工作目录", input.cwd || "."], ["尺寸", `${input.width ?? 120}×${input.height ?? 40}`], ["等待", `${input.wait_ms ?? 1000} ms`], ["最长等待", `${input.max_wait_ms ?? 10000} ms`], ["输出上限", formatNumber(input.max_output_chars ?? 20000)]])],
     output(input, output) {
       const value = objectValue(resultValue(output));
-      const blocks = [fieldBlock("终端会话", [["Session", value.session_id], ["状态", labelState(value.state)], ["Shell", value.shell], ["工作目录", value.cwd], ["尺寸", value.width && value.height ? `${value.width}×${value.height}` : ""]])];
+      const blocks = [fieldBlock("终端会话", [["Session", value.session_id], ["状态", labelState(value.state)], ["Shell", value.shell], ["工作目录", value.cwd], ["尺寸", value.width && value.height ? `${value.width}×${value.height}` : ""], ...terminalWaitFields(value)])];
       const terminal = terminalUpdatesText(output);
       if (terminal) blocks.push(terminalBlock("初始终端画面", terminal));
       return blocks;
@@ -634,7 +639,7 @@
       const blocks = [];
       const terminal = terminalUpdatesText(output);
       if (terminal) blocks.push(terminalBlock("本次终端更新", terminal));
-      blocks.push(fieldBlock("终端状态", [["Session", value.session_id || input.session_id], ["Sequence", value.sequence], ["状态", labelState(value.state)], ["退出码", value.exit_code], ["截断", value.truncated ? "是" : "否"]]));
+      blocks.push(fieldBlock("终端状态", [["Session", value.session_id || input.session_id], ["Sequence", value.sequence], ["状态", labelState(value.state)], ["终端退出码", value.exit_code], ...terminalWaitFields(value), ["截断", value.truncated ? "是" : "否"]]));
       return blocks;
     },
   });

@@ -77,7 +77,7 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    let requests = [
+    let mut requests = vec![
         json!({"id": 1, "cmd": "getTools"}),
         json!({"id": 2, "cmd": "getBrief"}),
         json!({"id": 3, "cmd": "getInputSchema", "tool": "Create"}),
@@ -87,6 +87,13 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         json!({"id": 7, "cmd": "getRoute", "tool": "Create"}),
         json!({"id": 8, "cmd": "getExamples", "tool": "Create"}),
     ];
+    if cfg!(unix) {
+        requests.extend([
+            json!({"id": 9, "cmd": "execute", "tool": "Create", "input": {"wait_ms": 1500, "max_wait_ms": 2000}}),
+            json!({"id": 10, "cmd": "execute", "tool": "Interact", "input": {"session_id": "pty-9", "input": [{"type": "text", "text": "(exit 7)"}, {"type": "key", "key": "enter"}], "wait_ms": 1500, "max_wait_ms": 2000}}),
+            json!({"id": 11, "cmd": "execute", "tool": "Kill", "input": {"session_id": "pty-9"}}),
+        ]);
+    }
     let mut stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (sender, receiver) = mpsc::channel();
@@ -102,11 +109,20 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         stdin.write_all(request.to_string().as_bytes()).unwrap();
         stdin.write_all(b"\n").unwrap();
         stdin.flush().unwrap();
-        let line = receiver
-            .recv_timeout(Duration::from_secs(3))
-            .expect("Terminal.py must respond while its stdin remains open")
-            .unwrap();
-        frames.push(serde_json::from_str::<Value>(&line).unwrap());
+        loop {
+            let line = receiver
+                .recv_timeout(Duration::from_secs(3))
+                .expect("Terminal.py must respond while its stdin remains open")
+                .unwrap();
+            let frame: Value = serde_json::from_str(&line).unwrap();
+            if frame["type"] == "update" {
+                continue;
+            }
+            assert_eq!(frame["type"], "result", "unexpected response: {frame}");
+            assert_eq!(frame["id"], request["id"], "unexpected response: {frame}");
+            frames.push(frame);
+            break;
+        }
     }
     drop(stdin);
     let status = child.wait().unwrap();
@@ -119,7 +135,7 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         .read_to_string(&mut stderr)
         .unwrap();
     assert!(status.success(), "Terminal.py failed: {}", stderr);
-    assert_eq!(frames.len(), 8);
+    assert_eq!(frames.len(), if cfg!(unix) { 11 } else { 8 });
     assert!(
         frames
             .iter()
@@ -139,5 +155,15 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
     assert!(frames[5]["output"].is_string());
     assert!(frames[6]["output"].is_string());
     assert!(frames[7]["output"].is_string());
+    for field in ["wait_reason", "command_exit_code", "command_succeeded"] {
+        assert!(frames[3]["output"]["properties"][field].is_object());
+    }
+    if cfg!(unix) {
+        assert_eq!(frames[8]["output"]["wait_reason"], "shell_ready");
+        assert_eq!(frames[9]["output"]["wait_reason"], "command_completed");
+        assert_eq!(frames[9]["output"]["command_exit_code"], 7);
+        assert_eq!(frames[9]["output"]["command_succeeded"], false);
+        assert_eq!(frames[9]["output"]["state"], "running");
+    }
     fs::remove_dir_all(workspace).unwrap();
 }

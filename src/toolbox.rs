@@ -1914,14 +1914,7 @@ fn execute_terminal_request(
                 status.state = end.state.to_string();
                 status.exit_code = end.exit_code;
             }
-            Ok(json!({
-                "session_id": outcome.created.session_id,
-                "state": outcome.update.state,
-                "shell": outcome.created.shell,
-                "cwd": outcome.created.cwd,
-                "width": outcome.created.width,
-                "height": outcome.created.height,
-            }))
+            Ok(outcome.metadata())
         }
         TerminalRequest::Interact(request) => {
             let outcome = state.manager.interact(&request).map_err(|error| {
@@ -1940,7 +1933,7 @@ fn execute_terminal_request(
                 status.state = end.state.to_string();
                 status.exit_code = end.exit_code;
             }
-            Ok(outcome.update.metadata())
+            Ok(outcome.metadata())
         }
         TerminalRequest::Status(request) => {
             if state.manager.contains(&request.session_id) {
@@ -2088,20 +2081,23 @@ fn terminal_output_schema(tool: &str) -> std::result::Result<Value, String> {
     match tool {
         "Create" => Ok(json!({
             "type": "object",
-            "required": ["session_id", "state", "shell", "cwd", "width", "height"],
+            "required": ["session_id", "state", "shell", "cwd", "width", "height", "wait_reason", "command_exit_code", "command_succeeded"],
             "properties": {
                 "session_id": {"type": "string"},
                 "state": {"type": "string"},
                 "shell": {"type": "string"},
                 "cwd": {"type": "string"},
                 "width": {"type": "integer"},
-                "height": {"type": "integer"}
+                "height": {"type": "integer"},
+                "wait_reason": {"type": "string", "enum": ["shell_ready", "command_completed", "output_idle", "max_wait", "session_ended"]},
+                "command_exit_code": {"type": ["integer", "null"]},
+                "command_succeeded": {"type": ["boolean", "null"]}
             },
             "additionalProperties": false
         })),
         "Interact" => Ok(json!({
             "type": "object",
-            "required": ["session_id", "sequence", "size", "viewport", "changed_rows", "state", "exit_code", "truncated"],
+            "required": ["session_id", "sequence", "size", "viewport", "changed_rows", "state", "exit_code", "truncated", "wait_reason", "command_exit_code", "command_succeeded"],
             "properties": {
                 "session_id": {"type": "string"},
                 "sequence": {"type": "integer", "minimum": 0},
@@ -2110,7 +2106,10 @@ fn terminal_output_schema(tool: &str) -> std::result::Result<Value, String> {
                 "changed_rows": {"type": "integer", "minimum": 0},
                 "state": {"type": "string", "enum": ["running", "exited", "killed", "lost"]},
                 "exit_code": {"type": ["integer", "null"]},
-                "truncated": {"type": "boolean"}
+                "truncated": {"type": "boolean"},
+                "wait_reason": {"type": "string", "enum": ["shell_ready", "command_completed", "output_idle", "max_wait", "session_ended"]},
+                "command_exit_code": {"type": ["integer", "null"]},
+                "command_succeeded": {"type": ["boolean", "null"]}
             },
             "additionalProperties": false
         })),
@@ -2147,10 +2146,10 @@ fn terminal_route(tool: &str) -> std::result::Result<&'static str, String> {
 fn terminal_instructions(tool: &str) -> std::result::Result<&'static str, String> {
     match tool {
         "Create" => Ok(
-            "Choose a fixed PTY size and workspace-relative cwd. The call waits for stable initial output and returns the first structured terminal patch as an update.",
+            "Choose a fixed PTY size and workspace-relative cwd. Returns the first structured terminal patch when initial shell readiness is confirmed, output becomes idle, or the maximum wait is reached. Check wait_reason before sending input.",
         ),
         "Interact" => Ok(
-            "Input actions execute once in exact order. Text actions write UTF-8 text; key actions represent Enter, Escape, control chords, navigation, and other semantic keys. An empty input list polls. Interpret returned terminal patches against the previous call baseline.",
+            "Input actions execute once in exact order. Text actions write UTF-8 text; key actions represent Enter, Escape, control chords, navigation, and other semantic keys. An empty input list polls. The call can return before wait_ms when the submitted command batch is confirmed finished; otherwise it uses the quiet interval and maximum wait. Check wait_reason, command_succeeded and command_exit_code; command completion is distinct from shell session exit. Interpret returned terminal patches against the previous call baseline.",
         ),
         "Status" => Ok("Status does not consume or reset the terminal patch baseline."),
         "List" => Ok(

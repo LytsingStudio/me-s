@@ -108,6 +108,25 @@ describe("shared WebUI tool presenters", () => {
     expect(html).toContain("&quot;runs&quot;");
   });
 
+  test("distinguishes command completion, success and whole-terminal exit", () => {
+    for (const [reason, label] of Object.entries({ shell_ready: "终端已就绪", command_completed: "命令已结束", output_idle: "输出暂时静止", max_wait: "已达到最长等待", session_ended: "终端已结束" })) {
+      const html = presenters.renderDetails(presenters.describe("Terminal.Interact", {}, succeeded({
+        state: "running", wait_reason: reason, exit_code: null,
+        command_exit_code: reason === "command_completed" ? 7 : null,
+        command_succeeded: reason === "command_completed" ? false : null,
+      })));
+      const primary = html.slice(0, html.indexOf('<details class="tool-raw"'));
+      expect(primary).toContain(label);
+      if (reason === "command_completed") {
+        expect(primary).toContain("失败");
+        expect(primary).toContain("命令退出码");
+        expect(primary).toContain("7");
+      } else expect(primary).not.toContain("命令结果");
+    }
+    const created = presenters.renderDetails(presenters.describe("Terminal.Create", {}, succeeded({ wait_reason: "shell_ready" })));
+    expect(created).toContain("终端已就绪");
+  });
+
   test("renders Desktop.Play operations, capture geometry, failure, and cleanup", () => {
     const input = { operations: [
       { kind: "key_down", key: "shift" },

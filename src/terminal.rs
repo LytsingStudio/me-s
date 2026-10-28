@@ -24,6 +24,10 @@ use crate::{
     event::{EventId, TerminalSessionState},
 };
 
+#[path = "terminal_completion.rs"]
+mod completion;
+use completion::{Completion, CompletionDecoder, WaitOutcome, WaitReason};
+
 pub const CREATE: &str = "Terminal.Create";
 pub const INTERACT: &str = "Terminal.Interact";
 pub const STATUS: &str = "Terminal.Status";
@@ -35,7 +39,7 @@ pub const API_INTERACT: &str = "Terminal_Interact";
 pub const API_STATUS: &str = "Terminal_Status";
 pub const API_LIST: &str = "Terminal_List";
 pub const API_KILL: &str = "Terminal_Kill";
-pub const TOOL_VERSION: &str = "9";
+pub const TOOL_VERSION: &str = "10";
 
 const DEFAULT_WIDTH: u16 = 120;
 const DEFAULT_HEIGHT: u16 = 40;
@@ -76,7 +80,7 @@ Current PTY shell backend: `{shell}`. {shell_rule}
 ME-S's bundled Python 3.12 is available as `python` in every Terminal session. Do not probe for or install Python before using it.
 
 Available actions:
-- Terminal.Create(width=120, height=40, cwd=".", wait_ms=1000, max_wait_ms=10000, max_output_chars=20000): create a persistent PTY shell, wait for its initial output to become idle, and return a session_id plus its initial structured terminal patch.
+- Terminal.Create(width=120, height=40, cwd=".", wait_ms=1000, max_wait_ms=10000, max_output_chars=20000): create a persistent PTY shell and return a session_id plus its initial structured terminal patch.
 - Terminal.Interact(session_id, input=[], wait_ms=1000, max_wait_ms=10000, max_output_chars=20000): apply an ordered list of semantic text/key actions, or poll with an empty list.
 - Terminal.Status(session_id): inspect a session known to the current Terminal toolbox process.
 - Terminal.List(): list all sessions recorded by the current Terminal toolbox process.
@@ -85,17 +89,19 @@ Available actions:
 Important behavior:
 - A session preserves shell state, including cwd, environment variables, jobs, and interactive program state, until it exits or is killed.
 - Use the same session_id for follow-up interaction. Create a new session only when isolation is useful or the previous one ended.
-- Create waits for the initial shell output with the same idle/maximum wait rules as Interact. That initial output is returned as tool output, so inspect it before the next action.
-- Every operation that reads a PTY session uses the same output state and idle/maximum wait rules. PTY stdout and stderr are one terminal stream.
-- `wait_ms` is the required quiet interval after the latest received PTY output; any newer output restarts it. `max_wait_ms` is the hard upper bound for that tool call.
+- Create waits for initial shell readiness or initial output to become idle, subject to the maximum wait. That initial output is returned as tool output, so inspect it before the next action.
+- PTY stdout and stderr are one terminal stream. Create and Interact return `wait_reason`: `shell_ready` (initial shell ready), `command_completed` (submitted command batch confirmed finished), `output_idle` (quiet interval reached), `max_wait` (time limit reached), or `session_ended` (PTY session ended).
+- `wait_ms` is the quiet interval after the latest received PTY output; any newer output restarts it. When command completion can be confirmed, the call may return earlier. Otherwise the quiet-interval behavior remains. `max_wait_ms` is the hard upper bound for that tool call.
 - `wait_ms` and `max_wait_ms` are each limited to 300000 milliseconds, and `wait_ms` must not exceed `max_wait_ms`.
 - For a non-empty `input`, the quiet interval never starts before all input bytes have been successfully written. Old unread output cannot make newly submitted input return immediately. For an empty polling input, already-pending output that has been quiet long enough may return immediately.
-- An idle return only says the PTY stopped producing output for `wait_ms`; it does not prove a foreground command finished. Confirm a shell prompt or the interactive program's known state. If output is inconclusive, poll with `input:[]`; do not submit a second shell command into a possibly running foreground process.
+- `command_completed` means the submitted command batch ended, not that it succeeded. Check `command_succeeded` and, when available, `command_exit_code`. For a batch, these fields describe the last shell command, not every earlier command. These command fields are null for other wait reasons. PowerShell may report success without a numeric command exit code. Session `state`/`pty_state` and `exit_code` describe the whole shell, not one command; a completed command normally leaves the session running.
+- Completion detection is conservative. Multi-line input, editing/control keys, interactive programs, background jobs, nested shells, changed shell configuration, or unavailable completion information may use the normal wait instead. A quiet return alone does not prove completion; inspect output and the program's known state. If inconclusive, poll with `input:[]` rather than submitting another shell command into a possibly running foreground program.
+- Completion does not promise that a persistent terminal will never change again: background activity or later input may still produce output.
 - The PTY size is fixed for the whole session. Terminal resize is intentionally unavailable.
 - Terminal rows use permanent absolute numbers that increase as normal output scrolls, so the current viewport may begin above row 0.
 - Every tool result is one JSON object. Terminal reads appear in its `terminal_updates` array as structured line-level `terminal_patch` version 2 objects; the tool call outcome appears separately in `result`. Terminal patches are objects, never JSON encoded again inside a string field, and never cell matrices.
 - `viewport.first_terminal_row` and `viewport.last_terminal_row` identify the current visible absolute terminal row range. `rows` contains only rows whose final rendered cells differ from the previous baseline. Every included object completely replaces its `terminal_row`; `text:""` explicitly clears that terminal row.
-- Changes are compared only after the PTY becomes idle or reaches the maximum wait. Intermediate redraws are never reported separately, and a row that returns to its baseline is omitted.
+- Changes are compared only when the call returns. Intermediate redraws are never reported separately, and a row that returns to its baseline is omitted.
 - `terminal_row` is patch metadata, not terminal text, a source-file line number, a menu choice, a command argument, or any other application value. Only each row object's `text` is visible terminal content. Never reuse a `terminal_row` number as application input or infer application meaning from its numeric value.
 - A row's `text` is the complete visible text with literal spaces preserved. `wrapped:true` marks terminal autowrap. Trailing default blanks are omitted; all remaining columns before the fixed terminal width are default blank cells. A row absent from `rows` is unchanged, not blank; `rows:[]` is a valid cursor-, viewport-, or state-only update.
 - Style 0 is the implicit default and is omitted from `styles`. Every object in `styles` defines one non-default style ID used by this patch. Missing foreground/background means terminal default; missing attributes means none. Colors are `indexed(N)` or `#rrggbb`; attributes are `bold`, `dim`, `italic`, `underline`, and `inverse`.
@@ -166,6 +172,8 @@ Example 2, the returned patch after a simple `echo hello`:
 }}
 ```
 Sequence 2 follows sequence 1 for `pty-10`. Rows 0 through 2 are renderer coordinates, not content or command arguments. Each object completely replaces its terminal row; keep every other previously known row unchanged.
+A confirmed successful command can also return `result.detail` containing `"wait_reason":"command_completed"`, `"command_exit_code":0`, and `"command_succeeded":true`, while the patch still has `"pty_state":"running"`. A nonzero command exit code means the command ended unsuccessfully, not that the PTY session ended.
+
 
 Example 3, one existing row changes and another is explicitly cleared:
 ```json
@@ -1231,12 +1239,33 @@ pub struct SessionEnd {
 pub struct InteractOutcome {
     pub update: TerminalLineUpdate,
     pub end: Option<SessionEnd>,
+    wait: WaitOutcome,
+}
+
+impl InteractOutcome {
+    pub fn metadata(&self) -> Value {
+        self.wait.metadata(self.update.metadata())
+    }
 }
 
 pub struct CreateOutcome {
     pub created: TerminalCreated,
     pub update: TerminalLineUpdate,
     pub end: Option<SessionEnd>,
+    wait: WaitOutcome,
+}
+
+impl CreateOutcome {
+    pub fn metadata(&self) -> Value {
+        self.wait.metadata(json!({
+            "session_id": self.created.session_id,
+            "state": self.update.state,
+            "shell": self.created.shell,
+            "cwd": self.created.cwd,
+            "width": self.created.width,
+            "height": self.created.height,
+        }))
+    }
 }
 
 pub struct StatusOutcome {
@@ -1441,6 +1470,13 @@ impl TerminalManager {
             }
             writer
         };
+        let mut random = [0_u8; 16];
+        getrandom::fill(&mut random)?;
+        let nonce = random
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let created_at = Instant::now();
         let mut command = CommandBuilder::new(&self.shell);
         match shell_kind {
             #[cfg(unix)]
@@ -1448,11 +1484,15 @@ impl TerminalManager {
                 command.arg("--noprofile");
                 command.arg("--norc");
                 command.arg("-i");
+                command.env("PROMPT_COMMAND", completion::bash_prompt_command(&nonce));
             }
             #[cfg(windows)]
             ShellKind::PowerShell => {
                 command.arg("-NoLogo");
                 command.arg("-NoProfile");
+                command.arg("-NoExit");
+                command.arg("-Command");
+                command.arg(completion::powershell_initialization(&nonce));
             }
         }
         command.cwd(&cwd);
@@ -1462,7 +1502,11 @@ impl TerminalManager {
         let child = pair.slave.spawn_command(command)?;
         drop(pair.slave);
 
-        let output = Arc::new(SharedTerminalOutput::new(request.height, request.width));
+        let output = Arc::new(SharedTerminalOutput::with_completion(
+            request.height,
+            request.width,
+            Some(nonce),
+        ));
         let reader_discard = spawn_reader(reader, Arc::clone(&output));
         let created = TerminalCreated {
             session_id: session_id.clone(),
@@ -1483,6 +1527,13 @@ impl TerminalManager {
                 child,
                 output,
                 observed_output_revision: 0,
+                pending_completion: Some(PendingCompletion {
+                    after_revision: 0,
+                    earliest: created_at,
+                    notifications: 1,
+                    initial: true,
+                }),
+                last_input_at: None,
                 reader_discard,
                 // Close the input writer first, then keep the output reader
                 // draining until after the ConPTY master has closed.
@@ -1504,7 +1555,7 @@ impl TerminalManager {
             session.interact(&initial, &[], true)
         };
         match initial {
-            Ok((update, end)) => {
+            Ok((update, end, wait)) => {
                 if end.is_some() {
                     self.sessions.remove(&session_id);
                     self.observer.remove(&session_id);
@@ -1513,6 +1564,7 @@ impl TerminalManager {
                     created,
                     update,
                     end,
+                    wait,
                 })
             }
             Err(error) => {
@@ -1530,7 +1582,7 @@ impl TerminalManager {
             "Terminal is unavailable because the required PowerShell backend was not found",
         )?;
         let input = request.input()?;
-        let (update, end) = {
+        let (update, end, wait) = {
             let session = self
                 .sessions
                 .get_mut(&request.session_id)
@@ -1541,7 +1593,7 @@ impl TerminalManager {
             self.sessions.remove(&request.session_id);
             self.observer.remove(&request.session_id);
         }
-        Ok(InteractOutcome { update, end })
+        Ok(InteractOutcome { update, end, wait })
     }
 
     pub fn status(&mut self, session_id: &str) -> Result<StatusOutcome> {
@@ -1608,6 +1660,13 @@ impl Drop for TerminalManager {
     }
 }
 
+struct PendingCompletion {
+    after_revision: u64,
+    earliest: Instant,
+    notifications: u64,
+    initial: bool,
+}
+
 struct PtySession {
     created: TerminalCreated,
     sequence: u64,
@@ -1616,6 +1675,8 @@ struct PtySession {
     output: Arc<SharedTerminalOutput>,
     observed_output_revision: u64,
     reader_discard: Arc<AtomicBool>,
+    pending_completion: Option<PendingCompletion>,
+    last_input_at: Option<Instant>,
     _master: Box<dyn MasterPty + Send>,
 }
 
@@ -1633,17 +1694,49 @@ impl PtySession {
         request: &InteractRequest,
         input: &[u8],
         wait_for_first_output: bool,
-    ) -> Result<(TerminalLineUpdate, Option<SessionEnd>)> {
+    ) -> Result<(TerminalLineUpdate, Option<SessionEnd>, WaitOutcome)> {
         let start = Instant::now();
         let mut local_error = None;
         let mut end = self.try_exit()?;
         let mut input_written_at = None;
         if end.is_none() && !input.is_empty() {
+            let before = self.output.activity()?;
+            let ready = before.completion.as_ref().is_some_and(|completion| {
+                completion.ready
+                    && self
+                        .last_input_at
+                        .is_none_or(|last| completion.received_at >= last)
+            });
             let writer = self.writer.as_mut().ok_or("PTY writer is closed")?;
             if let Err(error) = writer.write_all(input).and_then(|()| writer.flush()) {
                 local_error = Some(format!("PTY write failed: {error}"));
             } else {
-                input_written_at = Some(Instant::now());
+                let written_at = Instant::now();
+                input_written_at = Some(written_at);
+                self.last_input_at = Some(written_at);
+                let notifications = input
+                    .iter()
+                    .filter(|&&byte| matches!(byte, b'\r' | b'\n'))
+                    .count() as u64;
+                // Count submitted line endings conservatively: a heredoc or interactive
+                // program may consume several, in which case the normal wait remains.
+                let submitted = input
+                    .last()
+                    .is_some_and(|byte| matches!(byte, b'\r' | b'\n'));
+                // Editing/control keys can create prompts without submitting a command.
+                let plain_input = input
+                    .iter()
+                    .all(|&byte| (byte >= b' ' && byte != 127) || matches!(byte, b'\r' | b'\n'));
+                self.pending_completion = (ready && submitted && plain_input && notifications > 0)
+                    .then_some(PendingCompletion {
+                        after_revision: before
+                            .completion
+                            .as_ref()
+                            .map_or(0, |completion| completion.revision),
+                        earliest: written_at,
+                        notifications,
+                        initial: false,
+                    });
             }
         }
 
@@ -1652,7 +1745,7 @@ impl PtySession {
         let maximum = Duration::from_millis(u64::from(request.max_wait_ms));
         let mut saw_output = false;
 
-        loop {
+        let mut wait = loop {
             let activity = self.output.activity()?;
             if activity.output_revision > self.observed_output_revision {
                 saw_output = true;
@@ -1666,30 +1759,48 @@ impl PtySession {
             let now = Instant::now();
             let elapsed = now.duration_since(start);
             let reader_closed = activity.closed || local_error.is_some();
+            let quiet = now.duration_since(last_activity);
             let exit_drain_idle = idle.max(Duration::from_millis(EXIT_DRAIN_IDLE_MS));
-            if elapsed >= maximum
-                || (end.is_some()
-                    && (reader_closed || now.duration_since(last_activity) >= exit_drain_idle))
-                || (end.is_none()
-                    && !reader_closed
-                    && (!wait_for_first_output || saw_output)
-                    && now.duration_since(last_activity) >= idle)
+            if end.is_some() && (reader_closed || quiet >= exit_drain_idle) {
+                break WaitOutcome::new(WaitReason::SessionEnded);
+            }
+            if elapsed >= maximum {
+                break WaitOutcome::new(WaitReason::MaxWait);
+            }
+            if end.is_none()
+                && !reader_closed
+                && let (Some(pending), Some(completed)) =
+                    (&self.pending_completion, &activity.completion)
+                && completed.ready
+                && completed.revision.saturating_sub(pending.after_revision)
+                    >= pending.notifications
+                && completed.received_at >= pending.earliest
+                && quiet >= Duration::from_millis(EXIT_DRAIN_IDLE_MS)
             {
-                break;
+                let outcome = WaitOutcome::completed(completed, pending.initial);
+                self.pending_completion = None;
+                break outcome;
+            }
+            if end.is_none()
+                && !reader_closed
+                && (!wait_for_first_output || saw_output)
+                && quiet >= idle
+            {
+                break WaitOutcome::new(WaitReason::OutputIdle);
             }
             let until_maximum = maximum.saturating_sub(elapsed);
             let until_idle = if end.is_some() {
-                exit_drain_idle.saturating_sub(now.duration_since(last_activity))
+                exit_drain_idle.saturating_sub(quiet)
             } else if reader_closed || (wait_for_first_output && !saw_output) {
                 until_maximum
             } else {
-                idle.saturating_sub(now.duration_since(last_activity))
+                idle.saturating_sub(quiet)
             };
             let timeout = until_idle.min(until_maximum).min(Duration::from_millis(20));
             if !timeout.is_zero() {
                 thread::sleep(timeout);
             }
-        }
+        };
 
         if end.is_none() {
             end = self.try_exit()?;
@@ -1705,6 +1816,9 @@ impl PtySession {
                     .map(|error| format!("PTY transport lost: {error}"))
                     .unwrap_or_else(|| "PTY reader closed before process status was known".into()),
             });
+        }
+        if end.is_some() {
+            wait = WaitOutcome::new(WaitReason::SessionEnded);
         }
 
         let (rendered, activity) = self.output.capture(request.max_output_chars as usize)?;
@@ -1729,7 +1843,7 @@ impl PtySession {
             exit_code,
             truncated: rendered.truncated,
         };
-        Ok((update, end))
+        Ok((update, end, wait))
     }
 
     fn try_exit(&mut self) -> Result<Option<SessionEnd>> {
@@ -1768,6 +1882,7 @@ struct ReaderActivity {
     last_activity: Instant,
     closed: bool,
     reader_error: Option<String>,
+    completion: Option<Completion>,
 }
 
 struct SharedTerminalOutput {
@@ -1781,10 +1896,17 @@ struct SharedTerminalOutputState {
     last_activity: Instant,
     saw_eof: bool,
     reader_error: Option<String>,
+    completion_decoder: Option<CompletionDecoder>,
+    completion: Option<Completion>,
 }
 
 impl SharedTerminalOutput {
+    #[cfg(test)]
     fn new(height: u16, width: u16) -> Self {
+        Self::with_completion(height, width, None)
+    }
+
+    fn with_completion(height: u16, width: u16, nonce: Option<String>) -> Self {
         Self {
             state: Mutex::new(SharedTerminalOutputState {
                 renderer: TerminalRenderer::new(height, width),
@@ -1793,6 +1915,8 @@ impl SharedTerminalOutput {
                 last_activity: Instant::now(),
                 saw_eof: false,
                 reader_error: None,
+                completion_decoder: nonce.map(CompletionDecoder::new),
+                completion: None,
             }),
         }
     }
@@ -1802,7 +1926,15 @@ impl SharedTerminalOutput {
             return;
         }
         if let Ok(mut state) = self.state.lock() {
-            state.renderer.process(data);
+            if let Some(decoder) = &mut state.completion_decoder {
+                let (visible, completion) = decoder.process(data);
+                state.renderer.process(&visible);
+                if completion.is_some() {
+                    state.completion = completion;
+                }
+            } else {
+                state.renderer.process(data);
+            }
             state.revision = state.revision.wrapping_add(1);
             state.output_revision = state.output_revision.wrapping_add(1);
             state.last_activity = Instant::now();
@@ -1811,6 +1943,10 @@ impl SharedTerminalOutput {
 
     fn close(&self) {
         if let Ok(mut state) = self.state.lock() {
+            if let Some(decoder) = &mut state.completion_decoder {
+                let tail = decoder.finish();
+                state.renderer.process(&tail);
+            }
             state.saw_eof = true;
             state.revision = state.revision.wrapping_add(1);
         }
@@ -1857,6 +1993,7 @@ impl SharedTerminalOutputState {
             last_activity: self.last_activity,
             closed: self.saw_eof || self.reader_error.is_some(),
             reader_error: self.reader_error.clone(),
+            completion: self.completion.clone(),
         }
     }
 }
@@ -3807,7 +3944,8 @@ mod tests {
         manager
             .interact(&InteractRequest {
                 session_id: session_id.clone(),
-                input: command_input("stty -echo"),
+                // Exercise the original idle fallback independently of completion detection.
+                input: command_input("unset PROMPT_COMMAND; stty -echo"),
                 wait_ms: 25,
                 max_wait_ms: 1_000,
                 max_output_chars: 20_000,
@@ -4017,6 +4155,199 @@ mod tests {
         );
         assert!(!observed.update.plain_text().contains("MUST-NOT-RUN"));
         assert!(!manager.contains(&session_id));
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_completion_returns_early_and_tracks_batches_and_polling() {
+        let _guard = real_pty_test_guard();
+        let workspace = temp_workspace("completion");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut manager = TerminalManager::new();
+        let started = Instant::now();
+        let created = manager
+            .create(
+                &workspace,
+                70,
+                &CreateRequest {
+                    width: 120,
+                    height: 40,
+                    cwd: ".".into(),
+                    wait_ms: 1_500,
+                    max_wait_ms: 2_000,
+                    max_output_chars: 20_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(created.wait.reason, WaitReason::ShellReady);
+        assert!(started.elapsed() < Duration::from_secs(1));
+        let id = created.created.session_id;
+        let mut control = interact(&id, Some(":"));
+        control
+            .input
+            .insert(0, modified_key("l", &[TerminalKeyModifier::Ctrl], 1));
+        control.wait_ms = 200;
+        control.max_wait_ms = 300;
+        let control_result = manager.interact(&control).unwrap();
+        assert_ne!(control_result.wait.reason, WaitReason::CommandCompleted);
+
+        let mut request = interact(&id, Some("printf 'SHORT-%s\\n' DONE; (exit 7)"));
+        request.wait_ms = 1_500;
+        request.max_wait_ms = 2_000;
+        let started = Instant::now();
+        let result = manager.interact(&request).unwrap();
+        assert_eq!(result.wait.reason, WaitReason::CommandCompleted);
+        assert_eq!(result.wait.command_exit_code, Some(7));
+        assert_eq!(result.wait.command_succeeded, Some(false));
+        assert_eq!(result.update.state, "running");
+        assert!(result.update.plain_text().contains("SHORT-DONE"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(!result.update.plain_text().contains("633;D;"));
+
+        request.input = [
+            command_input("printf 'FIRST\\n'; false"),
+            command_input("sleep 0.3; printf 'BATCH-%s\\n' DONE"),
+        ]
+        .concat();
+        let started = Instant::now();
+        let batch = manager.interact(&request).unwrap();
+        assert_eq!(batch.wait.reason, WaitReason::CommandCompleted);
+        assert_eq!(batch.wait.command_succeeded, Some(true));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(batch.update.plain_text().contains("BATCH-DONE"));
+
+        request.input = command_input("sleep 0.4; printf 'POLL-%s\\n' DONE");
+        request.wait_ms = 100;
+        request.max_wait_ms = 100;
+        let pending = manager.interact(&request).unwrap();
+        assert_eq!(pending.wait.reason, WaitReason::MaxWait);
+        assert_eq!(pending.wait.command_exit_code, None);
+        request.input.clear();
+        request.wait_ms = 1_500;
+        request.max_wait_ms = 2_000;
+        let polled = manager.interact(&request).unwrap();
+        assert_eq!(polled.wait.reason, WaitReason::CommandCompleted);
+        assert_eq!(polled.wait.command_succeeded, Some(true));
+        assert!(polled.update.plain_text().contains("POLL-DONE"));
+
+        request.input = command_input("sleep 0.4");
+        request.wait_ms = 250;
+        request.max_wait_ms = 250;
+        let started = Instant::now();
+        let fresh = manager.interact(&request).unwrap();
+        assert_ne!(fresh.wait.reason, WaitReason::CommandCompleted);
+        assert!(started.elapsed() >= Duration::from_millis(240));
+        manager
+            .kill(&KillRequest {
+                session_id: id,
+                grace_ms: 1_000,
+            })
+            .unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_completion_falls_back_for_interactive_partial_nested_and_background_input() {
+        let _guard = real_pty_test_guard();
+        let workspace = temp_workspace("completion-fallback");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut manager = TerminalManager::new();
+        let created = manager
+            .create(
+                &workspace,
+                71,
+                &CreateRequest {
+                    width: 120,
+                    height: 40,
+                    cwd: ".".into(),
+                    wait_ms: 1_500,
+                    max_wait_ms: 2_000,
+                    max_output_chars: 20_000,
+                },
+            )
+            .unwrap();
+        let id = created.created.session_id;
+        for command in [
+            "printf 'FIRST\\n'\nprintf 'UNSUBMITTED'",
+            "read answer",
+            "/bin/bash --noprofile --norc -i",
+            "(sleep 0.5; printf 'BACKGROUND-%s\\n' DONE) &",
+            "cat <<'END'\nheredoc\nEND",
+            "unset PROMPT_COMMAND; printf 'NO-HOOK\\n'",
+        ] {
+            let mut request = interact(&id, None);
+            request.input = if command.contains("UNSUBMITTED") {
+                vec![text(command)]
+            } else {
+                command_input(command)
+            };
+            request.wait_ms = 200;
+            request.max_wait_ms = 300;
+            let started = Instant::now();
+            let result = manager.interact(&request).unwrap();
+            assert_ne!(
+                result.wait.reason,
+                WaitReason::CommandCompleted,
+                "{command}"
+            );
+            assert!(started.elapsed() >= Duration::from_millis(190), "{command}");
+            if command.contains("UNSUBMITTED") || command == "read answer" {
+                manager.interact(&interact(&id, Some(""))).unwrap();
+            } else if command.starts_with("/bin/bash") {
+                // The nested shell must not inherit the outer shell's completion hook.
+                let nested = manager
+                    .interact(&interact(&id, Some("printf 'NESTED\\n'")))
+                    .unwrap();
+                assert_ne!(nested.wait.reason, WaitReason::CommandCompleted);
+                manager.interact(&interact(&id, Some("exit"))).unwrap();
+            } else if command.starts_with("(sleep") {
+                let tail = manager.interact(&interact(&id, Some("wait"))).unwrap();
+                assert!(tail.update.plain_text().contains("BACKGROUND-DONE"));
+            }
+        }
+        manager
+            .kill(&KillRequest {
+                session_id: id,
+                grace_ms: 1_000,
+            })
+            .unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_initial_readiness_polled_later_is_not_a_command_completion() {
+        let _guard = real_pty_test_guard();
+        let workspace = temp_workspace("initial-ready");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut manager = TerminalManager::new();
+        let created = manager
+            .create(
+                &workspace,
+                72,
+                &CreateRequest {
+                    width: 120,
+                    height: 40,
+                    cwd: ".".into(),
+                    wait_ms: 0,
+                    max_wait_ms: 1_000,
+                    max_output_chars: 20_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(created.wait.reason, WaitReason::OutputIdle);
+        let id = created.created.session_id;
+        let ready = manager.interact(&interact(&id, None)).unwrap();
+        assert_eq!(ready.wait.reason, WaitReason::ShellReady);
+        assert_eq!(ready.wait.command_succeeded, None);
+        manager
+            .kill(&KillRequest {
+                session_id: id,
+                grace_ms: 1_000,
+            })
+            .unwrap();
         fs::remove_dir_all(workspace).unwrap();
     }
 }
