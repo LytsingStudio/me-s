@@ -13,22 +13,23 @@ pub const EXCLUSIVE_ERROR_MESSAGE: &str = "Compact must be the only tool call in
 pub const EXCLUSIVE_WORKMAP_TIP: &str = "Finish any genuinely necessary WorkMap Current or Memory maintenance first. After those tool calls finish, send a later response containing exactly one direct Compact tool call and nothing else.";
 pub const EXCLUSIVE_CHATBOT_TIP: &str = "Finish any other conversational action first. Then send a later response containing exactly one direct Compact tool call and nothing else.";
 
-const TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a detailed continuation summary when context space is running low.
+const TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a detailed continuation summary.
 
-Call Compact only after the runtime explicitly warns that context space is running low. First finish the current atomic action and complete any genuinely necessary WorkMap Current or Memory maintenance in earlier model responses. If WorkMap already needs no maintenance, do not mutate it merely because Compact is approaching.
+Choose when to compact based on the conversation and the work ahead; a runtime warning is not required. First finish the current atomic action and complete any genuinely necessary WorkMap Current or Memory maintenance in earlier model responses. If WorkMap already needs no maintenance, do not mutate it merely because Compact is approaching.
 
 The response that requests Compact must contain exactly one direct tool call: Compact with `{}`, and nothing else. It must not contain prose, WorkMap.Read, a WorkMap maintenance call, an unrelated tool, another Compact call, a sequential or parallel sibling, or a batch wrapper. If Compact appears with any other tool call, the runtime rejects the entire batch before any tool executes and returns `compact_must_be_only_tool_call`; finish necessary maintenance first, then call Compact alone in a later response.
 
-The runtime rejects Compact when no warning is active and reports the current context usage. After accepting a valid lone call, the runtime performs context compaction and activates the resulting continuation summary only after successful completion. Only a successful compaction continues the same Agent turn. WorkMap survives independently of the summary. After compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. If summary generation fails or is interrupted, the pre-compaction conversation, WorkMap, and accepted Compact exchange remain effective; the current Agent turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which a new context-low warning may allow retry. Do not call WorkMap.Read after such a failure; the post-Compact Read rule applies only after success. Do not call Compact merely to shorten a healthy context, and do not narrate or imitate compaction in assistant text."#;
+After accepting a valid lone call, the runtime performs context compaction and activates the resulting continuation summary only after successful completion. Only a successful compaction continues the same Agent turn. WorkMap survives independently of the summary. After compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. If summary generation fails or is interrupted, the pre-compaction conversation, WorkMap, and accepted Compact exchange remain effective; the current Agent turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which you may retry. Do not call WorkMap.Read after such a failure; the post-Compact Read rule applies only after success. Do not narrate or imitate compaction in assistant text."#;
 
-const INSTRUCTIONS: &str = r#"Call with an empty object only after the runtime explicitly issues a context-low warning. If any other action or tool call is needed first, complete it in an earlier model response. The response requesting Compact must contain exactly one direct Compact tool call and nothing else: no prose, no sibling tool call, and no parallel or batch wrapper. A mixed batch is rejected before any tool executes. A call made without an active warning is rejected with the current context usage. After a valid lone call is accepted, the runtime attempts context compaction. Only successful summarization continues the current turn. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective, the current turn stops without an automatic retry, and another attempt requires a later user message."#;
+const INSTRUCTIONS: &str = r#"Call with an empty object when you decide that a continuation summary would help manage the conversation. If any other action or tool call is needed first, complete it in an earlier model response. The response requesting Compact must contain exactly one direct Compact tool call and nothing else: no prose, no sibling tool call, and no parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime attempts context compaction. Only successful summarization continues the current turn. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective, the current turn stops without an automatic retry, and another attempt requires a later user message."#;
 
-const CHATBOT_TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a concise continuation summary when context space is running low.
+const CHATBOT_TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a concise continuation summary.
 
-Call Compact only after the runtime explicitly warns that context space is running low. Finish any other conversational action first. Then send a later model response containing exactly one direct Compact tool call with `{}` and nothing else: no prose, sibling tool, second Compact call, or parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime creates a conversational continuity summary and continues the same user turn only if summarization succeeds. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective; the current user turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which a new context-low warning may allow retry. Do not call Compact merely to shorten a healthy conversation."#;
+Choose when to compact based on the conversation; a runtime warning is not required. Finish any other conversational action first. Then send a later model response containing exactly one direct Compact tool call with `{}` and nothing else: no prose, sibling tool, second Compact call, or parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime creates a conversational continuity summary and continues the same user turn only if summarization succeeds. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective; the current user turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which you may retry."#;
 const LOW_CONTEXT_WINDOW_MAX: u64 = 384_000;
 const MEDIUM_CONTEXT_WINDOW_MAX: u64 = 680_000;
-const ROUTE: &str = "After a context-low warning and any earlier required actions, request compaction in a response containing exactly one direct Compact tool call and nothing else.";
+const HARD_USED_CONTEXT_LIMIT: u64 = 680_000;
+const ROUTE: &str = "Use when you decide to summarize the accumulated conversation. Finish any earlier required actions, then request compaction with exactly one direct Compact tool call and nothing else.";
 const EXAMPLES: &str = r#"Input: {}
 Meaning: after every other required action is already finished, send one response whose only content is this direct Compact tool call."#;
 
@@ -316,13 +317,7 @@ pub fn chatbot_catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
     (tools, (TOOLBOX_NAME.into(), CHATBOT_TOOLBOX_BRIEF.into()))
 }
 
-pub fn execute(
-    arguments: &str,
-    warning_active: bool,
-    used_tokens: Option<u64>,
-    context_window: u64,
-    output_reservation: u64,
-) -> std::result::Result<Value, ToolboxExecutionError> {
+pub fn execute(arguments: &str) -> std::result::Result<Value, ToolboxExecutionError> {
     let value: Value =
         serde_json::from_str(arguments).map_err(|error| ToolboxExecutionError::Tool {
             code: "invalid_arguments".into(),
@@ -338,38 +333,6 @@ pub fn execute(
             tip: None,
         });
     }
-    if !warning_active {
-        let message = match used_tokens {
-            Some(used_tokens) => {
-                let remaining = usable_remaining(
-                    used_tokens,
-                    context_window,
-                    output_reservation,
-                );
-                let percentage = if context_window == 0 {
-                    0.0
-                } else {
-                    used_tokens as f64 * 100.0 / context_window as f64
-                };
-                if advisory(used_tokens, context_window, output_reservation).is_none() {
-                    format!(
-                        "Context is healthy: {used_tokens}/{context_window} tokens used ({percentage:.1}%), with {remaining} usable tokens remaining after the response budget. No compaction warning is active, so Compact is not allowed or needed. Continue the task without compacting."
-                    )
-                } else {
-                    format!(
-                        "No compaction warning was active when this response began. Current context usage is {used_tokens}/{context_window} tokens ({percentage:.1}%), with {remaining} usable tokens remaining after the response budget. Compact is not allowed in this response; continue and wait for the runtime warning before calling Compact."
-                    )
-                }
-            }
-            None => "Current context usage is not yet available and no compaction warning is active. Compact is not allowed or needed; continue the task without compacting and wait for an explicit runtime warning.".into(),
-        };
-        return Err(ToolboxExecutionError::Tool {
-            code: "compact_not_needed".into(),
-            message,
-            retryable: false,
-            tip: None,
-        });
-    }
     Ok(json!({"status": "accepted"}))
 }
 
@@ -381,7 +344,7 @@ pub fn format_summary(summary: &str) -> String {
 
 pub fn continuation_message(summary: &str) -> String {
     format!(
-        "This session is being continued from a previous conversation that ran out of context. The summary below covers the earlier portion of the conversation.\n\nThe persistent WorkMap survives compaction separately from this summary. The summary is not authoritative for the Current Objective, its Plan IDs, Notes, or completion state. Before any further non-WorkMap action, call WorkMap.Read and resume from that result. Any final-answer audit performed before compaction is stale and must be repeated.\n\n{}",
+        "This session is being continued after an earlier portion of the conversation was summarized. The summary below covers that earlier portion.\n\nThe persistent WorkMap survives compaction separately from this summary. The summary is not authoritative for the Current Objective, its Plan IDs, Notes, or completion state. Before any further non-WorkMap action, call WorkMap.Read and resume from that result. Any final-answer audit performed before compaction is stale and must be repeated.\n\n{}",
         summary.trim()
     )
 }
@@ -469,7 +432,11 @@ fn advisory_inner(
 ) -> Option<String> {
     let remaining = usable_remaining(used_tokens, context_window, output_reservation);
     let (mild, urgent) = compact_thresholds(context_window);
-    let warning = if remaining < urgent {
+    let warning = if used_tokens > HARD_USED_CONTEXT_LIMIT {
+        format!(
+            "Context usage has exceeded 680000 tokens ({used_tokens} used). At the next safe point, you must call Compact immediately as the sole tool call before continuing further work."
+        )
+    } else if remaining < urgent {
         format!(
             "Only {remaining} usable context tokens remain after reserving the response budget. Context is nearly exhausted. At the next safe point, you must call Compact immediately as the sole tool call before continuing further work."
         )
@@ -539,37 +506,39 @@ mod tests {
         let (tools, _) = catalog_parts();
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].full_name, TOOL_NAME);
-        assert_eq!(
-            execute("{}", true, Some(90_000), 100_000, 0).unwrap(),
-            json!({"status": "accepted"})
-        );
-        assert!(execute(r#"{"extra":true}"#, true, Some(90_000), 100_000, 0).is_err());
+        assert_eq!(execute("{}").unwrap(), json!({"status": "accepted"}));
+        assert!(execute(r#"{"extra":true}"#).is_err());
     }
 
     #[test]
-    fn compact_requires_an_active_warning_and_reports_usage() {
-        let error = execute("{}", false, Some(52_000), 100_000, 0).unwrap_err();
-        assert!(matches!(
-            error,
-            ToolboxExecutionError::Tool {
-                code,
-                message,
-                retryable: false,
-                ..
-            } if code == "compact_not_needed"
-                && message.contains("52000/100000")
-                && message.contains("52.0%")
-                && message.contains("48000 usable tokens remaining")
-                && message.contains("Context is healthy")
-        ));
+    fn compact_can_be_requested_without_a_warning_or_usage() {
+        assert_eq!(execute("{}").unwrap(), json!({"status": "accepted"}));
+        assert!(execute("[]").is_err());
+    }
 
-        let crossed = execute("{}", false, Some(52_001), 100_000, 0).unwrap_err();
-        assert!(matches!(
-            crossed,
-            ToolboxExecutionError::Tool { message, .. }
-                if message.contains("No compaction warning was active when this response began")
-                    && message.contains("wait for the runtime warning")
-        ));
+    #[test]
+    fn hard_used_context_limit_preserves_the_existing_reminder_policy() {
+        assert!(advisory(680_000, 2_000_000, 0).is_none());
+        assert!(
+            advisory(680_001, 2_000_000, 0)
+                .unwrap()
+                .contains("must call Compact immediately")
+        );
+        assert!(
+            advisory(680_001, 2_000_000, 200_000)
+                .unwrap()
+                .contains("680000 tokens")
+        );
+        assert!(
+            advisory(225_000, 272_000, 0)
+                .unwrap()
+                .contains("Consider calling Compact")
+        );
+        assert!(
+            advisory(241_000, 272_000, 0)
+                .unwrap()
+                .contains("must call Compact immediately")
+        );
     }
 
     #[test]
@@ -814,12 +783,12 @@ mod tests {
         assert!(advisory(608_000, 680_000, 0).is_none());
         assert!(advisory(529_000, 681_000, 0).is_none());
         assert!(
-            advisory(848_001, 1_000_000, 0)
+            advisory(600_000, 1_000_000, 248_001)
                 .unwrap()
                 .contains("Consider")
         );
         assert!(
-            advisory(872_001, 1_000_000, 0)
+            advisory(600_000, 1_000_000, 272_001)
                 .unwrap()
                 .contains("must call")
         );

@@ -123,6 +123,7 @@ pub(super) enum WaitReason {
     CommandCompleted,
     OutputIdle,
     MaxWait,
+    FollowUp,
     SessionEnded,
 }
 
@@ -159,6 +160,9 @@ impl WaitOutcome {
             serde_json::to_value(self.reason).expect("wait reason is serializable");
         value["command_exit_code"] = self.command_exit_code.into();
         value["command_succeeded"] = self.command_succeeded.into();
+        if self.reason == WaitReason::FollowUp {
+            value["tip"] = "Waiting ended early because a user follow-up arrived; the terminal command was not stopped.".into();
+        }
         value
     }
 }

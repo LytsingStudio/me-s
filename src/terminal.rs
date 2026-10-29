@@ -39,7 +39,7 @@ pub const API_INTERACT: &str = "Terminal_Interact";
 pub const API_STATUS: &str = "Terminal_Status";
 pub const API_LIST: &str = "Terminal_List";
 pub const API_KILL: &str = "Terminal_Kill";
-pub const TOOL_VERSION: &str = "10";
+pub const TOOL_VERSION: &str = "11";
 
 const DEFAULT_WIDTH: u16 = 120;
 const DEFAULT_HEIGHT: u16 = 40;
@@ -94,6 +94,7 @@ Important behavior:
 - `wait_ms` is the quiet interval after the latest received PTY output; any newer output restarts it. When command completion can be confirmed, the call may return earlier. Otherwise the quiet-interval behavior remains. `max_wait_ms` is the hard upper bound for that tool call.
 - `wait_ms` and `max_wait_ms` are each limited to 300000 milliseconds, and `wait_ms` must not exceed `max_wait_ms`.
 - For a non-empty `input`, the quiet interval never starts before all input bytes have been successfully written. Old unread output cannot make newly submitted input return immediately. For an empty polling input, already-pending output that has been quiet long enough may return immediately.
+- A user follow-up can end an Interact wait early. `wait_reason:"follow_up"` and a short `tip` accompany the patch captured at that point. The terminal command is not stopped and the session stays open; this is not proof of command completion. Address the follow-up first, then poll the same session if more output is needed.
 - `command_completed` means the submitted command batch ended, not that it succeeded. Check `command_succeeded` and, when available, `command_exit_code`. For a batch, these fields describe the last shell command, not every earlier command. These command fields are null for other wait reasons. PowerShell may report success without a numeric command exit code. Session `state`/`pty_state` and `exit_code` describe the whole shell, not one command; a completed command normally leaves the session running.
 - Completion detection is conservative. Multi-line input, editing/control keys, interactive programs, background jobs, nested shells, changed shell configuration, or unavailable completion information may use the normal wait instead. A quiet return alone does not prove completion; inspect output and the program's known state. If inconclusive, poll with `input:[]` rather than submitting another shell command into a possibly running foreground program.
 - Completion does not promise that a persistent terminal will never change again: background activity or later input may still produce output.
@@ -1552,7 +1553,7 @@ impl TerminalManager {
                 .sessions
                 .get_mut(&session_id)
                 .ok_or_else(|| format!("terminal session {session_id} is not live"))?;
-            session.interact(&initial, &[], true)
+            session.interact(&initial, &[], true, &mut || false)
         };
         match initial {
             Ok((update, end, wait)) => {
@@ -1578,6 +1579,14 @@ impl TerminalManager {
     }
 
     pub fn interact(&mut self, request: &InteractRequest) -> Result<InteractOutcome> {
+        self.interact_with_follow_up(request, &mut || false)
+    }
+
+    pub fn interact_with_follow_up(
+        &mut self,
+        request: &InteractRequest,
+        has_follow_up: &mut dyn FnMut() -> bool,
+    ) -> Result<InteractOutcome> {
         self.shell_kind.ok_or(
             "Terminal is unavailable because the required PowerShell backend was not found",
         )?;
@@ -1587,7 +1596,7 @@ impl TerminalManager {
                 .sessions
                 .get_mut(&request.session_id)
                 .ok_or_else(|| format!("terminal session {} is not live", request.session_id))?;
-            session.interact(request, &input, false)?
+            session.interact(request, &input, false, has_follow_up)?
         };
         if end.is_some() {
             self.sessions.remove(&request.session_id);
@@ -1694,6 +1703,7 @@ impl PtySession {
         request: &InteractRequest,
         input: &[u8],
         wait_for_first_output: bool,
+        has_follow_up: &mut dyn FnMut() -> bool,
     ) -> Result<(TerminalLineUpdate, Option<SessionEnd>, WaitOutcome)> {
         let start = Instant::now();
         let mut local_error = None;
@@ -1763,6 +1773,9 @@ impl PtySession {
             let exit_drain_idle = idle.max(Duration::from_millis(EXIT_DRAIN_IDLE_MS));
             if end.is_some() && (reader_closed || quiet >= exit_drain_idle) {
                 break WaitOutcome::new(WaitReason::SessionEnded);
+            }
+            if has_follow_up() {
+                break WaitOutcome::new(WaitReason::FollowUp);
             }
             if elapsed >= maximum {
                 break WaitOutcome::new(WaitReason::MaxWait);

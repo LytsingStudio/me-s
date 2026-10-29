@@ -1951,7 +1951,6 @@ impl MainAgent {
         models: &mut ModelRuntime,
         on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
     ) -> Result<()> {
-        let mut compact_warning_latched = false;
         'agent_loop: loop {
             if begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)? {
                 close_agent_turn(
@@ -2018,7 +2017,6 @@ impl MainAgent {
                 None => None,
             };
             if let Some(advisory) = compact_advisory {
-                compact_warning_latched = true;
                 context.push(
                     "user",
                     system_prompt_injection_envelope("compact_advisory", &advisory),
@@ -2084,8 +2082,7 @@ impl MainAgent {
                 let Some(Event::ToolCall(call)) = edb.get(tool_call_id).cloned() else {
                     return Err(format!("missing tool call {tool_call_id}").into());
                 };
-                let outcome =
-                    self.execute_tool(edb, &call, models, compact_warning_latched, on_event)?;
+                let outcome = self.execute_tool(edb, &call, models, on_event)?;
                 if self.input_queue.abort_requested(prompt_id) {
                     interrupt_tool_batch(&calls[index + 1..], edb, on_event)?;
                     begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)?;
@@ -2125,7 +2122,7 @@ impl MainAgent {
                 && tool_call_succeeded(edb.events(), tool_call_id)
             {
                 match self.run_compact(prompt_id, tool_call_id, edb, models, on_event)? {
-                    CompactOutcome::Completed => compact_warning_latched = false,
+                    CompactOutcome::Completed => {}
                     CompactOutcome::Failed => {
                         close_agent_turn(
                             edb,
@@ -2646,19 +2643,10 @@ impl MainAgent {
         edb: &mut EventDataBase,
         call: &ToolCallEvent,
         models: &ModelRuntime,
-        compact_warning_active: bool,
         on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
     ) -> Result<ToolExecutionOutcome> {
         let execution = if call.name == compact::TOOL_NAME {
-            compact::execute(
-                &call.arguments,
-                compact_warning_active,
-                latest_context_usage(edb.events()).map(|usage| usage.total_tokens),
-                models.active_model().capabilities.context_window,
-                models
-                    .api()
-                    .output_token_reservation(self.effort.as_deref()),
-            )
+            compact::execute(&call.arguments)
         } else if call.name == agent_title::TOOL_NAME {
             let previous_len = edb.len();
             let execution = agent_title::execute(&call.arguments, call.id, edb);
@@ -2803,7 +2791,7 @@ impl MainAgent {
                     Ok(call.arguments.clone())
                 };
             match execution_arguments {
-                Ok(execution_arguments) => self.toolboxes.execute_cancellable(
+                Ok(execution_arguments) => self.toolboxes.execute_cancellable_with_follow_up(
                     &call.name,
                     &execution_arguments,
                     |update| match update {
@@ -2830,6 +2818,7 @@ impl MainAgent {
                         }
                     },
                     || self.input_queue.abort_requested(call.prompt_id),
+                    || self.input_queue.has_pending_user_prompt(),
                 ),
                 Err(error) => Err(error),
             }
@@ -2918,6 +2907,9 @@ impl MainAgent {
 }
 
 fn wait_result_requests_follow_up_yield(tool_name: &str, output: &Value) -> bool {
+    if tool_name == terminal::INTERACT {
+        return output.get("wait_reason").and_then(Value::as_str) == Some("follow_up");
+    }
     matches!(
         tool_name,
         agent_toolbox::WORKER_WAIT | agent_toolbox::AGENT_WAIT
@@ -3123,7 +3115,6 @@ impl Chatbot {
         models: &mut ModelRuntime,
         on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
     ) -> Result<()> {
-        let mut compact_warning_latched = false;
         loop {
             if begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)? {
                 close_agent_turn(
@@ -3168,7 +3159,6 @@ impl Chatbot {
             if let Some(advisory) = provider_usage
                 .and_then(|used| compact::advisory(used, context_window, output_reservation))
             {
-                compact_warning_latched = true;
                 context.push(
                     "user",
                     system_prompt_injection_envelope("compact_advisory", &advisory),
@@ -3237,7 +3227,7 @@ impl Chatbot {
                 let Some(Event::ToolCall(call)) = edb.get(tool_call_id).cloned() else {
                     return Err(format!("missing Chatbot tool call {tool_call_id}").into());
                 };
-                self.execute_tool(edb, &call, models, compact_warning_latched, on_event)?;
+                self.execute_tool(edb, &call, models, on_event)?;
                 if self.input_queue.abort_requested(prompt_id) {
                     interrupt_tool_batch(&calls[index + 1..], edb, on_event)?;
                     begin_turn_abort_if_requested(&self.input_queue, prompt_id, edb, on_event)?;
@@ -3256,7 +3246,7 @@ impl Chatbot {
                 && tool_call_succeeded(edb.events(), tool_call_id)
             {
                 match self.run_compact(prompt_id, tool_call_id, edb, models, on_event)? {
-                    CompactOutcome::Completed => compact_warning_latched = false,
+                    CompactOutcome::Completed => {}
                     CompactOutcome::Failed => {
                         close_agent_turn(
                             edb,
@@ -3504,20 +3494,11 @@ impl Chatbot {
         &mut self,
         edb: &mut EventDataBase,
         call: &ToolCallEvent,
-        models: &ModelRuntime,
-        compact_warning_active: bool,
+        _models: &ModelRuntime,
         on_event: &mut dyn FnMut(&EventDataBase) -> Result<()>,
     ) -> Result<()> {
         let execution = if call.name == compact::TOOL_NAME {
-            compact::execute(
-                &call.arguments,
-                compact_warning_active,
-                latest_context_usage(edb.events()).map(|usage| usage.total_tokens),
-                models.active_model().capabilities.context_window,
-                models
-                    .api()
-                    .output_token_reservation(self.effort.as_deref()),
-            )
+            compact::execute(&call.arguments)
         } else if call.name == agent_title::TOOL_NAME {
             let previous_len = edb.len();
             let execution = agent_title::execute(&call.arguments, call.id, edb);
@@ -11757,7 +11738,7 @@ data: [DONE]
         assert_eq!(agent.definition.kind, AgentKind::SubAgent);
         let models = ModelRuntime::from(unused_model_api());
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
 
         assert!(matches!(
@@ -12456,7 +12437,7 @@ for line in sys.stdin:
             };
             let models = ModelRuntime::from(unused_model_api());
             agent
-                .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+                .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
                 .unwrap();
             match edb.events().last().unwrap() {
                 Event::ToolCallResult(result) => result.detail.clone(),
@@ -12525,7 +12506,7 @@ for line in sys.stdin:
         let models = ModelRuntime::from(unused_model_api());
 
         let outcome = agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
         assert!(matches!(outcome, ToolExecutionOutcome::Completed));
 
@@ -12623,7 +12604,7 @@ for line in sys.stdin:
         };
         let models = ModelRuntime::from(unused_model_api());
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
 
         assert!(matches!(
@@ -12713,7 +12694,7 @@ for line in sys.stdin:
             _ => unreachable!(),
         };
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
 
         assert!(
@@ -14203,7 +14184,7 @@ for line in sys.stdin:
             unreachable!()
         };
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
         assert!(
             edb.events()
@@ -14265,7 +14246,7 @@ for line in sys.stdin:
             r#"{"urls":["first.bmp","second.bmp"]}"#,
         );
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
         agent.supports_edb(&edb).unwrap();
         let images: Vec<_> = edb
@@ -14329,7 +14310,7 @@ for line in sys.stdin:
             r#"{"url":"first.bmp"}"#,
         );
         agent
-            .execute_tool(&mut edb, &view, &vision_models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &view, &vision_models, &mut |_| Ok(()))
             .unwrap();
         std::fs::remove_file(root.join("first.bmp")).unwrap();
         std::fs::remove_file(root.join("second.bmp")).unwrap();
@@ -14390,7 +14371,7 @@ for line in sys.stdin:
         };
         let mut agent = MainAgent::new(None);
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
         assert!(
             edb.events()
@@ -14607,7 +14588,7 @@ for line in sys.stdin:
                 unreachable!()
             };
             agent
-                .execute_tool(&mut edb, &call, &models, true, &mut |_| Ok(()))
+                .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
                 .unwrap();
             assert!(tool_call_succeeded(edb.events(), lone_compact));
             agent.supports_edb(&edb).unwrap();
@@ -14924,7 +14905,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn compact_warning_stays_latched_across_tool_steps_when_usage_drops() {
+    fn compact_can_follow_tool_steps_after_usage_drops_below_the_warning_threshold() {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let address = listener.local_addr().unwrap();
         let server = thread::spawn(move || {
@@ -14962,7 +14943,7 @@ for line in sys.stdin:
 
             let stages = [
                 "preparation analysis",
-                "1. Primary Request and Intent\nlatched warning regression",
+                "1. Primary Request and Intent\nvoluntary compact regression",
                 "2. Key Technical Context and Decisions\ncontext",
                 "3. Files, Code, and Artifacts\nnone",
                 "4. Problems, Investigations, and Resolutions\nnone",
@@ -14990,12 +14971,12 @@ for line in sys.stdin:
             assert!(
                 continuation_request
                     .to_string()
-                    .contains("latched warning regression")
+                    .contains("voluntary compact regression")
             );
             continuation
                 .write_all(
                     b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n\
-                      data: {\"choices\":[{\"delta\":{\"content\":\"continued after latched compact\"}}]}\n\n\
+                      data: {\"choices\":[{\"delta\":{\"content\":\"continued after voluntary compact\"}}]}\n\n\
                       data: {\"choices\":[],\"usage\":{\"prompt_tokens\":30000,\"completion_tokens\":4,\"total_tokens\":30004}}\n\n\
                       data: [DONE]\n\n",
                 )
@@ -15008,7 +14989,7 @@ for line in sys.stdin:
             .unwrap()
             .as_nanos();
         let directory = std::env::temp_dir().join(format!(
-            "me-compact-warning-latch-{}-{nonce}",
+            "me-voluntary-compact-{}-{nonce}",
             std::process::id()
         ));
         let tools_directory = directory.join(".me/tools");
@@ -15071,11 +15052,11 @@ for line in sys.stdin:
             .unwrap();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            assert!(Instant::now() < deadline, "Compact warning latch timed out");
+            assert!(Instant::now() < deadline, "voluntary Compact timed out");
             runtime.poll_edb().unwrap();
             if !runtime.is_advancing()
                 && runtime.edb_events().iter().any(|event| {
-                    matches!(event, Event::AssistResponse(response) if response.content == "continued after latched compact")
+                    matches!(event, Event::AssistResponse(response) if response.content == "continued after voluntary compact")
                 })
             {
                 break;
@@ -15095,11 +15076,6 @@ for line in sys.stdin:
         assert!(tool_call_succeeded(runtime.edb_events(), compact_call));
         assert!(runtime.edb_events().iter().any(|event| {
             matches!(event, Event::CompactStateUpdate(update) if update.state == CompactState::Completed)
-        }));
-        assert!(runtime.edb_events().iter().all(|event| {
-            !matches!(event, Event::ToolCallResult(result)
-                if result.tool_call_id == compact_call
-                    && result.detail.contains("compact_not_needed"))
         }));
         drop(runtime);
         std::fs::remove_dir_all(directory).unwrap();
@@ -15395,7 +15371,7 @@ for line in sys.stdin:
     }
 
     #[test]
-    fn compact_without_an_active_warning_fails_without_starting_a_lifecycle() {
+    fn compact_without_an_active_warning_is_accepted() {
         let mut config = test_model_config("test", &["unset"]);
         config.capabilities.context_window = 272_000;
         let mut models = ModelRuntime::from(ModelApi::new(config).unwrap());
@@ -15431,21 +15407,10 @@ for line in sys.stdin:
         };
 
         agent
-            .execute_tool(&mut edb, &call, &models, false, &mut |_| Ok(()))
+            .execute_tool(&mut edb, &call, &models, &mut |_| Ok(()))
             .unwrap();
 
-        assert!(!tool_call_succeeded(edb.events(), tool));
-        assert!(edb.events().iter().any(|event| {
-            matches!(
-                event,
-                Event::ToolCallResult(result)
-                    if result.tool_call_id == tool
-                        && result.state == ToolResultState::Failed
-                        && result.detail.contains("compact_not_needed")
-                        && result.detail.contains("136473/272000")
-                        && result.detail.contains("135527 usable tokens remaining")
-            )
-        }));
+        assert!(tool_call_succeeded(edb.events(), tool));
         assert!(
             edb.events()
                 .iter()
@@ -15816,5 +15781,77 @@ for line in sys.stdin:
                 .is_none_or(|content| !content.contains("PARTIAL-COMPACT-MUST-NOT-ENTER-CONTEXT"))
         }));
         MainAgent::new(None).supports_edb(&edb).unwrap();
+    }
+
+    #[test]
+    fn terminal_follow_up_result_and_unexecuted_siblings_close_before_follow_up_prompts() {
+        let output =
+            json!({"wait_reason":"follow_up", "state":"running", "tip":"Wait ended early"});
+        assert!(wait_result_requests_follow_up_yield(
+            terminal::INTERACT,
+            &output
+        ));
+        assert!(!wait_result_requests_follow_up_yield(
+            terminal::CREATE,
+            &output
+        ));
+        assert!(!wait_result_requests_follow_up_yield(
+            terminal::INTERACT,
+            &json!({"wait_reason":"command_completed"})
+        ));
+        let mut edb = EventDataBase::new();
+        let agent = MainAgent::new(None);
+        initialize_main_for_test(&agent, &mut edb);
+        let prompt = edb.append_user_prompt("run a command").unwrap();
+        edb.append_agent_turn(prompt, prompt, AgentTurnState::Started, "")
+            .unwrap();
+        let api = edb.append_api_requesting(prompt).unwrap();
+        edb.append_api_state(api, prompt, ApiState::Streaming, "")
+            .unwrap();
+        edb.append_assist_response(prompt, "", true).unwrap();
+        let wait = edb
+            .append_tool_call(
+                api,
+                prompt,
+                "wait",
+                terminal::INTERACT,
+                r#"{"session_id":"pty-1","input":[]}"#,
+            )
+            .unwrap();
+        let sibling = edb
+            .append_tool_call(
+                api,
+                prompt,
+                "later",
+                "File.Create",
+                r#"{"path":"not-created","content":"test"}"#,
+            )
+            .unwrap();
+        edb.append_api_state(api, prompt, ApiState::Completed, "")
+            .unwrap();
+        edb.append_tool_result(wait, ToolResultState::Succeeded, None, output.to_string())
+            .unwrap();
+        interrupt_tool_batch(&[sibling], &mut edb, &mut |_| Ok(())).unwrap();
+        agent.submit_user_prompt("first follow-up".into()).unwrap();
+        agent.submit_user_prompt("second follow-up".into()).unwrap();
+        let mut models = ModelRuntime::from(unused_model_api());
+        apply_running_inputs(
+            &agent.input_queue,
+            &mut None,
+            prompt,
+            &mut edb,
+            &mut models,
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        let catalog = ToolboxCatalog::native_for_test();
+        let context = main_model_context_with_toolboxes(&edb, &catalog, None).unwrap();
+        let serialized = serde_json::to_string(&context.messages).unwrap();
+        let result = serialized.find("Wait ended early").unwrap();
+        let first = serialized.find("first follow-up").unwrap();
+        let second = serialized.find("second follow-up").unwrap();
+        assert!(result < first && first < second);
+        assert!(edb.events().iter().any(|event| matches!(event, Event::ToolCallResult(result) if result.tool_call_id == sibling && result.state == ToolResultState::Interrupted)));
+        agent.supports_edb(&edb).unwrap();
     }
 }

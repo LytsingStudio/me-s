@@ -109,7 +109,7 @@ describe("shared WebUI tool presenters", () => {
   });
 
   test("distinguishes command completion, success and whole-terminal exit", () => {
-    for (const [reason, label] of Object.entries({ shell_ready: "终端已就绪", command_completed: "命令已结束", output_idle: "输出暂时静止", max_wait: "已达到最长等待", session_ended: "终端已结束" })) {
+    for (const [reason, label] of Object.entries({ shell_ready: "终端已就绪", command_completed: "命令已结束", output_idle: "输出暂时静止", max_wait: "已达到最长等待", follow_up: "等待因追问提前结束", session_ended: "终端已结束" })) {
       const html = presenters.renderDetails(presenters.describe("Terminal.Interact", {}, succeeded({
         state: "running", wait_reason: reason, exit_code: null,
         command_exit_code: reason === "command_completed" ? 7 : null,

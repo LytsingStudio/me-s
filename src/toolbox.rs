@@ -473,6 +473,23 @@ impl ToolboxRuntime {
         mut on_update: impl FnMut(ToolboxUpdate) -> Result<()>,
         mut should_cancel: impl FnMut() -> bool,
     ) -> std::result::Result<Value, ToolboxExecutionError> {
+        self.execute_cancellable_with_follow_up(
+            full_name,
+            arguments,
+            &mut on_update,
+            &mut should_cancel,
+            || Ok(false),
+        )
+    }
+
+    pub fn execute_cancellable_with_follow_up(
+        &self,
+        full_name: &str,
+        arguments: &str,
+        mut on_update: impl FnMut(ToolboxUpdate) -> Result<()>,
+        mut should_cancel: impl FnMut() -> bool,
+        mut has_follow_up: impl FnMut() -> Result<bool>,
+    ) -> std::result::Result<Value, ToolboxExecutionError> {
         if full_name == DISABLED_FILE_APPLY_PATCH {
             return Err(ToolboxExecutionError::Tool {
                 code: "tool_disabled".into(),
@@ -508,7 +525,19 @@ impl ToolboxRuntime {
                     retryable: true,
                     tip: None,
                 })?;
-        program.execute_cancellable(&tool.local_name, input, &mut on_update, &mut should_cancel)
+        program.execute_cancellable_with_follow_up(
+            &tool.local_name,
+            input,
+            &mut on_update,
+            &mut should_cancel,
+            &mut || {
+                if full_name == terminal::INTERACT {
+                    has_follow_up()
+                } else {
+                    Ok(false)
+                }
+            },
+        )
     }
 }
 
@@ -804,10 +833,25 @@ impl ToolboxClient {
         on_update: &mut dyn FnMut(ToolboxUpdate) -> Result<()>,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> std::result::Result<Value, ToolboxExecutionError> {
-        self.call(
+        self.execute_cancellable_with_follow_up(tool, input, on_update, should_cancel, &mut || {
+            Ok(false)
+        })
+    }
+
+    fn execute_cancellable_with_follow_up(
+        &self,
+        tool: &str,
+        input: Value,
+        on_update: &mut dyn FnMut(ToolboxUpdate) -> Result<()>,
+        should_cancel: &mut dyn FnMut() -> bool,
+        has_follow_up: &mut dyn FnMut() -> Result<bool>,
+    ) -> std::result::Result<Value, ToolboxExecutionError> {
+        self.call_with_timeout(
             json!({"cmd": "execute", "tool": tool, "input": input}),
             on_update,
             should_cancel,
+            has_follow_up,
+            None,
         )
     }
 
@@ -829,6 +873,7 @@ impl ToolboxClient {
             json!({"cmd": "execute", "tool": tool, "input": input}),
             &mut |_| Ok(()),
             &mut || false,
+            &mut || Ok(false),
             Some(timeout),
         )
     }
@@ -839,7 +884,7 @@ impl ToolboxClient {
         on_update: &mut dyn FnMut(ToolboxUpdate) -> Result<()>,
         should_cancel: &mut dyn FnMut() -> bool,
     ) -> std::result::Result<Value, ToolboxExecutionError> {
-        self.call_with_timeout(request, on_update, should_cancel, None)
+        self.call_with_timeout(request, on_update, should_cancel, &mut || Ok(false), None)
     }
 
     fn call_with_timeout(
@@ -847,6 +892,7 @@ impl ToolboxClient {
         mut request: Value,
         on_update: &mut dyn FnMut(ToolboxUpdate) -> Result<()>,
         should_cancel: &mut dyn FnMut() -> bool,
+        has_follow_up: &mut dyn FnMut() -> Result<bool>,
         timeout: Option<Duration>,
     ) -> std::result::Result<Value, ToolboxExecutionError> {
         let id = self.inner.next_id.fetch_add(1, Ordering::Relaxed);
@@ -880,7 +926,15 @@ impl ToolboxClient {
             transport.fail(&error.to_string());
             return Err(error);
         }
-        match receive_response(id, receiver, on_update, should_cancel, &transport, timeout) {
+        match receive_response(
+            id,
+            receiver,
+            on_update,
+            should_cancel,
+            has_follow_up,
+            &transport,
+            timeout,
+        ) {
             Err(ToolboxExecutionError::Protocol(message)) => {
                 transport.fail(&message);
                 Err(ToolboxExecutionError::Interrupted(message))
@@ -1262,10 +1316,12 @@ fn receive_response(
     receiver: Receiver<Incoming>,
     on_update: &mut dyn FnMut(ToolboxUpdate) -> Result<()>,
     should_cancel: &mut dyn FnMut() -> bool,
+    has_follow_up: &mut dyn FnMut() -> Result<bool>,
     transport: &ProcessTransport,
     timeout: Option<Duration>,
 ) -> std::result::Result<Value, ToolboxExecutionError> {
     let started = Instant::now();
+    let mut wait_interrupted = false;
     loop {
         if should_cancel() {
             transport.remove_pending(id);
@@ -1273,6 +1329,21 @@ fn receive_response(
             return Err(ToolboxExecutionError::Interrupted(
                 "toolbox request cancelled".into(),
             ));
+        }
+        if !wait_interrupted
+            && has_follow_up()
+                .map_err(|error| ToolboxExecutionError::Protocol(error.to_string()))?
+        {
+            let signal = format!("{}\n", json!({"id": id, "cmd": "interrupt_wait"}));
+            let mut writer = transport
+                .writer
+                .lock()
+                .map_err(|_| ToolboxExecutionError::Protocol("writer lock is poisoned".into()))?;
+            writer
+                .write_all(signal.as_bytes())
+                .and_then(|()| writer.flush())
+                .map_err(|error| ToolboxExecutionError::Protocol(error.to_string()))?;
+            wait_interrupted = true;
         }
         let wait = match timeout {
             Some(timeout) => {
@@ -1666,6 +1737,8 @@ struct WorkerRequest {
     tool: Option<String>,
     #[serde(default)]
     input: Value,
+    #[serde(skip)]
+    wait_interrupted: Arc<AtomicBool>,
 }
 
 pub fn run_default_terminal_toolbox(
@@ -1680,6 +1753,8 @@ pub fn run_default_terminal_toolbox(
         .manager
         .observer();
     let output = Arc::new(Mutex::new(output));
+    let wait_interrupts = Arc::new(Mutex::new(BTreeMap::<u64, Arc<AtomicBool>>::new()));
+    let execute_interrupts = Arc::clone(&wait_interrupts);
     let (execute_sender, execute_receiver) = mpsc::channel::<WorkerRequest>();
     let execute_state = Arc::clone(&state);
     let execute_observer = observer.clone();
@@ -1687,6 +1762,7 @@ pub fn run_default_terminal_toolbox(
     let execute_output = Arc::clone(&output);
     let executor = thread::spawn(move || {
         for request in execute_receiver {
+            let id = request.id;
             handle_terminal_execute(
                 request,
                 Arc::clone(&execute_state),
@@ -1694,6 +1770,9 @@ pub fn run_default_terminal_toolbox(
                 &execute_workspace,
                 Arc::clone(&execute_output),
             );
+            if let Ok(mut interrupts) = execute_interrupts.lock() {
+                interrupts.remove(&id);
+            }
         }
     });
     let (observer_sender, observer_receiver) = mpsc::channel::<WorkerRequest>();
@@ -1723,6 +1802,16 @@ pub fn run_default_terminal_toolbox(
                 return Err(format!("Terminal toolbox received invalid JSONL: {error}").into());
             }
         };
+        if request.cmd == "interrupt_wait" {
+            if let Some(wait) = wait_interrupts
+                .lock()
+                .map_err(|_| "Terminal wait lock is poisoned")?
+                .get(&request.id)
+            {
+                wait.store(true, Ordering::Release);
+            }
+            continue;
+        }
         if request.cmd == "execute" {
             if request
                 .tool
@@ -1733,6 +1822,12 @@ pub fn run_default_terminal_toolbox(
                     .send(request)
                     .map_err(|_| "Terminal toolbox observer stopped")?;
             } else {
+                if request.tool.as_deref() == Some("Interact") {
+                    wait_interrupts
+                        .lock()
+                        .map_err(|_| "Terminal wait lock is poisoned")?
+                        .insert(request.id, Arc::clone(&request.wait_interrupted));
+                }
                 execute_sender
                     .send(request)
                     .map_err(|_| "Terminal toolbox executor stopped")?;
@@ -1875,6 +1970,7 @@ fn handle_terminal_execute(
                         &state,
                         workspace,
                         &output,
+                        &mut || request.wait_interrupted.load(Ordering::Acquire),
                     )
                 })
         }
@@ -1892,6 +1988,7 @@ fn execute_terminal_request(
     state: &Mutex<DefaultTerminalState>,
     workspace: &Path,
     output: &Mutex<impl Write>,
+    has_follow_up: &mut dyn FnMut() -> bool,
 ) -> std::result::Result<Value, (&'static str, String, bool)> {
     let mut state = state.lock().map_err(|_| {
         (
@@ -1917,15 +2014,18 @@ fn execute_terminal_request(
             Ok(outcome.metadata())
         }
         TerminalRequest::Interact(request) => {
-            let outcome = state.manager.interact(&request).map_err(|error| {
-                let message = error.to_string();
-                let code = if message.contains("is not live") {
-                    "session_not_found"
-                } else {
-                    "execution_error"
-                };
-                (code, message, false)
-            })?;
+            let outcome = state
+                .manager
+                .interact_with_follow_up(&request, has_follow_up)
+                .map_err(|error| {
+                    let message = error.to_string();
+                    let code = if message.contains("is not live") {
+                        "session_not_found"
+                    } else {
+                        "execution_error"
+                    };
+                    (code, message, false)
+                })?;
             write_terminal_update(id, &outcome.update, output)?;
             if let Some(end) = &outcome.end
                 && let Some(status) = state.sessions.get_mut(&request.session_id)
@@ -2107,9 +2207,10 @@ fn terminal_output_schema(tool: &str) -> std::result::Result<Value, String> {
                 "state": {"type": "string", "enum": ["running", "exited", "killed", "lost"]},
                 "exit_code": {"type": ["integer", "null"]},
                 "truncated": {"type": "boolean"},
-                "wait_reason": {"type": "string", "enum": ["shell_ready", "command_completed", "output_idle", "max_wait", "session_ended"]},
+                "wait_reason": {"type": "string", "enum": ["shell_ready", "command_completed", "output_idle", "max_wait", "follow_up", "session_ended"]},
                 "command_exit_code": {"type": ["integer", "null"]},
-                "command_succeeded": {"type": ["boolean", "null"]}
+                "command_succeeded": {"type": ["boolean", "null"]},
+                "tip": {"type": "string"}
             },
             "additionalProperties": false
         })),
@@ -2149,7 +2250,7 @@ fn terminal_instructions(tool: &str) -> std::result::Result<&'static str, String
             "Choose a fixed PTY size and workspace-relative cwd. Returns the first structured terminal patch when initial shell readiness is confirmed, output becomes idle, or the maximum wait is reached. Check wait_reason before sending input.",
         ),
         "Interact" => Ok(
-            "Input actions execute once in exact order. Text actions write UTF-8 text; key actions represent Enter, Escape, control chords, navigation, and other semantic keys. An empty input list polls. The call can return before wait_ms when the submitted command batch is confirmed finished; otherwise it uses the quiet interval and maximum wait. Check wait_reason, command_succeeded and command_exit_code; command completion is distinct from shell session exit. Interpret returned terminal patches against the previous call baseline.",
+            "Input actions execute once in exact order. Text actions write UTF-8 text; key actions represent Enter, Escape, control chords, navigation, and other semantic keys. An empty input list polls. The call can return before wait_ms when the submitted command batch is confirmed finished. A user follow-up can also end the wait early: wait_reason=follow_up returns the current patch and a short tip without stopping the terminal command or closing the session. Address the follow-up before deciding whether to poll again. Otherwise the quiet interval and maximum wait apply. Check wait_reason, command_succeeded and command_exit_code; command completion is distinct from shell session exit. Interpret returned terminal patches against the previous call baseline.",
         ),
         "Status" => Ok("Status does not consume or reset the terminal patch baseline."),
         "List" => Ok(
@@ -3007,7 +3108,9 @@ for line in sys.stdin:
             r#"{"width":80,"height":20,"wait_ms":25,"max_wait_ms":1000}"#,
         )
         .unwrap();
-        let created = execute_terminal_request(41, create, &state, &workspace, &output).unwrap();
+        let created =
+            execute_terminal_request(41, create, &state, &workspace, &output, &mut || false)
+                .unwrap();
         assert_eq!(created["session_id"], "pty-41");
 
         let interact = terminal::parse_request(
@@ -3015,7 +3118,7 @@ for line in sys.stdin:
             r#"{"session_id":"pty-41","input":[{"type":"text","text":"printf 'toolbox-state-ok\\n'"},{"type":"key","key":"enter"}],"wait_ms":25,"max_wait_ms":1000}"#,
         )
         .unwrap();
-        execute_terminal_request(42, interact, &state, &workspace, &output).unwrap();
+        execute_terminal_request(42, interact, &state, &workspace, &output, &mut || false).unwrap();
         let frames = String::from_utf8(output.into_inner().unwrap())
             .unwrap()
             .lines()
@@ -3039,14 +3142,28 @@ for line in sys.stdin:
         let kill =
             terminal::parse_request(terminal::KILL, r#"{"session_id":"pty-41","grace_ms":100}"#)
                 .unwrap();
-        execute_terminal_request(43, kill, &state, &workspace, &Mutex::new(Vec::new())).unwrap();
+        execute_terminal_request(
+            43,
+            kill,
+            &state,
+            &workspace,
+            &Mutex::new(Vec::new()),
+            &mut || false,
+        )
+        .unwrap();
 
         let fresh_state = Mutex::new(DefaultTerminalState::new());
         let stale =
             terminal::parse_request(terminal::STATUS, r#"{"session_id":"pty-41"}"#).unwrap();
-        let error =
-            execute_terminal_request(44, stale, &fresh_state, &workspace, &Mutex::new(Vec::new()))
-                .unwrap_err();
+        let error = execute_terminal_request(
+            44,
+            stale,
+            &fresh_state,
+            &workspace,
+            &Mutex::new(Vec::new()),
+            &mut || false,
+        )
+        .unwrap_err();
         assert_eq!(error.0, "session_not_found");
         assert!(error.1.contains("Create a new session"));
         fs::remove_dir_all(workspace).unwrap();
@@ -3180,5 +3297,53 @@ for line in sys.stdin:
         fn flush(&mut self) -> std::io::Result<()> {
             Ok(())
         }
+    }
+
+    #[test]
+    fn terminal_follow_up_signals_the_active_request_without_cancelling_the_transport() {
+        let workspace = temporary_workspace("terminal-follow-up-client");
+        let script = workspace.join("Terminal.py");
+        fs::write(&script, r#"import json, sys
+pending = None
+signals = 0
+for line in sys.stdin:
+    request = json.loads(line)
+    if request['cmd'] == 'interrupt_wait':
+        assert pending == request['id']
+        signals += 1
+        print(json.dumps({'id': pending, 'type': 'result', 'output': {'wait_reason': 'follow_up', 'state': 'running'}}), flush=True)
+        pending = None
+    elif request.get('tool') == 'Interact':
+        pending = request['id']
+    else:
+        print(json.dumps({'id': request['id'], 'type': 'result', 'output': {'signals': signals}}), flush=True)
+"#).unwrap();
+        let python = Python312::resolve_at(&workspace.join("global")).unwrap();
+        let client = ToolboxClient::new(ProcessSpec {
+            python,
+            script,
+            workspace: workspace.clone(),
+            host: env::current_exe().unwrap(),
+            global_home: workspace.join("global"),
+        });
+        let started = Instant::now();
+        let result = client
+            .execute_cancellable_with_follow_up(
+                "Interact",
+                json!({}),
+                &mut |_| Ok(()),
+                &mut || false,
+                &mut || Ok(started.elapsed() >= Duration::from_millis(100)),
+            )
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert_eq!(result["wait_reason"], "follow_up");
+        assert_eq!(result["state"], "running");
+        let later = client
+            .execute("Status", json!({}), &mut |_| Ok(()))
+            .unwrap();
+        assert_eq!(later["signals"], 1);
+        client.shutdown();
+        fs::remove_dir_all(workspace).unwrap();
     }
 }

@@ -91,7 +91,9 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         requests.extend([
             json!({"id": 9, "cmd": "execute", "tool": "Create", "input": {"wait_ms": 1500, "max_wait_ms": 2000}}),
             json!({"id": 10, "cmd": "execute", "tool": "Interact", "input": {"session_id": "pty-9", "input": [{"type": "text", "text": "(exit 7)"}, {"type": "key", "key": "enter"}], "wait_ms": 1500, "max_wait_ms": 2000}}),
-            json!({"id": 11, "cmd": "execute", "tool": "Kill", "input": {"session_id": "pty-9"}}),
+            json!({"id": 11, "cmd": "execute", "tool": "Interact", "input": {"session_id": "pty-9", "input": [{"type": "text", "text": "printf 'FOLLOW-%s\\n' BEGIN; sleep 0.7; printf 'FOLLOW-%s\\n' END"}, {"type": "key", "key": "enter"}], "wait_ms": 5000, "max_wait_ms": 5000}}),
+            json!({"id": 12, "cmd": "execute", "tool": "Interact", "input": {"session_id": "pty-9", "wait_ms": 1500, "max_wait_ms": 2000}}),
+            json!({"id": 13, "cmd": "execute", "tool": "Kill", "input": {"session_id": "pty-9"}}),
         ]);
     }
     let mut stdin = child.stdin.take().unwrap();
@@ -105,10 +107,21 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         }
     });
     let mut frames = Vec::new();
+    let mut interrupted_text = String::new();
+    let mut polled_text = String::new();
     for request in requests {
         stdin.write_all(request.to_string().as_bytes()).unwrap();
         stdin.write_all(b"\n").unwrap();
         stdin.flush().unwrap();
+        if request["id"] == 11 {
+            thread::sleep(Duration::from_millis(150));
+            writeln!(stdin, "{}", json!({"id": 11, "cmd": "interrupt_wait"})).unwrap();
+            stdin.flush().unwrap();
+        } else if request["id"] == 12 {
+            // A late signal for the previous request cannot interrupt this poll.
+            writeln!(stdin, "{}", json!({"id": 11, "cmd": "interrupt_wait"})).unwrap();
+            stdin.flush().unwrap();
+        }
         loop {
             let line = receiver
                 .recv_timeout(Duration::from_secs(3))
@@ -116,6 +129,12 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
                 .unwrap();
             let frame: Value = serde_json::from_str(&line).unwrap();
             if frame["type"] == "update" {
+                if request["id"] == 11 {
+                    interrupted_text.push_str(&frame.to_string());
+                }
+                if request["id"] == 12 {
+                    polled_text.push_str(&frame.to_string());
+                }
                 continue;
             }
             assert_eq!(frame["type"], "result", "unexpected response: {frame}");
@@ -135,7 +154,7 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         .read_to_string(&mut stderr)
         .unwrap();
     assert!(status.success(), "Terminal.py failed: {}", stderr);
-    assert_eq!(frames.len(), if cfg!(unix) { 11 } else { 8 });
+    assert_eq!(frames.len(), if cfg!(unix) { 13 } else { 8 });
     assert!(
         frames
             .iter()
@@ -164,6 +183,20 @@ fn generated_terminal_python_program_runs_as_an_independent_jsonl_toolbox() {
         assert_eq!(frames[9]["output"]["command_exit_code"], 7);
         assert_eq!(frames[9]["output"]["command_succeeded"], false);
         assert_eq!(frames[9]["output"]["state"], "running");
+        assert_eq!(frames[10]["output"]["wait_reason"], "follow_up");
+        assert_eq!(frames[10]["output"]["state"], "running");
+        assert!(
+            frames[10]["output"]["tip"]
+                .as_str()
+                .unwrap()
+                .contains("not stopped")
+        );
+        assert!(frames[10]["output"]["command_succeeded"].is_null());
+        assert!(interrupted_text.contains("FOLLOW-BEGIN"));
+        assert!(!interrupted_text.contains("FOLLOW-END"));
+        assert_eq!(frames[11]["output"]["wait_reason"], "command_completed");
+        assert!(polled_text.contains("FOLLOW-END"));
+        assert!(!polled_text.contains("FOLLOW-BEGIN"));
     }
     fs::remove_dir_all(workspace).unwrap();
 }

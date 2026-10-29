@@ -604,7 +604,7 @@
   }
 
   function terminalWaitFields(value) {
-    const reasons = { shell_ready: "终端已就绪", command_completed: "命令已结束", output_idle: "输出暂时静止", max_wait: "已达到最长等待", session_ended: "终端已结束" };
+    const reasons = { shell_ready: "终端已就绪", command_completed: "命令已结束", output_idle: "输出暂时静止", max_wait: "已达到最长等待", follow_up: "等待因追问提前结束", session_ended: "终端已结束" };
     return [["等待结果", reasons[value.wait_reason]], ["命令结果", typeof value.command_succeeded === "boolean" ? (value.command_succeeded ? "成功" : "失败") : ""], ["命令退出码", value.command_exit_code]];
   }
 
