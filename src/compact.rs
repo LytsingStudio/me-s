@@ -15,23 +15,23 @@ pub const EXCLUSIVE_CHATBOT_TIP: &str = "Finish any other conversational action 
 
 const TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a detailed continuation summary.
 
-Choose when to compact based on the conversation and the work ahead; a runtime warning is not required. First finish the current atomic action and complete any genuinely necessary WorkMap Current or Memory maintenance in earlier model responses. If WorkMap already needs no maintenance, do not mutate it merely because Compact is approaching.
+You may call Compact only when the user explicitly requests context compaction or you have received a context-threshold warning for the current context. Otherwise, do not call Compact. The same two allowed conditions apply to retries, including after a rejected mixed batch. A long conversation, a completed task, anticipated future work, or your own estimate of context usage is not permission to compact. First finish the current atomic action and complete any genuinely necessary WorkMap Current or Memory maintenance in earlier model responses. If WorkMap already needs no maintenance, do not mutate it merely because Compact is approaching.
 
 The response that requests Compact must contain exactly one direct tool call: Compact with `{}`, and nothing else. It must not contain prose, WorkMap.Read, a WorkMap maintenance call, an unrelated tool, another Compact call, a sequential or parallel sibling, or a batch wrapper. If Compact appears with any other tool call, the runtime rejects the entire batch before any tool executes and returns `compact_must_be_only_tool_call`; finish necessary maintenance first, then call Compact alone in a later response.
 
-After accepting a valid lone call, the runtime performs context compaction and activates the resulting continuation summary only after successful completion. Only a successful compaction continues the same Agent turn. WorkMap survives independently of the summary. After compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. If summary generation fails or is interrupted, the pre-compaction conversation, WorkMap, and accepted Compact exchange remain effective; the current Agent turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which you may retry. Do not call WorkMap.Read after such a failure; the post-Compact Read rule applies only after success. Do not narrate or imitate compaction in assistant text."#;
+After accepting a valid lone call, the runtime performs context compaction and activates the resulting continuation summary only after successful completion. Only a successful compaction continues the same Agent turn. WorkMap survives independently of the summary. After compaction succeeds, call WorkMap.Read before any further non-WorkMap action and repeat any final audit. If summary generation fails or is interrupted, the pre-compaction conversation, WorkMap, and accepted Compact exchange remain effective; the current Agent turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn; retry only when the user explicitly requests context compaction or you have received a context-threshold warning for the current context. Do not call WorkMap.Read after such a failure; the post-Compact Read rule applies only after success. Do not narrate or imitate compaction in assistant text."#;
 
-const INSTRUCTIONS: &str = r#"Call with an empty object when you decide that a continuation summary would help manage the conversation. If any other action or tool call is needed first, complete it in an earlier model response. The response requesting Compact must contain exactly one direct Compact tool call and nothing else: no prose, no sibling tool call, and no parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime attempts context compaction. Only successful summarization continues the current turn. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective, the current turn stops without an automatic retry, and another attempt requires a later user message."#;
+const INSTRUCTIONS: &str = r#"Call with an empty object only when the user explicitly requests context compaction or you have received a context-threshold warning for the current context. Otherwise, do not call Compact. The same two allowed conditions apply to retries, including after a rejected mixed batch. If any other action or tool call is needed first, complete it in an earlier model response. The response requesting Compact must contain exactly one direct Compact tool call and nothing else: no prose, no sibling tool call, and no parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime attempts context compaction. Only successful summarization continues the current turn. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective, the current turn stops without an automatic retry, and another attempt requires a later user message and one of the same two allowed conditions."#;
 
 const CHATBOT_TOOLBOX_BRIEF: &str = r#"Compact replaces the conversation accumulated so far with a concise continuation summary.
 
-Choose when to compact based on the conversation; a runtime warning is not required. Finish any other conversational action first. Then send a later model response containing exactly one direct Compact tool call with `{}` and nothing else: no prose, sibling tool, second Compact call, or parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime creates a conversational continuity summary and continues the same user turn only if summarization succeeds. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective; the current user turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn in which you may retry."#;
+You may call Compact only when the user explicitly requests context compaction or you have received a context-threshold warning for the current context. Otherwise, do not call Compact. The same two allowed conditions apply to retries, including after a rejected mixed batch. A long conversation, a completed task, anticipated future work, or your own estimate of context usage is not permission to compact. Finish any other conversational action first. Then send a later model response containing exactly one direct Compact tool call with `{}` and nothing else: no prose, sibling tool, second Compact call, or parallel or batch wrapper. A mixed batch is rejected before any tool executes. After a valid lone call is accepted, the runtime creates a conversational continuity summary and continues the same user turn only if summarization succeeds. If summarization fails or is interrupted, the previous conversation and accepted Compact exchange remain effective; the current user turn stops, and the runtime makes no automatic model request or Compact retry. A later user message starts a new turn; retry only when the user explicitly requests context compaction or you have received a context-threshold warning for the current context."#;
 const LOW_CONTEXT_WINDOW_MAX: u64 = 384_000;
 const MEDIUM_CONTEXT_WINDOW_MAX: u64 = 680_000;
 const HARD_USED_CONTEXT_LIMIT: u64 = 680_000;
-const ROUTE: &str = "Use when you decide to summarize the accumulated conversation. Finish any earlier required actions, then request compaction with exactly one direct Compact tool call and nothing else.";
+const ROUTE: &str = "Use only when the user explicitly requests context compaction or you have received a context-threshold warning for the current context. Otherwise, do not call Compact. Finish any earlier required actions, then request compaction with exactly one direct Compact tool call and nothing else.";
 const EXAMPLES: &str = r#"Input: {}
-Meaning: after every other required action is already finished, send one response whose only content is this direct Compact tool call."#;
+Meaning: the user explicitly requests context compaction or you have received a context-threshold warning for the current context. After every other required action is already finished, send one response whose only content is this direct Compact tool call."#;
 
 pub const MULTI_TURN_ANALYSIS_PROMPT: &str = r#"CRITICAL: Respond with raw text only. Do not call any tools.
 
@@ -713,6 +713,47 @@ mod tests {
         assert!(!chatbot_warning.contains("WorkMap"));
         assert!(!chatbot_warning.contains("CURRENT ACTIVE MEMORY"));
         assert!(!chatbot_warning.contains("Use the durable current rule"));
+    }
+
+    #[test]
+    fn compact_catalog_allows_only_user_requests_or_context_warnings() {
+        for (tools, brief) in [catalog_parts(), chatbot_catalog_parts()] {
+            for text in [
+                brief.1.as_str(),
+                tools[0].instructions.as_str(),
+                tools[0].route.as_str(),
+            ] {
+                assert!(text.contains("only when the user explicitly requests context compaction"));
+                assert!(text.contains("context-threshold warning for the current context"));
+                assert!(text.contains("Otherwise, do not call Compact"));
+                assert!(!text.contains("warning is not required"));
+                assert!(!text.contains("when you decide"));
+            }
+            assert!(
+                brief
+                    .1
+                    .contains("your own estimate of context usage is not permission")
+            );
+            assert!(
+                brief
+                    .1
+                    .contains("same two allowed conditions apply to retries")
+            );
+            assert!(
+                tools[0]
+                    .examples
+                    .contains("the user explicitly requests context compaction")
+            );
+            assert!(
+                tools[0]
+                    .examples
+                    .contains("context-threshold warning for the current context")
+            );
+        }
+        assert!(
+            INSTRUCTIONS
+                .contains("a later user message and one of the same two allowed conditions")
+        );
     }
 
     #[test]
