@@ -597,6 +597,10 @@ mod tests {
             normalize_endpoint("https://example.com/base/").unwrap(),
             "https://example.com/base"
         );
+        assert_eq!(
+            normalize_endpoint("[2001:db8::1]:39001/").unwrap(),
+            "http://[2001:db8::1]:39001"
+        );
         assert!(normalize_endpoint("ftp://example.com").is_err());
         assert!(normalize_endpoint("http://user:pass@example.com").is_err());
     }

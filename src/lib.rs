@@ -20,6 +20,7 @@ pub mod gateway_state;
 pub mod gateway_webui;
 mod host_files;
 mod host_path;
+mod http_listener;
 pub mod image_toolbox;
 pub mod managed_child;
 pub mod managed_protocol;

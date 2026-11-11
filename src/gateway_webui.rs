@@ -35,7 +35,7 @@ pub struct GatewayWebUiServer {
     address: String,
     port: u16,
     shutdown: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
 }
 
 impl GatewayWebUiServer {
@@ -51,7 +51,7 @@ impl GatewayWebUiServer {
 impl Drop for GatewayWebUiServer {
     fn drop(&mut self) {
         self.shutdown.store(true, Ordering::Release);
-        if let Some(worker) = self.worker.take() {
+        for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
     }
@@ -66,7 +66,7 @@ pub fn start(
         if port == 0 {
             return Err("WebUI port must be nonzero".into());
         }
-        let server = Server::http((GATEWAY_BIND_ADDRESS, port))
+        let server = crate::http_listener::bind(port)
             .map_err(|error| format!("failed to bind me-gateway port {port}: {error}"))?;
         return start_with_server(gateway, server, port, passkey);
     }
@@ -100,51 +100,75 @@ fn start_from(
 
 fn start_with_server(
     gateway: Arc<Gateway>,
-    server: Server,
+    servers: Vec<Server>,
     port: u16,
     passkey: Option<&str>,
 ) -> Result<GatewayWebUiServer> {
-    let address = format!("http://{GATEWAY_BIND_ADDRESS}:{port}");
+    let port = servers[0]
+        .server_addr()
+        .to_ip()
+        .map(|address| address.port())
+        .unwrap_or(port);
+    let address = format!("http://{}", servers[0].server_addr());
     let auth = Arc::new(WebSessionAuth::new(SESSION_COOKIE_PREFIX, port, passkey)?);
     let encrypted_http = Arc::new(EncryptedHttp::default());
     let codex_usage = Arc::new(crate::codex_usage::CodexUsage::start(true)?);
     let shutdown = Arc::new(AtomicBool::new(false));
-    let worker_shutdown = Arc::clone(&shutdown);
-    let worker = thread::Builder::new()
-        .name("me-gateway-webui".into())
-        .spawn(move || {
-            while !worker_shutdown.load(Ordering::Acquire) {
-                match server.recv_timeout(Duration::from_millis(100)) {
-                    Ok(Some(request)) => {
-                        let gateway = Arc::clone(&gateway);
-                        let auth = Arc::clone(&auth);
-                        let encrypted_http = Arc::clone(&encrypted_http);
-                        let codex_usage = Arc::clone(&codex_usage);
-                        let _ = thread::Builder::new()
-                            .name("me-gateway-request".into())
-                            .spawn(move || {
-                                serve(request, gateway, auth, codex_usage, encrypted_http)
-                            });
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("warning: me-gateway WebUI listener error; retrying: {error}");
-                        thread::sleep(Duration::from_millis(100));
+    let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(servers.len());
+    for server in servers {
+        let worker_shutdown = Arc::clone(&shutdown);
+        let gateway = Arc::clone(&gateway);
+        let auth = Arc::clone(&auth);
+        let encrypted_http = Arc::clone(&encrypted_http);
+        let codex_usage = Arc::clone(&codex_usage);
+        let worker = thread::Builder::new()
+            .name("me-gateway-webui".into())
+            .spawn(move || {
+                while !worker_shutdown.load(Ordering::Acquire) {
+                    match server.recv_timeout(Duration::from_millis(100)) {
+                        Ok(Some(request)) => {
+                            let gateway = Arc::clone(&gateway);
+                            let auth = Arc::clone(&auth);
+                            let encrypted_http = Arc::clone(&encrypted_http);
+                            let codex_usage = Arc::clone(&codex_usage);
+                            let _ = thread::Builder::new()
+                                .name("me-gateway-request".into())
+                                .spawn(move || {
+                                    serve(request, gateway, auth, codex_usage, encrypted_http)
+                                });
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!(
+                                "warning: me-gateway WebUI listener error; retrying: {error}"
+                            );
+                            thread::sleep(Duration::from_millis(100));
+                        }
                     }
                 }
+            });
+        match worker {
+            Ok(worker) => workers.push(worker),
+            Err(error) => {
+                shutdown.store(true, Ordering::Release);
+                for worker in workers {
+                    let _ = worker.join();
+                }
+                return Err(error.into());
             }
-        })?;
+        }
+    }
     Ok(GatewayWebUiServer {
         address,
         port,
         shutdown,
-        worker: Some(worker),
+        workers,
     })
 }
 
-fn bind_first_available(first_port: u16) -> Result<(Server, u16)> {
+fn bind_first_available(first_port: u16) -> Result<(Vec<Server>, u16)> {
     for port in first_port..=u16::MAX {
-        match Server::http((GATEWAY_BIND_ADDRESS, port)) {
+        match crate::http_listener::bind(port) {
             Ok(server) => return Ok((server, port)),
             Err(error)
                 if bind_error_kind(error.as_ref()) == Some(std::io::ErrorKind::AddrInUse) => {}
@@ -638,6 +662,21 @@ fn no_store() -> Header {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn occupied_gateway_ports_in_either_family_advance_together() {
+        for host in ["0.0.0.0", "::1"] {
+            let occupied = std::net::TcpListener::bind((host, 0)).unwrap();
+            let occupied_port = occupied.local_addr().unwrap().port();
+            let (servers, selected_port) = bind_first_available(occupied_port).unwrap();
+            assert!(selected_port > occupied_port);
+            assert!(
+                servers
+                    .iter()
+                    .all(|server| server.server_addr().to_ip().unwrap().port() == selected_port)
+            );
+        }
+    }
 
     #[test]
     fn auth_status_reports_running_product_version() {

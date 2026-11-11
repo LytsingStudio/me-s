@@ -186,7 +186,7 @@ pub struct WebUiServer {
     address: String,
     port: u16,
     shutdown: Arc<AtomicBool>,
-    worker: Option<JoinHandle<()>>,
+    workers: Vec<JoinHandle<()>>,
     _remote_control: Arc<RemoteControlRuntime>,
     _session_terminals: Arc<SessionTerminalRegistry>,
     _host_files: Arc<HostFileManager>,
@@ -207,7 +207,7 @@ impl Drop for WebUiServer {
         self.shutdown.store(true, Ordering::Release);
         self._remote_control.shutdown();
         self._host_files.shutdown();
-        if let Some(worker) = self.worker.take() {
+        for worker in self.workers.drain(..) {
             let _ = worker.join();
         }
     }
@@ -223,7 +223,7 @@ pub fn start(
         if port == 0 {
             return Err("WebUI port must be nonzero".into());
         }
-        let server = Server::http((DEFAULT_BIND_ADDRESS, port))
+        let server = crate::http_listener::bind(port)
             .map_err(|error| format!("failed to bind WebUI port {port}: {error}"))?;
         return start_with_server(backend, commands, server, port, passkey, None);
     }
@@ -248,12 +248,12 @@ pub fn start_managed(
 ) -> Result<WebUiServer> {
     let server = Server::http((MANAGED_BIND_ADDRESS, port))
         .map_err(|error| format!("failed to bind managed WebUI: {error}"))?;
-    start_with_server(backend, commands, server, port, None, Some(access))
+    start_with_server(backend, commands, vec![server], port, None, Some(access))
 }
 
-fn bind_first_available(first_port: u16) -> Result<(Server, u16)> {
+fn bind_first_available(first_port: u16) -> Result<(Vec<Server>, u16)> {
     for port in first_port..=u16::MAX {
-        match Server::http((DEFAULT_BIND_ADDRESS, port)) {
+        match crate::http_listener::bind(port) {
             Ok(server) => return Ok((server, port)),
             Err(error) if bind_error_kind(error.as_ref()) == Some(io::ErrorKind::AddrInUse) => {}
             Err(error) => {
@@ -278,11 +278,12 @@ fn bind_error_kind(error: &(dyn std::error::Error + 'static)) -> Option<io::Erro
 fn start_with_server(
     backend: impl UiBackend + 'static,
     commands: impl UiCommandGateway + 'static,
-    server: Server,
+    servers: Vec<Server>,
     requested_port: u16,
     passkey: Option<&str>,
     managed: Option<ManagedWebAccess>,
 ) -> Result<WebUiServer> {
+    let server = &servers[0];
     let port = server
         .server_addr()
         .to_ip()
@@ -313,70 +314,91 @@ fn start_with_server(
     let codex_usage = Arc::new(crate::codex_usage::CodexUsage::start(managed.is_none())?);
     let managed = Arc::new(managed);
     let shutdown = Arc::new(AtomicBool::new(false));
-    let worker_shutdown = Arc::clone(&shutdown);
-    let worker_remote_control = Arc::clone(&remote_control);
-    let worker_session_terminals = Arc::clone(&session_terminals);
-    let worker_host_files = Arc::clone(&host_files);
-    let worker = thread::Builder::new()
-        .name("me-webui".into())
-        .spawn(move || {
-            let mut last_reconcile_error = None;
-            while !worker_shutdown.load(Ordering::Acquire) {
-                worker_remote_control.expire_if_stale();
-                let reconcile = backend
-                    .session_terminal_agent_ids()
-                    .and_then(|agent_ids| worker_session_terminals.reconcile(agent_ids));
-                match reconcile {
-                    Ok(()) => last_reconcile_error = None,
-                    Err(error) => {
-                        let error = error.to_string();
-                        if last_reconcile_error.as_deref() != Some(error.as_str()) {
-                            eprintln!("warning: SessionTerminal reconcile failed: {error}");
-                            last_reconcile_error = Some(error);
+    let mut workers: Vec<JoinHandle<()>> = Vec::with_capacity(servers.len());
+    for (index, server) in servers.into_iter().enumerate() {
+        let worker_shutdown = Arc::clone(&shutdown);
+        let worker_remote_control = Arc::clone(&remote_control);
+        let worker_session_terminals = Arc::clone(&session_terminals);
+        let worker_host_files = Arc::clone(&host_files);
+        let backend = Arc::clone(&backend);
+        let commands = Arc::clone(&commands);
+        let auth = Arc::clone(&auth);
+        let encrypted_http = Arc::clone(&encrypted_http);
+        let managed = Arc::clone(&managed);
+        let codex_usage = Arc::clone(&codex_usage);
+        let worker = thread::Builder::new()
+            .name("me-webui".into())
+            .spawn(move || {
+                let mut last_reconcile_error = None;
+                while !worker_shutdown.load(Ordering::Acquire) {
+                    if index == 0 {
+                        worker_remote_control.expire_if_stale();
+                        let reconcile = backend
+                            .session_terminal_agent_ids()
+                            .and_then(|agent_ids| worker_session_terminals.reconcile(agent_ids));
+                        match reconcile {
+                            Ok(()) => last_reconcile_error = None,
+                            Err(error) => {
+                                let error = error.to_string();
+                                if last_reconcile_error.as_deref() != Some(error.as_str()) {
+                                    eprintln!("warning: SessionTerminal reconcile failed: {error}");
+                                    last_reconcile_error = Some(error);
+                                }
+                            }
+                        }
+                    }
+                    match server.recv_timeout(Duration::from_millis(100)) {
+                        Ok(Some(request)) => {
+                            let backend = Arc::clone(&backend);
+                            let commands = Arc::clone(&commands);
+                            let auth = Arc::clone(&auth);
+                            let encrypted_http = Arc::clone(&encrypted_http);
+                            let managed = Arc::clone(&managed);
+                            let codex_usage = Arc::clone(&codex_usage);
+                            let remote_control = Arc::clone(&worker_remote_control);
+                            let session_terminals = Arc::clone(&worker_session_terminals);
+                            let host_files = Arc::clone(&worker_host_files);
+                            let _ = thread::Builder::new()
+                                .name("me-webui-request".into())
+                                .spawn(move || {
+                                    serve(
+                                        request,
+                                        backend.as_ref(),
+                                        commands.as_ref(),
+                                        auth.as_ref(),
+                                        encrypted_http.as_ref(),
+                                        codex_usage.as_ref(),
+                                        managed.as_ref().as_ref(),
+                                        remote_control.as_ref(),
+                                        session_terminals.as_ref(),
+                                        host_files.as_ref(),
+                                    );
+                                });
+                        }
+                        Ok(None) => {}
+                        Err(error) => {
+                            eprintln!("warning: WebUI listener error; retrying: {error}");
+                            thread::sleep(Duration::from_millis(100));
                         }
                     }
                 }
-                match server.recv_timeout(Duration::from_millis(100)) {
-                    Ok(Some(request)) => {
-                        let backend = Arc::clone(&backend);
-                        let commands = Arc::clone(&commands);
-                        let auth = Arc::clone(&auth);
-                        let encrypted_http = Arc::clone(&encrypted_http);
-                        let managed = Arc::clone(&managed);
-                        let codex_usage = Arc::clone(&codex_usage);
-                        let remote_control = Arc::clone(&worker_remote_control);
-                        let session_terminals = Arc::clone(&worker_session_terminals);
-                        let host_files = Arc::clone(&worker_host_files);
-                        let _ = thread::Builder::new()
-                            .name("me-webui-request".into())
-                            .spawn(move || {
-                                serve(
-                                    request,
-                                    backend.as_ref(),
-                                    commands.as_ref(),
-                                    auth.as_ref(),
-                                    encrypted_http.as_ref(),
-                                    codex_usage.as_ref(),
-                                    managed.as_ref().as_ref(),
-                                    remote_control.as_ref(),
-                                    session_terminals.as_ref(),
-                                    host_files.as_ref(),
-                                );
-                            });
-                    }
-                    Ok(None) => {}
-                    Err(error) => {
-                        eprintln!("warning: WebUI listener error; retrying: {error}");
-                        thread::sleep(Duration::from_millis(100));
-                    }
+            });
+        match worker {
+            Ok(worker) => workers.push(worker),
+            Err(error) => {
+                shutdown.store(true, Ordering::Release);
+                for worker in workers {
+                    let _ = worker.join();
                 }
+                return Err(error.into());
             }
-        })?;
+        }
+    }
     Ok(WebUiServer {
         address,
         port,
         shutdown,
-        worker: Some(worker),
+        workers,
         _remote_control: remote_control,
         _session_terminals: session_terminals,
         _host_files: host_files,
@@ -2644,6 +2666,85 @@ mod tests {
         directory
     }
 
+    #[test]
+    fn public_webui_serves_ipv4_and_ipv6_with_shared_authentication() {
+        struct NoCommands;
+        impl UiCommandGateway for NoCommands {
+            fn submit(&self, _: UiCommand) -> Result<UiCommandReceipt> {
+                panic!("network checks must not submit commands")
+            }
+        }
+        let directory = workspace();
+        let mut backend = sync_test_backend_for_orchestrator(
+            Vec::new(),
+            1,
+            crate::event::AgentKind::Primary,
+            "chatbot",
+        );
+        backend.0.environment = Arc::new(UiEnvironment {
+            workspace: directory.clone(),
+            os: "test".into(),
+            arch: "test".into(),
+        });
+        let server = start_from(backend.clone(), NoCommands, 0, Some("ipv6-test")).unwrap();
+        assert!(start(backend, NoCommands, None, Some(server.port())).is_err());
+        let client = crate::encrypted_http::test_client::Client::new();
+        let ipv4 = format!("http://127.0.0.1:{}", server.port());
+        let ipv6 = format!("http://[::1]:{}", server.port());
+        for address in [&ipv4, &ipv6] {
+            assert_eq!(
+                client.get(format!("{address}/")).send().unwrap().status(),
+                200
+            );
+            assert_eq!(
+                client
+                    .get(format!("{address}/api/snapshot"))
+                    .send()
+                    .unwrap()
+                    .status(),
+                401
+            );
+        }
+        let login = client
+            .post(format!("{ipv6}/api/auth/login"))
+            .json(&json!({
+                "password": "ipv6-test", "browser_port": server.port(),
+            }))
+            .send()
+            .unwrap();
+        assert_eq!(login.status(), 200);
+        let cookie = login
+            .headers()
+            .get(reqwest::header::SET_COOKIE)
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .split(';')
+            .next()
+            .unwrap()
+            .to_owned();
+        for address in [&ipv4, &ipv6] {
+            assert_eq!(
+                client
+                    .get(format!("{address}/api/snapshot"))
+                    .header(reqwest::header::COOKIE, &cookie)
+                    .send()
+                    .unwrap()
+                    .status(),
+                200
+            );
+        }
+        let port = server.port();
+        drop(server);
+        for host in ["127.0.0.1", "[::1]"] {
+            let address = format!("{host}:{port}").parse().unwrap();
+            assert!(
+                std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err()
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
     fn sync_test_events(count: u64) -> Vec<Event> {
         (1..=count)
             .map(|id| {
@@ -3735,12 +3836,17 @@ mod tests {
 
     #[test]
     fn occupied_webui_port_advances_to_the_next_available_port() {
-        let occupied = TcpListener::bind((DEFAULT_BIND_ADDRESS, 0)).unwrap();
-        let occupied_port = occupied.local_addr().unwrap().port();
-        let (server, selected_port) = bind_first_available(occupied_port).unwrap();
-
-        assert!(selected_port > occupied_port);
-        assert_eq!(server.server_addr().to_ip().unwrap().port(), selected_port);
+        for host in [DEFAULT_BIND_ADDRESS, "::1"] {
+            let occupied = TcpListener::bind((host, 0)).unwrap();
+            let occupied_port = occupied.local_addr().unwrap().port();
+            let (servers, selected_port) = bind_first_available(occupied_port).unwrap();
+            assert!(selected_port > occupied_port);
+            assert!(
+                servers
+                    .iter()
+                    .all(|server| server.server_addr().to_ip().unwrap().port() == selected_port)
+            );
+        }
     }
 
     #[test]

@@ -213,6 +213,52 @@ fn stop_gateway(child: &mut Child) {
         thread::sleep(Duration::from_millis(50));
     }
 }
+#[cfg(unix)]
+#[test]
+fn gateway_ipv6_shares_authentication_and_proxies_the_managed_workspace() {
+    let (_temporary, root, config_home) = prepare(true);
+    let (mut gateway, ipv4) = spawn_gateway(&root, &config_home);
+    let port = reqwest::Url::parse(&ipv4).unwrap().port().unwrap();
+    let ipv6 = format!("http://[::1]:{port}");
+    let http = client();
+    for address in [&ipv4, &ipv6] {
+        assert_eq!(
+            http.get(format!("{address}/")).send().unwrap().status(),
+            200
+        );
+        assert_eq!(
+            http.get(format!("{address}/api/gateway/state"))
+                .send()
+                .unwrap()
+                .status(),
+            401
+        );
+    }
+    let cookie = login(&ipv6);
+    for address in [&ipv4, &ipv6] {
+        let state = get_state(address, &cookie);
+        assert!(
+            state["workspaces"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|workspace| workspace["id"] == "chat")
+        );
+        let response = http
+            .get(format!("{address}/api/workspaces/chat/snapshot"))
+            .header(reqwest::header::COOKIE, &cookie)
+            .send()
+            .unwrap();
+        assert_eq!(response.status(), 200);
+        let snapshot: serde_json::Value = response.json().unwrap();
+        assert!(snapshot["agents"].is_array());
+    }
+    stop_gateway(&mut gateway);
+    for host in ["127.0.0.1", "[::1]"] {
+        let address = format!("{host}:{port}").parse().unwrap();
+        assert!(std::net::TcpStream::connect_timeout(&address, Duration::from_secs(1)).is_err());
+    }
+}
 
 #[cfg(unix)]
 #[test]
