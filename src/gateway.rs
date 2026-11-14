@@ -754,6 +754,7 @@ fn validate_proxy_path(path: &str) -> Result<()> {
     let file_post = matches!(
         path,
         "files/list"
+            | "files/preview"
             | "files/mkdir"
             | "files/rename"
             | "files/jobs/prepare"
@@ -854,6 +855,7 @@ mod tests {
             "remote-control/input",
             "remote-control/release",
             "files/list",
+            "files/preview",
             "files/mkdir",
             "files/rename",
             "files/jobs/prepare",
@@ -898,6 +900,8 @@ mod tests {
             "remote-control/frame?after=1",
             "files",
             "files/list/extra",
+            "files/preview/extra",
+            "files/preview?path=secret",
             "files/jobs/run",
             "files/downloads//content",
             "files/downloads/../content",

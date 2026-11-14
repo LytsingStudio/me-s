@@ -148,9 +148,9 @@
         if (dialogAction) this.closeDialog(null);
       });
       this.container.addEventListener("dblclick", (event) => {
-        if (Date.now() < this.ignoreDblClickUntil) return;
+        if (Date.now() < this.ignoreDblClickUntil || event.target.closest("button,input")) return;
         const row = event.target.closest(".file-manager-entry");
-        if (row?.dataset.navigable === "true") void this.navigate(row.dataset.path, false);
+        if (row) void this.openEntry(row.dataset.path);
       });
       this.container.addEventListener("pointerdown", (event) => this.handleTouchPointerDown(event));
       this.container.addEventListener("pointermove", (event) => this.handleTouchPointerMove(event));
@@ -180,6 +180,20 @@
         const values = Object.fromEntries(new FormData(this.dialogForm).entries());
         this.closeDialog(values);
       });
+      this.dialogForm.addEventListener("keydown", (event) => {
+        if (!this.dialogForm.classList.contains("file-preview-dialog")) return;
+        if (event.key === "Escape") { event.preventDefault(); this.closeDialog(null); }
+        if (event.key === "Tab") {
+          const controls = [...this.dialogForm.querySelectorAll('header button, .file-preview-body a[href]')];
+          const target = event.shiftKey ? controls[controls.length - 1] : controls[0];
+          if (document.activeElement === (event.shiftKey ? controls[0] : controls[controls.length - 1])) {
+            event.preventDefault(); target?.focus();
+          }
+        }
+      });
+      this.dialogBackdrop.addEventListener("click", (event) => {
+        if (event.target === this.dialogBackdrop && this.dialogForm.classList.contains("file-preview-dialog")) this.closeDialog(null);
+      });
     }
 
     resetTouchGesture() {
@@ -196,7 +210,6 @@
       this.touchPointer = {
         pointerId: event.pointerId,
         path: row.dataset.path,
-        navigable: row.dataset.navigable === "true",
         x: event.clientX,
         y: event.clientY,
         moved: false,
@@ -221,13 +234,13 @@
       const previous = this.lastTouchTap;
       if (previous?.path === gesture.path && now - previous.at <= TOUCH_DOUBLE_TAP_MS) {
         this.lastTouchTap = null;
-        if (!gesture.navigable || this.state?.loading) return;
+        if (this.state?.loading) return;
         this.suppressTouchClickPath = gesture.path;
         this.ignoreDblClickUntil = now + TOUCH_DOUBLE_TAP_MS;
         setTimeout(() => {
           if (this.suppressTouchClickPath === gesture.path) this.suppressTouchClickPath = null;
         }, 0);
-        void this.navigate(gesture.path, false);
+        void this.openEntry(gesture.path);
         return;
       }
       this.lastTouchTap = { path: gesture.path, at: now };
@@ -249,6 +262,61 @@
       } catch (error) {
         if (error.status === 401) this.onUnauthorized();
         throw error;
+      }
+    }
+
+    async openEntry(path) {
+      if (!this.state || this.state.loading || this.dialogResolve) return;
+      const entry = this.state.entries.find((item) => item.path === path);
+      if (!entry) return;
+      if (entry.navigable) return this.navigate(path, false);
+      return this.previewFile(entry);
+    }
+
+    async previewFile(entry) {
+      const view = this.state;
+      void this.openDialog({
+        title: entry.name,
+        body: '<div class="file-preview-status" role="status">正在读取预览…</div>',
+        preview: true,
+      });
+      const pending = this.dialogResolve;
+      try {
+        const result = await this.call("/api/files/preview", { path: entry.path }, view.identity);
+        if (this.dialogResolve !== pending || this.state !== view) return;
+        if (result.kind === "image" && result.content.startsWith("data:image/png;base64,")) {
+          const image = document.createElement("img");
+          image.className = "file-preview-image";
+          image.alt = result.name;
+          image.src = result.content;
+          this.dialogBody.replaceChildren(image);
+        } else if (result.kind === "markdown") {
+          const content = document.createElement("div");
+          content.className = "markdown file-preview-markdown";
+          const template = document.createElement("template");
+          template.innerHTML = global.MeMarkdown.render(result.content);
+          // File previews must not fetch URLs embedded in a document.
+          template.content.querySelectorAll("img").forEach((image) => {
+            image.replaceWith(document.createTextNode(image.alt || "图片"));
+          });
+          template.content.querySelectorAll("a").forEach((link) => {
+            if (/^https?:\/\//i.test(link.getAttribute("href") || "")) {
+              link.target = "_blank";
+              link.rel = "noopener noreferrer";
+            } else link.removeAttribute("href");
+          });
+          content.append(template.content);
+          this.dialogBody.replaceChildren(content);
+        } else if (result.kind === "text") {
+          const content = document.createElement("pre");
+          content.className = "file-preview-text";
+          content.textContent = result.content;
+          this.dialogBody.replaceChildren(content);
+        } else throw new Error("暂不支持预览此类文件");
+      } catch (error) {
+        if (this.dialogResolve !== pending || this.state !== view) return;
+        this.dialogBody.textContent = error.message || "无法读取预览";
+        this.dialogBody.classList.add("file-preview-error");
       }
     }
 
@@ -794,15 +862,18 @@
       }
     }
 
-    openDialog({ title, body, confirm, danger = false }) {
+    openDialog({ title, body, confirm = "确认", danger = false, preview = false }) {
       if (this.dialogResolve) this.closeDialog(null);
+      this.dialogForm.classList.toggle("file-preview-dialog", preview);
+      this.dialogBody.classList.toggle("file-preview-body", preview);
+      this.dialogBody.classList.remove("file-preview-error");
       this.dialogTitle.textContent = title;
       this.dialogBody.innerHTML = body;
       this.dialogConfirm.textContent = confirm;
       this.dialogConfirm.classList.toggle("danger-button", danger);
       this.dialogBackdrop.classList.remove("hidden");
-      const first = this.dialogBody.querySelector("input,select");
-      setTimeout(() => first?.focus(), 0);
+      const first = preview ? this.dialogForm.querySelector('[data-dialog-action="close"]') : this.dialogBody.querySelector("input,select");
+      setTimeout(() => { if (this.dialogResolve) first?.focus(); }, 0);
       return new Promise((resolve) => { this.dialogResolve = resolve; });
     }
 

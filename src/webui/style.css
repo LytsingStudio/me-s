@@ -1059,7 +1059,7 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .file-manager-dialog-backdrop { position: absolute; inset: 0; z-index: 30; display: grid; place-items: center; padding: 18px; background: var(--overlay-bg); backdrop-filter: blur(5px); }
 .file-manager-dialog { display: flex; width: min(510px, 100%); max-height: min(620px, 100%); min-height: 210px; flex-direction: column; overflow: hidden; border: 1px solid var(--border-bright); border-radius: 14px; background: var(--panel); box-shadow: var(--shadow); }
 .file-manager-dialog header { display: flex; align-items: center; justify-content: space-between; padding: 15px 17px; border-bottom: 1px solid var(--border); }
-.file-manager-dialog h2 { margin: 0; font-size: 17px; }
+.file-manager-dialog > header h2 { min-width: 0; margin: 0; overflow: hidden; font-size: 17px; text-overflow: ellipsis; white-space: nowrap; }
 .file-manager-dialog header button { width: 30px; height: 30px; border: 0; border-radius: 7px; background: transparent; color: var(--muted); cursor: pointer; }
 .file-manager-dialog-body { min-height: 0; flex: 1; overflow: auto; padding: 18px; color: var(--muted); line-height: 1.5; }
 .file-manager-dialog-body label { display: grid; gap: 7px; margin: 0 0 14px; color: var(--text); font-size: 12px; font-weight: 700; }
@@ -1074,6 +1074,16 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .file-manager-danger-note { padding: 10px 12px; border: 1px solid var(--danger-border); border-radius: 9px; background: var(--danger-bg); color: var(--red); font-weight: 700; }
 .file-manager-confirm-check { display: flex !important; grid-template-columns: none; align-items: flex-start; gap: 9px !important; color: var(--red) !important; font-weight: 600 !important; }
 .file-manager-confirm-check input { margin-top: 3px; }
+.file-preview-dialog { width: min(960px, 100%); height: min(720px, 100%); max-height: 100%; min-height: 0; }
+.file-preview-dialog > header { flex: 0 0 auto; gap: 12px; }
+.file-preview-dialog > header button { flex: 0 0 auto; }
+.file-preview-dialog > footer { display: none; }
+.file-preview-body { display: flex; flex-direction: column; color: var(--text); overscroll-behavior: contain; -webkit-user-select: text; user-select: text; }
+.file-preview-text { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; font: 13px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.file-preview-markdown { font-size: 14px; }
+.file-preview-image { display: block; align-self: center; min-height: 0; max-width: 100%; max-height: 100%; margin: auto; object-fit: contain; }
+.file-preview-status { margin: auto; color: var(--muted); }
+.file-preview-error { color: var(--red); }
 @media (max-width: 760px) {
   .file-manager-navigation { flex-wrap: wrap; padding-inline: 8px; }
   .file-manager-toolbar button.file-manager-icon-button, .file-manager-path-form button.file-manager-icon-button { width: 40px; min-width: 40px; height: 40px; }

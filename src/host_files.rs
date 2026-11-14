@@ -14,6 +14,17 @@ use tar::Builder;
 
 pub(crate) const MAX_UPLOAD_CHUNK_BYTES: usize = 512 * 1024;
 const COPY_BUFFER_BYTES: usize = 128 * 1024;
+const MAX_TEXT_PREVIEW_BYTES: u64 = 1024 * 1024;
+const MAX_MARKDOWN_PREVIEW_BYTES: u64 = 256 * 1024;
+const MAX_IMAGE_PREVIEW_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, Serialize)]
+pub(crate) struct HostFilePreview {
+    pub ok: bool,
+    pub name: String,
+    pub kind: &'static str,
+    pub content: String,
+}
 
 #[derive(Clone)]
 pub(crate) struct HostFileManager {
@@ -270,6 +281,63 @@ impl HostFileManager {
             root_selector: false,
             parent_is_root_selector: directory.parent().is_none(),
             entries,
+        })
+    }
+
+    pub(crate) fn preview(&self, path: &str) -> Result<HostFilePreview> {
+        let source = fs::canonicalize(path)?;
+        if !fs::metadata(&source)?.is_file() {
+            return Err("只能预览普通文件".into());
+        }
+        let name = Path::new(path)
+            .file_name()
+            .ok_or("文件名无效")?
+            .to_string_lossy()
+            .into_owned();
+        let extension = Path::new(&name)
+            .extension()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_ascii_lowercase();
+        let kind = match extension.as_str() {
+            "md" | "markdown" | "mdown" => "markdown",
+            "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp" | "ico" | "tif" | "tiff" => "image",
+            "" | "txt" | "log" | "csv" | "tsv" | "json" | "jsonl" | "toml" | "yaml" | "yml"
+            | "xml" | "html" | "htm" | "svg" | "css" | "scss" | "js" | "jsx" | "ts" | "tsx"
+            | "mjs" | "cjs" | "py" | "rs" | "c" | "h" | "cpp" | "hpp" | "cc" | "cs" | "java"
+            | "kt" | "go" | "swift" | "dart" | "rb" | "php" | "sh" | "bash" | "zsh" | "fish"
+            | "ps1" | "bat" | "cmd" | "sql" | "ini" | "cfg" | "conf" | "env" | "gitignore"
+            | "gitattributes" | "properties" | "vue" | "svelte" | "r" | "lua" => "text",
+            _ => return Err("暂不支持预览此类文件".into()),
+        };
+        let limit = match kind {
+            "image" => MAX_IMAGE_PREVIEW_BYTES,
+            "markdown" => MAX_MARKDOWN_PREVIEW_BYTES,
+            _ => MAX_TEXT_PREVIEW_BYTES,
+        };
+        let file = File::open(&source)?;
+        let metadata = file.metadata()?;
+        if !metadata.is_file() {
+            return Err("只能预览普通文件".into());
+        }
+        if metadata.len() > limit {
+            return Err("文件过大，无法预览，请下载后查看".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit + 1).read_to_end(&mut bytes)?;
+        if bytes.len() as u64 > limit {
+            return Err("文件过大，无法预览，请下载后查看".into());
+        }
+        let content = if kind == "image" {
+            preview_image(&bytes)?
+        } else {
+            decode_preview_text(&bytes)?
+        };
+        Ok(HostFilePreview {
+            ok: true,
+            name,
+            kind,
+            content,
         })
     }
 
@@ -1833,6 +1901,71 @@ fn download_snapshot_locked(record: &DownloadRecord) -> DownloadSnapshot {
     }
 }
 
+fn decode_preview_text(bytes: &[u8]) -> Result<String> {
+    use chardetng::{EncodingDetector, Iso2022JpDetection, Utf8Detection};
+    use encoding_rs::{Encoding, GB18030, GBK, UTF_8};
+
+    let encoding = if let Some((encoding, _)) = Encoding::for_bom(bytes) {
+        encoding
+    } else if std::str::from_utf8(bytes).is_ok() {
+        UTF_8
+    } else {
+        let mut detector = EncodingDetector::new(Iso2022JpDetection::Allow);
+        detector.feed(bytes, true);
+        let guessed = detector.guess(None, Utf8Detection::Deny);
+        if guessed == GBK { GB18030 } else { guessed }
+    };
+    let (text, _, malformed) = encoding.decode(bytes);
+    if malformed
+        || text
+            .chars()
+            .any(|ch| ch.is_control() && !matches!(ch, '\n' | '\r' | '\t' | '\u{000c}'))
+    {
+        return Err("文件不是可预览的文本，或无法识别其编码".into());
+    }
+    Ok(text.into_owned())
+}
+
+fn preview_image(bytes: &[u8]) -> Result<String> {
+    use image::{ImageDecoder, ImageFormat, ImageReader};
+    use std::io::Cursor;
+
+    let format = image::guess_format(bytes).map_err(|_| "无法识别此图片")?;
+    let (width, height) = ImageReader::with_format(Cursor::new(bytes), format)
+        .into_dimensions()
+        .map_err(|_| "无法读取此图片")?;
+    if width > 8192 || height > 8192 || u64::from(width) * u64::from(height) > 16_000_000 {
+        return Err("图片尺寸过大，无法预览，请下载后查看".into());
+    }
+    let mut reader = ImageReader::with_format(Cursor::new(bytes), format);
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(128 * 1024 * 1024);
+    reader.limits(limits);
+    let mut decoder = reader
+        .into_decoder()
+        .map_err(|_| "无法读取此图片，文件可能已损坏")?;
+    let orientation = decoder
+        .orientation()
+        .unwrap_or(image::metadata::Orientation::NoTransforms);
+    let mut image =
+        image::DynamicImage::from_decoder(decoder).map_err(|_| "无法读取此图片，文件可能已损坏")?;
+    image.apply_orientation(orientation);
+    let image = if width > 2048 || height > 2048 {
+        image.thumbnail(2048, 2048)
+    } else {
+        image
+    };
+    let mut output = Cursor::new(Vec::new());
+    image.write_to(&mut output, ImageFormat::Png)?;
+    if output.get_ref().len() > 8 * 1024 * 1024 {
+        return Err("图片过大，无法预览，请下载后查看".into());
+    }
+    Ok(format!(
+        "data:image/png;base64,{}",
+        BASE64.encode(output.into_inner())
+    ))
+}
+
 fn path_string(path: impl AsRef<Path>) -> String {
     crate::host_path::public_host_path(path)
 }
@@ -1890,6 +2023,131 @@ mod tests {
             thread::sleep(Duration::from_millis(10));
         }
         panic!("file job did not finish");
+    }
+
+    #[test]
+    fn file_preview_decodes_text_and_markdown_without_writing() {
+        let fixture = Fixture::new("preview-text");
+        let manager = HostFileManager::new(&fixture.path).unwrap();
+        let text = "中文预览，保留换行和缩进。\n    hello <script>alert(1)</script>\n";
+        let encoded = encoding_rs::GB18030.encode(text).0.into_owned();
+        for (name, bytes) in [
+            ("hello.txt", text.as_bytes().to_vec()),
+            ("说明.txt", encoded),
+            (
+                "utf16.txt",
+                [
+                    vec![0xff, 0xfe],
+                    text.encode_utf16().flat_map(u16::to_le_bytes).collect(),
+                ]
+                .concat(),
+            ),
+            ("empty.txt", vec![]),
+            ("README.md", b"# Title\n\n**bold**".to_vec()),
+        ] {
+            let path = fixture.path.join(name);
+            fs::write(&path, &bytes).unwrap();
+            let preview = manager.preview(path.to_str().unwrap()).unwrap();
+            assert_eq!(preview.name, name);
+            assert_eq!(
+                preview.kind,
+                if name.ends_with(".md") {
+                    "markdown"
+                } else {
+                    "text"
+                }
+            );
+            if name.ends_with(".txt") && !bytes.is_empty() {
+                assert_eq!(preview.content, text);
+            }
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+    }
+
+    #[test]
+    fn file_preview_rejects_large_binary_unknown_and_non_file_inputs() {
+        let fixture = Fixture::new("preview-invalid");
+        let manager = HostFileManager::new(&fixture.path).unwrap();
+        assert!(manager.preview(fixture.path.to_str().unwrap()).is_err());
+        for (name, bytes) in [
+            ("binary.txt", vec![0, 1, 2, 3]),
+            ("archive.zip", b"not previewable".to_vec()),
+            ("large.txt", vec![b'x'; MAX_TEXT_PREVIEW_BYTES as usize + 1]),
+            (
+                "large.md",
+                vec![b'x'; MAX_MARKDOWN_PREVIEW_BYTES as usize + 1],
+            ),
+            ("broken.png", b"not an image".to_vec()),
+        ] {
+            let path = fixture.path.join(name);
+            fs::write(&path, bytes).unwrap();
+            assert!(manager.preview(path.to_str().unwrap()).is_err(), "{name}");
+        }
+        assert!(
+            manager
+                .preview(fixture.path.join("missing.txt").to_str().unwrap())
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn file_preview_normalizes_images_to_bounded_png() {
+        let fixture = Fixture::new("preview-image");
+        let manager = HostFileManager::new(&fixture.path).unwrap();
+        for format in [
+            image::ImageFormat::Png,
+            image::ImageFormat::Jpeg,
+            image::ImageFormat::Gif,
+            image::ImageFormat::WebP,
+        ] {
+            let path = fixture
+                .path
+                .join(format!("image.{}", format.extensions_str()[0]));
+            let image = image::DynamicImage::new_rgb8(2100, 20);
+            image.save_with_format(&path, format).unwrap();
+            let preview = manager.preview(path.to_str().unwrap()).unwrap();
+            assert_eq!(preview.kind, "image");
+            let png = BASE64
+                .decode(
+                    preview
+                        .content
+                        .strip_prefix("data:image/png;base64,")
+                        .unwrap(),
+                )
+                .unwrap();
+            let decoded = image::load_from_memory(&png).unwrap();
+            assert_eq!(decoded.width(), 2048);
+            assert!(decoded.height() <= 20);
+        }
+        let path = fixture.path.join("too-wide.png");
+        image::DynamicImage::new_rgb8(8193, 1).save(&path).unwrap();
+        assert!(manager.preview(path.to_str().unwrap()).is_err());
+    }
+
+    #[test]
+    fn file_preview_respects_photo_orientation() {
+        let fixture = Fixture::new("preview-orientation");
+        let manager = HostFileManager::new(&fixture.path).unwrap();
+        let path = fixture.path.join("portrait.jpg");
+        image::DynamicImage::new_rgb8(60, 20).save(&path).unwrap();
+        let jpeg = fs::read(&path).unwrap();
+        let exif = b"Exif\0\0II\x2a\0\x08\0\0\0\x01\0\x12\x01\x03\0\x01\0\0\0\x06\0\0\0\0\0\0\0";
+        let mut rotated = vec![0xff, 0xd8, 0xff, 0xe1];
+        rotated.extend_from_slice(&((exif.len() + 2) as u16).to_be_bytes());
+        rotated.extend_from_slice(exif);
+        rotated.extend_from_slice(&jpeg[2..]);
+        fs::write(&path, rotated).unwrap();
+        let preview = manager.preview(path.to_str().unwrap()).unwrap();
+        let png = BASE64
+            .decode(
+                preview
+                    .content
+                    .strip_prefix("data:image/png;base64,")
+                    .unwrap(),
+            )
+            .unwrap();
+        let decoded = image::load_from_memory(&png).unwrap();
+        assert_eq!((decoded.width(), decoded.height()), (20, 60));
     }
 
     #[test]

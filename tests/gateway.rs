@@ -213,6 +213,56 @@ fn stop_gateway(child: &mut Child) {
         thread::sleep(Duration::from_millis(50));
     }
 }
+#[test]
+fn gateway_file_preview_is_authenticated_read_only_and_proxied() {
+    let (_temporary, root, config_home) = prepare(true);
+    let path = root.join("预览.md");
+    let text = "# 文件预览\n\n**只读内容**\n<script>alert(1)</script>";
+    fs::write(&path, text).unwrap();
+    let (mut gateway, address) = spawn_gateway(&root, &config_home);
+    let url = format!("{address}/api/workspaces/chat/files/preview");
+    let http = client();
+    assert_eq!(
+        http.post(&url)
+            .json(&serde_json::json!({"path": path}))
+            .send()
+            .unwrap()
+            .status(),
+        401
+    );
+    let cookie = login(&address);
+    let response = post_json(
+        &address,
+        "/api/workspaces/chat/files/preview",
+        &cookie,
+        serde_json::json!({"path": path}),
+    );
+    assert_eq!(response["kind"], "markdown");
+    assert_eq!(response["content"], text);
+    assert_eq!(fs::read_to_string(&path).unwrap(), text);
+    assert_eq!(
+        http.post(&url)
+            .header(reqwest::header::COOKIE, &cookie)
+            .json(&serde_json::json!({"path": path, "write": true}))
+            .send()
+            .unwrap()
+            .status(),
+        400
+    );
+    for (suffix, status) in [("?path=secret", 404), ("/extra", 502)] {
+        assert_eq!(
+            http.post(format!("{url}{suffix}"))
+                .header(reqwest::header::COOKIE, &cookie)
+                .json(&serde_json::json!({"path": path}))
+                .send()
+                .unwrap()
+                .status(),
+            status
+        );
+    }
+    stop_gateway(&mut gateway);
+}
+
 #[cfg(unix)]
 #[test]
 fn gateway_ipv6_shares_authentication_and_proxies_the_managed_workspace() {

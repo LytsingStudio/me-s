@@ -1062,6 +1062,12 @@ struct HostFileListRequest {
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
+struct HostFilePreviewRequest {
+    path: String,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct HostFileMkdirRequest {
     parent: String,
     name: String,
@@ -1142,6 +1148,7 @@ fn is_host_file_post_path(path: &str) -> bool {
     matches!(
         path,
         "/api/files/list"
+            | "/api/files/preview"
             | "/api/files/mkdir"
             | "/api/files/rename"
             | "/api/files/jobs/prepare"
@@ -1212,6 +1219,10 @@ fn host_file_response_inner(
                 StatusCode(200),
                 &host_files.list(value.path.as_deref(), value.roots)?,
             )
+        }
+        (&Method::Post, "/api/files/preview") => {
+            let value: HostFilePreviewRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+            json_response(StatusCode(200), &host_files.preview(&value.path)?)
         }
         (&Method::Post, "/api/files/mkdir") => {
             let value: HostFileMkdirRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
@@ -2675,6 +2686,8 @@ mod tests {
             }
         }
         let directory = workspace();
+        let preview_path = directory.join("preview.txt");
+        fs::write(&preview_path, "  中文\nread-only preview").unwrap();
         let mut backend = sync_test_backend_for_orchestrator(
             Vec::new(),
             1,
@@ -2699,6 +2712,15 @@ mod tests {
             assert_eq!(
                 client
                     .get(format!("{address}/api/snapshot"))
+                    .send()
+                    .unwrap()
+                    .status(),
+                401
+            );
+            assert_eq!(
+                client
+                    .post(format!("{address}/api/files/preview"))
+                    .json(&json!({"path": preview_path}))
                     .send()
                     .unwrap()
                     .status(),
@@ -2733,6 +2755,16 @@ mod tests {
                     .status(),
                 200
             );
+            let preview: serde_json::Value = client
+                .post(format!("{address}/api/files/preview"))
+                .header(reqwest::header::COOKIE, &cookie)
+                .json(&json!({"path": preview_path}))
+                .send()
+                .unwrap()
+                .json()
+                .unwrap();
+            assert_eq!(preview["kind"], "text");
+            assert_eq!(preview["content"], "  中文\nread-only preview");
         }
         let port = server.port();
         drop(server);

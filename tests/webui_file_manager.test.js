@@ -69,7 +69,7 @@ describe("per-session host file manager", () => {
     expect(controller).toContain("gesture.moved || Math.hypot");
     expect(controller).toContain("this.suppressTouchClickPath = gesture.path");
     expect(controller).toContain('this.container.addEventListener("dblclick"');
-    expect(controller).toContain('if (row?.dataset.navigable === "true") void this.navigate(row.dataset.path, false);');
+    expect(controller).toContain('if (row) void this.openEntry(row.dataset.path);');
     const selectStart = controller.indexOf("    selectRow(path, event) {");
     const selectEnd = controller.indexOf("\n    togglePath(path, checked)", selectStart);
     const selectionPath = controller.slice(selectStart, selectEnd);
@@ -178,12 +178,16 @@ function fileManagerHarness() {
   const node = () => {
     const children = new Map(), classes = new Set();
     return {
-      innerHTML: "", value: "", scrollTop: 0,
+      innerHTML: "", textContent: "", value: "", scrollTop: 0, children: [], listeners: new Map(),
       classList: {
         add: (value) => classes.add(value), remove: (value) => classes.delete(value),
-        contains: (value) => classes.has(value), toggle() {},
+        contains: (value) => classes.has(value),
+        toggle(value, force) { if (force ?? !classes.has(value)) classes.add(value); else classes.delete(value); },
       },
-      addEventListener() {}, querySelectorAll() { return []; },
+      focus() {},
+      replaceChildren(...children) { this.children = children; },
+      addEventListener(type, callback) { this.listeners.set(type, callback); },
+      querySelectorAll() { return []; },
       querySelector(selector) {
         if (!children.has(selector)) children.set(selector, node());
         return children.get(selector);
@@ -191,7 +195,7 @@ function fileManagerHarness() {
     };
   };
   const sandbox = {};
-  new Function("globalThis", "setTimeout", controller)(sandbox, (callback, ms) => timers.push({ callback, at: now + ms }));
+  new Function("globalThis", "setTimeout", "document", controller)(sandbox, (callback, ms) => timers.push({ callback, at: now + ms }), { createElement: node });
   const manager = sandbox.MeFileManager.create({
     container: node(),
     request: async (_path, options) => ({ path: JSON.parse(options.body).path, parent: "/", entries: [] }),
@@ -327,5 +331,81 @@ describe("file manager scroll and completed task lifecycle", () => {
     tick(1);
     expect(view.download).toBe(null);
     expect(manager.taskPanel.classList.contains("hidden")).toBe(true);
+  });
+});
+
+describe("read-only file previews", () => {
+  test("activation keeps directory navigation and sends files through the preview route", async () => {
+    const { manager, view } = fileManagerHarness();
+    view.entries = [{ path: "/folder", navigable: true }, { name: "hello.txt", path: "/hello.txt", navigable: false }];
+    const navigated = [];
+    manager.navigate = async (path) => navigated.push(path);
+    await manager.openEntry("/folder");
+    expect(navigated).toEqual(["/folder"]);
+    manager.request = async (path, options, identity) => {
+      expect(path).toBe("/api/files/preview");
+      expect(JSON.parse(options.body)).toEqual({ path: "/hello.txt" });
+      expect(identity).toBe(view.identity);
+      return { kind: "text", name: "hello.txt", content: "  中文\n<script>alert(1)</script>" };
+    };
+    await manager.openEntry("/hello.txt");
+    expect(manager.dialogForm.classList.contains("file-preview-dialog")).toBe(true);
+    expect(manager.dialogTitle.textContent).toBe("hello.txt");
+    expect(manager.dialogBody.children[0].textContent).toBe("  中文\n<script>alert(1)</script>");
+    expect(manager.dialogBody.children[0].innerHTML).toBe("");
+    manager.closeDialog(null);
+    expect(manager.dialogBody.innerHTML).toBe("");
+  });
+
+  test("both mouse double-click and guarded touch double-tap activate a file once", async () => {
+    const { manager } = fileManagerHarness();
+    const opened = [];
+    manager.openEntry = async (path) => opened.push(path);
+    const row = { dataset: { path: "/hello.txt", navigable: "false" } };
+    const target = { closest: (selector) => selector === ".file-manager-entry" ? row : null };
+    manager.container.listeners.get("dblclick")({ target });
+    expect(opened).toEqual(["/hello.txt"]);
+    opened.length = 0;
+    const event = { target, pointerType: "touch", pointerId: 1, isPrimary: true, clientX: 10, clientY: 20 };
+    manager.handleTouchPointerDown(event); manager.handleTouchPointerUp(event);
+    expect(opened).toEqual([]);
+    manager.handleTouchPointerDown(event); manager.handleTouchPointerUp(event);
+    manager.container.listeners.get("dblclick")({ target });
+    expect(opened).toEqual(["/hello.txt"]);
+    manager.resetTouchGesture(); opened.length = 0;
+    manager.handleTouchPointerDown(event);
+    manager.handleTouchPointerMove({ ...event, clientY: 50 });
+    manager.handleTouchPointerUp(event);
+    manager.handleTouchPointerDown(event); manager.handleTouchPointerUp(event);
+    expect(opened).toEqual([]);
+  });
+
+  test("closing or switching sessions rejects late preview results", async () => {
+    const { manager, view } = fileManagerHarness();
+    let respond;
+    manager.request = () => new Promise((resolve) => { respond = resolve; });
+    const entry = { name: "hello.txt", path: "/hello.txt" };
+    const pending = manager.previewFile(entry);
+    manager.closeDialog(null);
+    respond({ kind: "text", content: "late" });
+    await pending;
+    expect(manager.dialogBody.innerHTML).toBe("");
+    expect(manager.dialogBackdrop.classList.contains("hidden")).toBe(true);
+    const switched = manager.previewFile(entry);
+    const finishPreview = respond;
+    manager.attach({ key: "other:session", agentId: "session", defaultPath: "/" });
+    finishPreview({ kind: "text", content: "wrong session" });
+    await switched;
+    expect(manager.state).not.toBe(view);
+    expect(manager.dialogBody.innerHTML).toBe("");
+  });
+
+  test("shows readable preview errors without starting file operations", async () => {
+    const { manager } = fileManagerHarness();
+    manager.request = async () => { throw new Error("文件过大，无法预览，请下载后查看"); };
+    await manager.previewFile({ name: "huge.txt", path: "/huge.txt" });
+    expect(manager.dialogBody.textContent).toContain("文件过大");
+    expect(manager.dialogBody.classList.contains("file-preview-error")).toBe(true);
+    expect(manager.dialogBackdrop.classList.contains("hidden")).toBe(false);
   });
 });

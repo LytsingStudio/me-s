@@ -368,7 +368,10 @@ function getFileManagerController() {
 }
 
 function syncFileManagerView() {
-  if (state.view.kind !== "files" || !state.workspaceId || !state.selectedAgent || !state.snapshot.environment?.workspace) return;
+  if (state.view.kind !== "files" || !state.workspaceId || !state.selectedAgent || !state.snapshot.environment?.workspace) {
+    if (fileManagerController?.dialogForm.classList.contains("file-preview-dialog")) fileManagerController.closeDialog(null);
+    return;
+  }
   getFileManagerController().attach({
     key: `${state.workspaceId}:${state.selectedAgent}`,
     workspaceId: state.workspaceId,
@@ -1630,6 +1633,7 @@ function setLoginBusy(busy) {
 }
 
 function showLogin(message = "") {
+  if (fileManagerController?.dialogForm.classList.contains("file-preview-dialog")) fileManagerController.closeDialog(null);
   const alreadyVisible = !state.authenticated
     && !elements.loginScreen.classList.contains("hidden");
   if (rememberedDevices) setLoginView("devices");
