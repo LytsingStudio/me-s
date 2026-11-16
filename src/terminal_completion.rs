@@ -19,6 +19,7 @@ pub(super) struct CompletionDecoder {
     nonce: String,
     pending: Vec<u8>,
     revision: u64,
+    continuation: u64,
 }
 
 impl CompletionDecoder {
@@ -27,6 +28,7 @@ impl CompletionDecoder {
             nonce,
             pending: Vec::new(),
             revision: 0,
+            continuation: 0,
         }
     }
 
@@ -80,6 +82,24 @@ impl CompletionDecoder {
     fn decode(&mut self, payload: &[u8]) -> Option<Completion> {
         let text = std::str::from_utf8(payload).ok()?;
         let fields = text.split(';').collect::<Vec<_>>();
+        if fields.len() == 3 && fields[0] == "C" && fields[1] == self.nonce {
+            let continuation = fields[2].parse::<u64>().ok()?;
+            if continuation == 0 {
+                return None;
+            }
+            // Readline can redraw the same expanded PS2. Only a new read counts.
+            if continuation > self.continuation {
+                self.revision += 1;
+                self.continuation = continuation;
+            }
+            return Some(Completion {
+                revision: self.revision,
+                received_at: Instant::now(),
+                exit_code: None,
+                succeeded: false,
+                ready: false,
+            });
+        }
         if fields.len() != 4 || fields[1] != self.nonce {
             return None;
         }
@@ -169,10 +189,16 @@ impl WaitOutcome {
 
 #[cfg(any(unix, test))]
 pub(super) fn bash_prompt_command(nonce: &str) -> String {
-    // Keep the hook in this shell only; a nested Bash must not report its prompt as our completion.
+    // Keep both prompt hooks in this shell; nested Bash must not acknowledge our input.
     format!(
-        r#"__me_status=$?; export -n PROMPT_COMMAND; __me_ready=1; if builtin read -t 0; then __me_ready=0; fi; if [[ -n "$(builtin jobs -p)" ]]; then __me_ready=0; fi; builtin printf '\033]633;D;%s;{nonce};%s;%s\007' "$__me_status" "$__me_ready" "$((__me_status == 0))"; (exit "$__me_status")"#
+        r#"__me_status=$?; export -n PROMPT_COMMAND PS2; __me_continuation=${{__me_continuation:-0}}; __me_ready=1; if builtin read -t 0; then __me_ready=0; fi; if [[ -n "$(builtin jobs -p)" ]]; then __me_ready=0; fi; builtin printf '\033]633;D;%s;{nonce};%s;%s\007' "$__me_status" "$__me_ready" "$((__me_status == 0))"; (exit "$__me_status")"#
     )
+}
+
+#[cfg(any(unix, test))]
+pub(super) fn bash_continuation_prompt(nonce: &str) -> String {
+    // Prompt arithmetic runs once per input read, not once per screen repaint.
+    format!(r"\[\e]633;D;C;{nonce};$((__me_continuation += 1))\a\]> ")
 }
 
 // Use inline initialization, not a profile or a change to the user's execution policy.
@@ -253,6 +279,37 @@ mod tests {
         assert_eq!(completion.revision, 2);
         assert!(!completion.ready);
         assert_eq!(completion.exit_code, None);
+    }
+
+    #[test]
+    fn continuation_reads_count_once_and_never_report_completion() {
+        let marker = b"\x1b]633;D;C;abc;1\x07";
+        for split in 0..=marker.len() {
+            let mut decoder = CompletionDecoder::new("abc".into());
+            let (first, _) = decoder.process(&marker[..split]);
+            let (second, _) = decoder.process(&marker[split..]);
+            assert!(first.is_empty() && second.is_empty());
+            let (_, repeated) = decoder.process(marker);
+            let repeated = repeated.unwrap();
+            assert_eq!(repeated.revision, 1);
+            assert!(!repeated.ready);
+            assert_eq!(repeated.exit_code, None);
+            let (_, completed) = decoder.process(b"\x1b]633;D;7;abc;1;0\x07");
+            let completed = completed.unwrap();
+            assert_eq!(completed.revision, 2);
+            assert!(completed.ready);
+            assert_eq!(completed.exit_code, Some(7));
+        }
+        let mut decoder = CompletionDecoder::new("abc".into());
+        for marker in [
+            b"\x1b]633;D;C;foreign;1\x07".as_slice(),
+            b"\x1b]633;D;C;abc;0\x07",
+            b"\x1b]633;D;C;abc;invalid\x07",
+        ] {
+            let (visible, completion) = decoder.process(marker);
+            assert_eq!(visible, marker);
+            assert!(completion.is_none());
+        }
     }
 
     #[test]

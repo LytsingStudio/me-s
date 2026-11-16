@@ -1486,6 +1486,7 @@ impl TerminalManager {
                 command.arg("--norc");
                 command.arg("-i");
                 command.env("PROMPT_COMMAND", completion::bash_prompt_command(&nonce));
+                command.env("PS2", completion::bash_continuation_prompt(&nonce));
             }
             #[cfg(windows)]
             ShellKind::PowerShell => {
@@ -1718,18 +1719,20 @@ impl PtySession {
                         .is_none_or(|last| completion.received_at >= last)
             });
             let writer = self.writer.as_mut().ok_or("PTY writer is closed")?;
+            // The reader may receive completion while write_all is still returning.
+            let submitted_at = Instant::now();
             if let Err(error) = writer.write_all(input).and_then(|()| writer.flush()) {
                 local_error = Some(format!("PTY write failed: {error}"));
             } else {
                 let written_at = Instant::now();
                 input_written_at = Some(written_at);
-                self.last_input_at = Some(written_at);
+                self.last_input_at = Some(submitted_at);
                 let notifications = input
                     .iter()
                     .filter(|&&byte| matches!(byte, b'\r' | b'\n'))
                     .count() as u64;
-                // Count submitted line endings conservatively: a heredoc or interactive
-                // program may consume several, in which case the normal wait remains.
+                // Bash acknowledges continuation lines as well as top-level completion.
+                // Interactive programs without those acknowledgements retain the normal wait.
                 let submitted = input
                     .last()
                     .is_some_and(|byte| matches!(byte, b'\r' | b'\n'));
@@ -1743,7 +1746,7 @@ impl PtySession {
                             .completion
                             .as_ref()
                             .map_or(0, |completion| completion.revision),
-                        earliest: written_at,
+                        earliest: submitted_at,
                         notifications,
                         initial: false,
                     });
@@ -4262,6 +4265,166 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn real_pty_completion_tracks_multiline_shell_input_without_finishing_early() {
+        let _guard = real_pty_test_guard();
+        let workspace = temp_workspace("multiline-completion");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut manager = TerminalManager::new();
+        let created = manager
+            .create(
+                &workspace,
+                73,
+                &CreateRequest {
+                    width: 120,
+                    height: 40,
+                    cwd: ".".into(),
+                    wait_ms: 1_500,
+                    max_wait_ms: 2_000,
+                    max_output_chars: 20_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(created.wait.reason, WaitReason::ShellReady);
+        let id = created.created.session_id;
+        for command in [
+            "cat <<'END'\nHEREDOC\nEND",
+            "printf '%s\\n' 'QUOTED\nMULTILINE'",
+            "for value in a b; do\nprintf '%s\\n' \"$value\"\ndone",
+            "printf '%s\\n' CONTINUED \\\nLINE",
+            "cat <<'ONE' <<'TWO'\nfirst\nONE\nsecond\nTWO",
+            "printf '%s\\n' \"$(printf '%s\\n' 'NESTED\nQUOTE')\"",
+            "for value in a; do\n\n# comment\nprintf '%s\\n' \"$value\"\ndone",
+        ] {
+            let mut request = interact(&id, Some(command));
+            request.wait_ms = 1_500;
+            request.max_wait_ms = 2_000;
+            let started = Instant::now();
+            let result = manager.interact(&request).unwrap();
+            assert_eq!(
+                result.wait.reason,
+                WaitReason::CommandCompleted,
+                "{command}"
+            );
+            assert_eq!(result.wait.command_exit_code, Some(0));
+            assert!(started.elapsed() < Duration::from_secs(1), "{command}");
+            assert!(!result.update.plain_text().contains("633;D;"));
+        }
+
+        let mut request = interact(
+            &id,
+            Some(
+                "cat <<'ONE' <<'TWO'\nfirst\nONE\nsecond\nTWO\nsleep 0.3; printf 'MULTI-%s\\n' DONE; (exit 7)",
+            ),
+        );
+        request.wait_ms = 1_500;
+        request.max_wait_ms = 2_000;
+        let started = Instant::now();
+        let batch = manager.interact(&request).unwrap();
+        assert_eq!(batch.wait.reason, WaitReason::CommandCompleted);
+        assert_eq!(batch.wait.command_exit_code, Some(7));
+        assert!(started.elapsed() >= Duration::from_millis(300));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(batch.update.plain_text().contains("MULTI-DONE"));
+
+        // Continuation prompts acknowledge input, never completion of an unfinished command.
+        request.input = command_input("cat <<'END'\nSTILL-WAITING");
+        request.wait_ms = 200;
+        request.max_wait_ms = 300;
+        let unfinished = manager.interact(&request).unwrap();
+        assert_ne!(unfinished.wait.reason, WaitReason::CommandCompleted);
+        manager
+            .kill(&KillRequest {
+                session_id: id,
+                grace_ms: 1_000,
+            })
+            .unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn real_pty_completion_received_before_flush_returns_is_not_lost() {
+        struct CompleteBeforeFlush {
+            writer: Box<dyn Write + Send>,
+            output: Arc<SharedTerminalOutput>,
+            after_revision: u64,
+        }
+        impl Write for CompleteBeforeFlush {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.writer.write(bytes)
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                self.writer.flush()?;
+                let deadline = Instant::now() + Duration::from_secs(1);
+                loop {
+                    let activity = self.output.activity().unwrap();
+                    if activity.completion.is_some_and(|completed| {
+                        completed.revision > self.after_revision && completed.ready
+                    }) {
+                        return Ok(());
+                    }
+                    assert!(
+                        Instant::now() < deadline,
+                        "completion did not reach the reader"
+                    );
+                    thread::sleep(Duration::from_millis(5));
+                }
+            }
+        }
+
+        let _guard = real_pty_test_guard();
+        let workspace = temp_workspace("completion-before-flush");
+        fs::create_dir_all(&workspace).unwrap();
+        let mut manager = TerminalManager::new();
+        let created = manager
+            .create(
+                &workspace,
+                74,
+                &CreateRequest {
+                    width: 120,
+                    height: 40,
+                    cwd: ".".into(),
+                    wait_ms: 1_500,
+                    max_wait_ms: 2_000,
+                    max_output_chars: 20_000,
+                },
+            )
+            .unwrap();
+        assert_eq!(created.wait.reason, WaitReason::ShellReady);
+        let id = created.created.session_id;
+        let session = manager.sessions.get_mut(&id).unwrap();
+        session.writer = Some(Box::new(CompleteBeforeFlush {
+            writer: session.writer.take().unwrap(),
+            output: Arc::clone(&session.output),
+            after_revision: session
+                .output
+                .activity()
+                .unwrap()
+                .completion
+                .unwrap()
+                .revision,
+        }));
+        let mut request = interact(&id, Some("printf 'EARLY-%s\\n' DONE; (exit 7)"));
+        request.wait_ms = 1_500;
+        request.max_wait_ms = 2_000;
+        let started = Instant::now();
+        let result = manager.interact(&request).unwrap();
+        assert_eq!(result.wait.reason, WaitReason::CommandCompleted);
+        assert_eq!(result.wait.command_exit_code, Some(7));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(result.update.plain_text().contains("EARLY-DONE"));
+        manager
+            .kill(&KillRequest {
+                session_id: id,
+                grace_ms: 1_000,
+            })
+            .unwrap();
+        fs::remove_dir_all(workspace).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn real_pty_completion_falls_back_for_interactive_partial_nested_and_background_input() {
         let _guard = real_pty_test_guard();
         let workspace = temp_workspace("completion-fallback");
@@ -4287,7 +4450,6 @@ mod tests {
             "read answer",
             "/bin/bash --noprofile --norc -i",
             "(sleep 0.5; printf 'BACKGROUND-%s\\n' DONE) &",
-            "cat <<'END'\nheredoc\nEND",
             "unset PROMPT_COMMAND; printf 'NO-HOOK\\n'",
         ] {
             let mut request = interact(&id, None);
