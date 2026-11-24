@@ -1163,7 +1163,7 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .gais-task-state { flex: none; color: var(--cyan); font-size: 12px; }
 .gais-task-meta, .gais-progress { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; margin-top: 10px; }
 .gais-task p, .gais-empty { color: var(--muted); font-size: 13px; }
-.gais-settings { display: grid; gap: 14px; }
+.gais-settings { display: grid; gap: 14px; padding-top: 12px; }
 .gais-settings > label { display: grid; gap: 7px; font-size: 13px; color: var(--muted); }
 .gais-settings input { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); font: inherit; }
 .gais-settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }

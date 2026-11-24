@@ -68,6 +68,24 @@ describe("shared GAIS page", () => {
 });
 
 describe("ME-GAIS settings", () => {
+  test("settings use the shared product title and follow Codex usage before models", () => {
+    const f = fixture();
+    const app = read("src/webui/app.js");
+    const source = app.slice(app.indexOf("function localPreferenceSettingsHtml()"), app.indexOf("async function bindLocalPreferenceSettings("));
+    const render = new Function("runtimeCapabilities", "state", "frontendRuntime", "globalThis", "escapeHtml", "WINDOW_BORDER_DEFAULT", "WINDOW_BORDER_THEME", `${source}; return localPreferenceSettingsHtml();`);
+    for (const capabilities of [{}, { multipleWorkspaces: true }, { targetConfiguration: true, windowBorderStyle: true }]) {
+      const html = render(capabilities, { authenticated: true }, { clientVersion: "test" }, { MeGais: f.api }, (value) => value, "default", "theme");
+      expect(html).toContain("<h3>生成式 AI 服务</h3>");
+      expect(html).not.toContain("ME-GAIS");
+      expect(html.indexOf("settings-codex-section")).toBeLessThan(html.indexOf("settings-gais-section"));
+      expect(html.match(/settings-gais-section/g)).toHaveLength(1);
+      const offline = render(capabilities, { authenticated: false }, {}, { MeGais: f.api }, (value) => value, "default", "theme");
+      expect(offline).not.toContain("settings-gais-section");
+    }
+    const modal = app.slice(app.indexOf("function renderSettingsModal()"), app.indexOf("function parseSettingsJson("));
+    expect(modal.indexOf("${localPreferenceSettingsHtml()}")).toBeLessThan(modal.indexOf("settings-model-section"));
+    expect(read("src/webui/style.css")).toMatch(/\.gais-settings\s*\{[^}]*padding-top:\s*12px/);
+  });
   test("test and save use the current form separately, with no direct GAIS URL requests", async () => {
     const f = fixture(); const form = new Node(); const nodes = {};
     for (const key of ["url", "token", "result", "test", "save"]) nodes[`[data-gais-${key}]`] = new Node();

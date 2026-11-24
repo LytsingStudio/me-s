@@ -104,7 +104,7 @@
   }
 
   function settingsHtml() {
-    return `<section class="settings-section settings-gais-section"><header class="settings-section-header"><div class="settings-section-heading"><h3>ME-GAIS</h3></div></header>
+    return `<section class="settings-section settings-gais-section"><header class="settings-section-header"><div class="settings-section-heading"><h3>生成式 AI 服务</h3></div></header>
       <div class="gais-settings" data-gais-settings><label>URL<input data-gais-url type="url" placeholder="http://127.0.0.1:47589" autocomplete="off" spellcheck="false" disabled></label>
         <label>Token<input data-gais-token type="password" autocomplete="off" spellcheck="false" disabled></label>
         <div class="gais-settings-actions"><span data-gais-result role="status">正在获取…</span><button type="button" class="ghost-button" data-gais-test disabled>测试</button><button type="button" class="primary-button" data-gais-save disabled>保存</button></div>

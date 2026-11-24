@@ -4539,7 +4539,7 @@ function localPreferenceSettingsHtml() {
     <div class="settings-preference-list">
       ${borderStyle}
     </div>
-  </section>` : ""}${state.authenticated ? globalThis.MeGais.settingsHtml() : ""}
+  </section>` : ""}
   <section class="settings-section settings-version-section">
     <header class="settings-section-header"><div class="settings-section-heading"><h3>版本</h3></div></header>
     <dl class="settings-version-list">
@@ -4549,7 +4549,7 @@ function localPreferenceSettingsHtml() {
   </section>${state.authenticated ? `<section class="settings-section settings-codex-section">
     <header class="settings-section-header"><div class="settings-section-heading"><h3>Codex 用量</h3></div></header>
     <div data-codex-usage aria-live="polite"><p class="settings-help">正在获取…</p></div>
-  </section>` : ""}`;
+  </section>` : ""}${state.authenticated ? globalThis.MeGais.settingsHtml() : ""}`;
 }
 
 async function bindLocalPreferenceSettings(container = elements.modalContent) {
