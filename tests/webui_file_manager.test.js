@@ -115,9 +115,10 @@ describe("per-session host file manager", () => {
     expect(sharedApp).toContain("writeClipboard: copyTextToClipboard");
     expect(controller).toContain("const UPLOAD_CHUNK_BYTES = 384 * 1024");
     expect(controller).toContain('this.call("/api/files/uploads/create"');
-    expect(controller).toContain('this.call("/api/files/uploads/chunk"');
-    expect(controller).toContain('this.call("/api/files/uploads/finish"');
-    expect(controller).toContain('this.call("/api/files/uploads/cancel"');
+    expect(controller).toContain('call("/api/files/uploads/chunk"');
+    expect(controller).toContain('call("/api/files/uploads/finish"');
+    expect(controller).toContain('call("/api/files/uploads/cancel"');
+    expect(controller).toContain('await uploadContent((path, body) => this.call(path, body, view.identity)');
     expect(controller).toContain("const completedSources = new Set");
     expect(controller).toContain('this.call("/api/files/downloads/create"');
     expect(controller.includes("await this.downloadFile(download, identity, {")).toBe(true);

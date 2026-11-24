@@ -986,6 +986,30 @@ fn operational_route(
         (&Method::Post, path) if query.is_none() && path.starts_with("/api/session-terminal/") => {
             session_terminal_response(request, session_terminals, path)
         }
+        (&Method::Post, "/api/files/paste-images/create") if query.is_none() => {
+            #[derive(Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct RequestBody {
+                agent_id: String,
+                original: crate::prompt_images::OriginalImage,
+                size_bytes: u64,
+            }
+            let result = (|| -> Result<_> {
+                let value: RequestBody = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
+                let id = AgentId::new(value.agent_id)?;
+                if !backend.agent_ids()?.contains(&id) {
+                    return Err("会话不存在".into());
+                }
+                host_files.create_paste_image_upload(&id, value.original, value.size_bytes)
+            })();
+            Ok(match result {
+                Ok(value) => json_response(StatusCode(200), &value),
+                Err(error) => json_response(
+                    StatusCode(400),
+                    &json!({"ok":false,"error":error.to_string()}),
+                ),
+            })
+        }
         (method, path)
             if query.is_none()
                 && ((*method == Method::Post && is_host_file_post_path(path))
@@ -1168,6 +1192,7 @@ fn is_host_file_post_path(path: &str) -> bool {
             | "/api/files/jobs/status"
             | "/api/files/jobs/cancel"
             | "/api/files/uploads/create"
+            | "/api/files/paste-images/create"
             | "/api/files/uploads/chunk"
             | "/api/files/uploads/finish"
             | "/api/files/uploads/cancel"
@@ -2213,6 +2238,8 @@ enum WebCommand {
     SubmitUserPrompt {
         agent_id: String,
         content: String,
+        #[serde(default)]
+        image_paths: Vec<String>,
     },
     ChangeEffort {
         agent_id: String,
@@ -2345,9 +2372,14 @@ fn into_ui_command(command: WebCommand) -> Result<UiCommand> {
             expected_revision,
             content,
         },
-        WebCommand::SubmitUserPrompt { agent_id, content } => UiCommand::SubmitUserPrompt {
+        WebCommand::SubmitUserPrompt {
+            agent_id,
+            content,
+            image_paths,
+        } => UiCommand::SubmitUserPrompt {
             agent_id: AgentId::new(agent_id)?,
             content,
+            image_paths,
         },
         WebCommand::ChangeEffort { agent_id, effort } => UiCommand::ChangeEffort {
             agent_id: AgentId::new(agent_id)?,
@@ -3052,6 +3084,7 @@ mod tests {
                     id,
                     timestamp_ms: id,
                     content: format!("event-{id}"),
+                    images: Vec::new(),
                 })
             })
             .collect()
@@ -3229,6 +3262,174 @@ mod tests {
         let response =
             image_response(&backend, &format!("/api/images/main/{sha}/preview")).unwrap();
         assert_eq!(response.status_code(), StatusCode(404));
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn paste_images_http_upload_and_prompt_preview_use_existing_encrypted_routes() {
+        use base64::{Engine as _, engine::general_purpose::STANDARD};
+        struct NoCommands;
+        impl UiCommandGateway for NoCommands {
+            fn submit(&self, _: UiCommand) -> Result<UiCommandReceipt> {
+                panic!("uploads and previews must not submit prompts")
+            }
+        }
+        let directory = workspace();
+        let mut backend = sync_test_backend_for_orchestrator(
+            Vec::new(),
+            0,
+            crate::event::AgentKind::Primary,
+            "chatbot",
+        );
+        Arc::make_mut(&mut backend.0.environment).workspace = directory.clone();
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::DynamicImage::new_rgb8(12, 8)
+            .write_to(&mut bytes, image::ImageFormat::Png)
+            .unwrap();
+        let bytes = bytes.into_inner();
+        let client = crate::encrypted_http::test_client::Client::new();
+        for managed in [false, true] {
+            let start = |backend: SnapshotBackend| {
+                if managed {
+                    start_managed(
+                        backend,
+                        NoCommands,
+                        0,
+                        ManagedWebAccess {
+                            token: "paste-fixture".into(),
+                            instance_nonce: "paste".into(),
+                            workspace_path: directory.to_string_lossy().into_owned(),
+                            terminate: Arc::new(AtomicBool::new(false)),
+                        },
+                    )
+                    .unwrap()
+                } else {
+                    start_from(backend, NoCommands, 0, Some("paste-passkey")).unwrap()
+                }
+            };
+            let server = start(backend.clone());
+            let address = server
+                .address()
+                .replace("http://0.0.0.0:", "http://127.0.0.1:");
+            let cookie = if managed {
+                String::new()
+            } else {
+                client
+                    .post(format!("{address}/api/auth/login"))
+                    .json(&json!({"password":"paste-passkey"}))
+                    .send()
+                    .unwrap()
+                    .headers()["set-cookie"]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
+            let post = |path: &str, body: Value| {
+                let request = client.post(format!("{address}{path}")).json(&body);
+                let request = if managed {
+                    request.header(MANAGED_AUTH_HEADER, "Bearer paste-fixture")
+                } else {
+                    request.header("Cookie", &cookie)
+                };
+                request.send().unwrap()
+            };
+            let request = json!({"agent_id":"main","original":{"name":"original.PNG","mime_type":"image/png","last_modified_ms":123},"size_bytes":bytes.len()});
+            assert_eq!(
+                client
+                    .post(format!("{address}/api/files/paste-images/create"))
+                    .json(&request)
+                    .send()
+                    .unwrap()
+                    .status(),
+                reqwest::StatusCode::UNAUTHORIZED
+            );
+            let mut missing = request.clone();
+            missing["agent_id"] = json!("absent");
+            assert_eq!(
+                post("/api/files/paste-images/create", missing).status(),
+                reqwest::StatusCode::BAD_REQUEST
+            );
+            let created: Value = post("/api/files/paste-images/create", request)
+                .json()
+                .unwrap();
+            let upload_id = created["upload"]["upload_id"].as_str().unwrap();
+            assert!(
+                post(
+                    "/api/files/uploads/chunk",
+                    json!({"upload_id":upload_id,"offset":0,"data":STANDARD.encode(&bytes)})
+                )
+                .status()
+                .is_success()
+            );
+            let finished: Value = post("/api/files/uploads/finish", json!({"upload_id":upload_id}))
+                .json()
+                .unwrap();
+            assert_eq!(finished["state"], "completed");
+            let attachment: crate::event::PromptImage =
+                serde_json::from_value(finished["image"].clone()).unwrap();
+            assert_eq!(fs::read(&attachment.path).unwrap(), bytes);
+            assert!(Path::new(&attachment.path).with_extension("yaml").is_file());
+            drop(server);
+            let prompt = crate::event::UserPromptEvent {
+                id: 1,
+                timestamp_ms: 1,
+                content: String::new(),
+                images: vec![attachment.clone()],
+            };
+            backend.0.agents[0].events = Arc::from([Event::UserPrompt(prompt)]);
+            assert!(
+                !backend.0.agents[0]
+                    .events
+                    .iter()
+                    .any(|event| matches!(event, Event::ImageContent(_)))
+            );
+            let server = start(backend.clone());
+            let address = server
+                .address()
+                .replace("http://0.0.0.0:", "http://127.0.0.1:");
+            let cookie = if managed {
+                String::new()
+            } else {
+                client
+                    .post(format!("{address}/api/auth/login"))
+                    .json(&json!({"password":"paste-passkey"}))
+                    .send()
+                    .unwrap()
+                    .headers()["set-cookie"]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_owned()
+            };
+            for operation in ["preview", "original"] {
+                let request = client.get(format!(
+                    "{address}/api/images/main/{}/{operation}",
+                    attachment.sha256
+                ));
+                let request = if managed {
+                    request.header(MANAGED_AUTH_HEADER, "Bearer paste-fixture")
+                } else {
+                    request.header("Cookie", &cookie)
+                };
+                let response = request.send().unwrap();
+                assert!(response.status().is_success());
+                let result = response.bytes().unwrap();
+                if operation == "original" {
+                    assert_eq!(result.as_slice(), bytes.as_slice());
+                } else {
+                    assert_eq!(
+                        image::guess_format(&result).unwrap(),
+                        image::ImageFormat::Jpeg
+                    );
+                }
+            }
+            drop(server);
+        }
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -3863,6 +4064,7 @@ mod tests {
                     id,
                     timestamp_ms: id,
                     content: "x".repeat(200),
+                    images: Vec::new(),
                 })
             })
             .collect::<Vec<_>>();
@@ -3880,6 +4082,7 @@ mod tests {
             id: 9,
             timestamp_ms: 9,
             content: "x".repeat(MAX_EVENT_BATCH_BYTES + 1024),
+            images: Vec::new(),
         })];
         let (count, bytes) = event_prefix_within_budget(&oversized, MAX_EVENT_BATCH_BYTES).unwrap();
         assert_eq!(count, 1, "an oversized atomic event must still be sent");
@@ -3895,6 +4098,7 @@ mod tests {
                         id: first_event_id + offset,
                         timestamp_ms: first_event_id + offset,
                         content: "large public WebUI history ".repeat(24),
+                        images: Vec::new(),
                     })
                 })
                 .collect::<Vec<_>>();

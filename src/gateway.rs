@@ -762,6 +762,7 @@ fn validate_proxy_path(path: &str) -> Result<()> {
             | "files/jobs/status"
             | "files/jobs/cancel"
             | "files/uploads/create"
+            | "files/paste-images/create"
             | "files/uploads/chunk"
             | "files/uploads/finish"
             | "files/uploads/cancel"

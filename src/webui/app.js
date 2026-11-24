@@ -905,6 +905,7 @@ function reconcileBackgroundAgents(workspace, snapshot) {
   let changed = false;
   for (const id of workspace.stores.keys()) {
     if (ids.has(id)) continue;
+    clearPromptImages(workspace.stores.get(id));
     workspace.stores.delete(id);
     workspace.drafts.delete(id);
     clearDraftBatch(workspace.draftSync.get(id));
@@ -1674,6 +1675,9 @@ function showLogin(message = "") {
   synchronizeWindowTitle(null);
   if (alreadyVisible) return;
 
+  for (const bucket of [state, ...state.workspaceStates.values()]) {
+    for (const store of bucket.stores.values()) clearPromptImages(store);
+  }
   deactivateSessionTerminalView();
   stopHttpPolling();
   cancelBackgroundWorkspaceSync();
@@ -2243,6 +2247,7 @@ function reconcileAgents() {
   const ids = new Set(state.snapshot.agents.map((agent) => agent.id));
   for (const id of state.stores.keys()) {
     if (!ids.has(id)) {
+      clearPromptImages(state.stores.get(id));
       state.stores.delete(id);
       state.drafts.delete(id);
       clearDraftBatch(state.draftSync.get(id));
@@ -2368,12 +2373,13 @@ function emptyProjectionChanges() {
 
 function pendingPromptReachedProjection(store) {
   const pending = store?.pendingPromptSubmission;
-  if (!pending) return false;
+  if (!pending || pending.imagesReady === false) return false;
   return store.projection.messages.some((message) =>
     message.kind === "user"
       && message.key?.startsWith("user:")
       && Number(message.eventId) > pending.afterEventId
-      && message.content === pending.content);
+      && message.content === pending.content
+      && JSON.stringify((message.images || []).map((image) => image.path)) === JSON.stringify(pending.imagePaths || []));
 }
 
 function markPendingPromptConfirmation(store, changes) {
@@ -3050,7 +3056,13 @@ function estimateTranscriptMessageHeight(message, _index, width = elements.trans
   }
   if (message.kind === "tool" || message.kind === "worker-activity") return 51;
   if (message.kind === "turn-toolbar") return 40;
-  if (message.kind === "user") return 72;
+  if (message.kind === "user") {
+    const count = message.images?.length || 0;
+    if (!count) return 72;
+    const columns = Math.max(1, Math.floor((Math.min(720, width) + 12) / 252));
+    const rows = Math.ceil(count / columns);
+    return 72 + 10 + rows * 243 + (rows - 1) * 12;
+  }
   if (message.kind === "assistant") return 120;
   return 45;
 }
@@ -3119,6 +3131,12 @@ function updateMessageNode(node, message, afterTool, followsTool, index) {
     node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
     return;
   }
+  if (message.kind === "user") {
+    node.querySelector(".user-message-content").textContent = message.content;
+    updatePromptImageGallery(node, message);
+    node.meRenderRevision = messageRenderRevision(message, afterTool, followsTool);
+    return;
+  }
   if (message.kind === "assistant") {
     node.classList.toggle("after-tool", afterTool);
     const markdown = node.querySelector(":scope > .markdown");
@@ -3168,7 +3186,7 @@ function messageDomKey(message, index) {
 
 function renderMessageHtml(message, afterTool, followsTool = false) {
   if (!messageIsVisible(message)) return `<div class="message-block projection-hidden hidden" aria-hidden="true"></div>`;
-  if (message.kind === "user") return `<div class="message-block user"><div class="user-message-content">${escapeHtml(message.content)}</div><button class="user-message-actions" type="button" aria-label="消息操作" aria-haspopup="menu" aria-expanded="false">···</button></div>`;
+  if (message.kind === "user") return `<div class="message-block user"><div class="user-message-bubble"><div class="user-message-content">${escapeHtml(message.content)}</div><button class="user-message-actions" type="button" aria-label="消息操作" aria-haspopup="menu" aria-expanded="false">···</button></div>${promptImageGalleryHtml(message)}</div>`;
   if (message.kind === "assistant") return `<div class="message-block assistant ${afterTool ? "after-tool" : ""}"><span class="block-marker">●</span><div class="markdown">${renderMarkdown(message.content.trim())}</div></div>`;
   if (message.kind === "turn-toolbar") return `<div class="message-block turn-toolbar" aria-label="本轮用时"><span>▶ 用时 ${formatTurnElapsed(message.durationMs)} · ${formatTurnTokens(message.tokenCount)} · ${formatTurnCompletedAt(message.timestamp)}</span><div class="turn-actions"><button class="clone-turn" type="button">克隆</button><button class="regenerate-turn" type="button">重新生成</button></div></div>`;
   if (message.kind === "tool") return renderToolCard(message.tool, followsTool);
@@ -3399,6 +3417,28 @@ function toolImageItems(tool) {
       width: image.width, height: image.height,
     };
   });
+}
+
+function promptImageItems(message) {
+  return (message.images || []).map((image) => {
+    const path = `/api/images/${encodeURIComponent(state.selectedAgent)}/${image.sha256}`;
+    return { preview: frontendRuntime.apiPath(`${path}/preview`, state.workspaceId), original: frontendRuntime.apiPath(`${path}/original`, state.workspaceId), filename: image.path.split(/[\\/]/).pop(), width: image.width, height: image.height };
+  });
+}
+
+function promptImageGalleryHtml(message) {
+  const items = promptImageItems(message);
+  return items.length ? `<me-image-gallery data-items="${escapeAttr(JSON.stringify(items))}"></me-image-gallery>` : "";
+}
+
+function updatePromptImageGallery(node, message) {
+  const items = promptImageItems(message);
+  const existing = node.querySelector(":scope > me-image-gallery");
+  if (!items.length) { existing?.remove(); return; }
+  const encoded = JSON.stringify(items);
+  if (existing?.dataset.items === encoded) return;
+  const gallery = document.createElement("me-image-gallery"); gallery.dataset.items = encoded;
+  if (existing) existing.replaceWith(gallery); else node.append(gallery);
 }
 
 function toolImageGalleryHtml(tool) {
@@ -3773,6 +3813,42 @@ function renderPlanCard({ plan, notes }) {
     ${notes.map((note) => `<div class="plan-note"><span class="note-kind">${escapeHtml(String(note.kind).toUpperCase())}</span>${escapeHtml(note.content)}</div>`).join("")}</div>`;
 }
 
+let promptImageSequence = 0;
+
+function clearPromptImages(store) {
+  if (!store) return;
+  if (store.promptImages?.length && store.pendingPromptSubmission && !store.pendingPromptSubmission.submitted) store.pendingPromptSubmission.cancelled = true;
+  for (const image of store.promptImages || []) URL.revokeObjectURL(image.url);
+  store.promptImages = [];
+}
+
+function addPromptImages(files) {
+  const store = currentStore();
+  if (!store || store.pendingPromptSubmission || agentMeta()?.kind === "sub-agent") return;
+  const images = store.promptImages ||= [];
+  let total = images.reduce((sum, image) => sum + image.file.size, 0);
+  for (const file of files) {
+    if (!file.type.startsWith("image/") && !/\.(png|jpe?g|tiff?|gif|webp|bmp|ico|avif|qoi|pnm|pbm|pgm|ppm|tga|dds|hdr|exr)$/i.test(file.name)) continue;
+    if (!file.size || images.length >= 16 || total + file.size > 60 * 1024 * 1024) { toast("每条消息最多添加 16 张图片，总大小不超过 60 MiB", true); break; }
+    images.push({ id: ++promptImageSequence, file, url: URL.createObjectURL(file), image: null });
+    total += file.size;
+  }
+  renderComposer();
+}
+
+function renderPromptImages(sending, readOnly) {
+  const container = $("#prompt-images");
+  const images = currentStore()?.promptImages || [];
+  const signature = JSON.stringify([state.workspaceId, state.selectedAgent, images.map((image) => image.id)]);
+  if (container.dataset.signature !== signature) {
+    container.dataset.signature = signature;
+    container.innerHTML = images.map((image) => `<div class="prompt-image" data-image-id="${image.id}"><button class="prompt-image-preview" type="button" aria-label="选择图片 ${escapeAttr(image.file.name)}"><img src="${escapeAttr(image.url)}" alt="${escapeAttr(image.file.name)}" decoding="async"></button><button class="prompt-image-remove" type="button" aria-label="移除图片 ${escapeAttr(image.file.name)}">×</button></div>`).join("");
+  }
+  container.classList.toggle("hidden", !images.length);
+  container.querySelectorAll("button").forEach((button) => { button.disabled = sending || readOnly; });
+  $("#add-prompt-images").disabled = sending || readOnly;
+}
+
 function renderComposer() {
   const meta = agentMeta();
   const readOnly = meta?.kind === "sub-agent";
@@ -3793,6 +3869,7 @@ function renderComposer() {
     ? "消息进入列表后即可继续输入"
     : worker ? "可调整模型、推理强度或停止当前任务"
       : readOnly ? "子 Agent 仅允许查看" : `${sendShortcutHint()} · Esc 中止/撤回/清空`;
+  renderPromptImages(sending, readOnly);
 }
 
 function renderStatus() {
@@ -4996,6 +5073,7 @@ function finishPendingPromptSubmission(agentId) {
   if (!store || store.pendingPromptSubmission !== pending) return false;
   pending.settled = true;
   store.pendingPromptSubmission = null;
+  clearPromptImages(store);
   const meta = bucket.snapshot.agents.find((agent) => agent.id === agentId);
   const observedRevision = Number(meta?.input_draft_revision);
   const hasCurrentDraft = Number.isSafeInteger(observedRevision)
@@ -5017,7 +5095,8 @@ function finishPendingPromptSubmission(agentId) {
 async function submitPrompt() {
   const displayContent = elements.input.value;
   const content = displayContent.trim();
-  if (!content || !state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
+  const images = currentStore()?.promptImages || [];
+  if ((!content && !images.length) || !state.selectedAgent || agentMeta()?.kind === "sub-agent") return;
   const workspaceId = state.workspaceId;
   const agentId = state.selectedAgent;
   const store = currentStore();
@@ -5027,6 +5106,8 @@ async function submitPrompt() {
     content,
     displayContent,
     afterEventId: promptSubmissionBoundary(agentMeta(), store),
+    imagesReady: images.length === 0,
+    imagePaths: [],
     status: "sending",
     settled: false,
   };
@@ -5034,8 +5115,22 @@ async function submitPrompt() {
   state.drafts.set(agentId, displayContent);
   renderComposer();
   await pauseDraftSyncForSubmission(agentId);
+  let submitted = false;
   try {
-    const response = await sendCommand({ command: "submit_user_prompt", agent_id: agentId, content }, workspaceId);
+    const call = (path, body) => api(path, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }, workspaceId);
+    for (const item of images) {
+      if (item.image) continue;
+      const created = await call("/api/files/paste-images/create", { agent_id: agentId, original: { name: item.file.name, mime_type: item.file.type, last_modified_ms: Number.isFinite(item.file.lastModified) ? item.file.lastModified : null }, size_bytes: item.file.size });
+      const finished = await globalThis.MeFileManager.uploadContent(call, item.file, created.upload, { cancelled: () => Boolean(pending.cancelled) });
+      if (!finished.image) throw new Error("图片上传失败，请重试");
+      item.image = finished.image;
+    }
+    if (pending.cancelled) throw new Error("图片发送已取消");
+    pending.imagePaths = images.map((item) => item.image.path);
+    pending.imagesReady = true;
+    submitted = true;
+    pending.submitted = true;
+    const response = await sendCommand({ command: "submit_user_prompt", agent_id: agentId, content, image_paths: pending.imagePaths }, workspaceId);
     const revision = Number(response?.receipt?.prompt_submission_revision);
     const inputDraftRevision = Number(response?.receipt?.input_draft_revision);
     if (!Number.isSafeInteger(revision) || !Number.isSafeInteger(inputDraftRevision)) {
@@ -5050,7 +5145,7 @@ async function submitPrompt() {
     if (state.workspaceId === workspaceId && state.selectedAgent === agentId) renderComposer();
   } catch (error) {
     if (pending.settled) return;
-    if (commandResultIsUnknown(error)) {
+    if (submitted && commandResultIsUnknown(error)) {
       pending.status = "confirming";
       if (state.workspaceId === workspaceId && state.selectedAgent === agentId) renderComposer();
       return;
@@ -5070,7 +5165,7 @@ function openSendSettings() {
 
 function submitOrOpenSendSettings() {
   if (currentStore()?.pendingPromptSubmission) return;
-  if (!elements.input.value.trim()) {
+  if (!elements.input.value.trim() && !currentStore()?.promptImages?.length) {
     openSendSettings();
     return;
   }
@@ -5488,6 +5583,25 @@ elements.scrollToBottom.addEventListener("click", scrollTranscriptToBottomAfterL
 elements.statusModelTrigger.addEventListener("click", openModelDrawer);
 elements.statusEffortTrigger.addEventListener("click", openEffortDrawer);
 elements.statusContextTrigger.addEventListener("click", openContextDrawer);
+$("#add-prompt-images").addEventListener("click", () => $("#prompt-image-files").click());
+$("#prompt-image-files").addEventListener("change", (event) => { addPromptImages([...event.target.files]); event.target.value = ""; });
+elements.input.addEventListener("paste", (event) => {
+  const files = [...(event.clipboardData?.items || [])].filter((item) => item.kind === "file").map((item) => item.getAsFile()).filter(Boolean);
+  if (files.some((file) => file.type.startsWith("image/"))) { event.preventDefault(); addPromptImages(files); }
+});
+elements.composer.addEventListener("dragover", (event) => { if ([...(event.dataTransfer?.types || [])].includes("Files")) event.preventDefault(); });
+elements.composer.addEventListener("drop", (event) => {
+  if (!event.dataTransfer?.files?.length) return;
+  event.preventDefault(); addPromptImages([...event.dataTransfer.files]);
+});
+$("#prompt-images").addEventListener("click", (event) => {
+  const tile = event.target.closest("[data-image-id]");
+  const store = currentStore();
+  if (!tile || !store || store.pendingPromptSubmission) return;
+  if (!event.target.closest(".prompt-image-remove")) { tile.classList.toggle("selected"); return; }
+  const index = store.promptImages.findIndex((image) => image.id === Number(tile.dataset.imageId));
+  if (index >= 0) { URL.revokeObjectURL(store.promptImages[index].url); store.promptImages.splice(index, 1); renderComposer(); }
+});
 elements.input.addEventListener("input", () => {
   state.lastInputAt = performance.now();
   saveDraft();

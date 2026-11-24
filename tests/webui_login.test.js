@@ -23,6 +23,8 @@ function loadShowLogin(relative) {
     authenticated: true,
     connectionHadSuccess: true,
     reconnectAttempt: 3,
+    stores: new Map(),
+    workspaceStates: new Map(),
   };
   const counters = { terminal: 0, polling: 0, background: 0, phase: 0, focus: 0 };
   const elements = {
@@ -39,7 +41,7 @@ function loadShowLogin(relative) {
     "cancelBackgroundWorkspaceSync", "setConnectionPhase",
     "runtimeCapabilities", "frontendRuntime", "rememberedDevices", "setLoginView",
     "renderLoginDevices", "synchronizeWindowTitle",
-    "fileManagerController", "gaisController",
+    "fileManagerController", "gaisController", "clearPromptImages",
     `${source.slice(start, end)}\nreturn showLogin;`,
   );
   const showLogin = factory(
@@ -55,7 +57,7 @@ function loadShowLogin(relative) {
     () => {},
     () => {},
     () => {},
-    null, null,
+    null, null, () => {},
   );
   return { showLogin, state, elements, counters };
 }

@@ -297,7 +297,8 @@ button { color: inherit; }
 .scroll-to-bottom svg { width: 19px; height: 19px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
 .empty-state { display: grid; min-height: 55%; place-items: center; color: var(--dim); text-align: center; }
 .message-block { contain: layout paint style; content-visibility: auto; contain-intrinsic-size: auto 80px; margin: 0 0 20px; }
-.message-block.user { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 13px 12px 13px 16px; border-radius: 9px; background: var(--user-bg); color: var(--yellow); }
+.user-message-bubble { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: 8px; padding: 13px 12px 13px 16px; border-radius: 9px; background: var(--user-bg); color: var(--yellow); }
+.message-block.user > me-image-gallery { margin: 10px 0 0; }
 .user-message-content { min-width: 0; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
 .user-message-actions { min-width: 25px; height: 23px; padding: 0 4px; border: 0; border-radius: 6px; background: transparent; color: var(--muted); cursor: pointer; font-weight: 800; line-height: 1; letter-spacing: 1px; }
 .user-message-actions:hover, .user-message-actions[aria-expanded="true"] { background: var(--hover-fill); color: var(--text); }
@@ -423,6 +424,19 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .objective-plan.active { color: var(--text); }
 .composer-shell { position: relative; margin: 0 max(24px, calc((100% - 1200px) / 2)) 13px; padding: 11px 13px 9px; border: 1px solid var(--border-bright); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
 .composer-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow); }
+.composer-attachment-tools { display: flex; justify-content: flex-end; height: 24px; margin: -4px -4px 3px 0; }
+#add-prompt-images { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 23px; line-height: 1; cursor: pointer; }
+#add-prompt-images:hover:not(:disabled) { background: var(--hover-fill); color: var(--text); }
+#add-prompt-images:disabled { opacity: .4; cursor: default; }
+.prompt-images { display: flex; gap: 10px; overflow-x: auto; padding: 5px 3px 10px; scrollbar-width: none; }
+.prompt-images::-webkit-scrollbar { display: none; }
+.prompt-image { position: relative; flex: 0 0 72px; height: 72px; }
+.prompt-image-preview { display: block; width: 100%; height: 100%; padding: 0; border: 1px solid var(--border-bright); border-radius: 9px; overflow: hidden; background: var(--panel-3); color: var(--muted); cursor: pointer; }
+.prompt-image-preview img { width: 100%; height: 100%; object-fit: cover; font-size: 10px; }
+.prompt-image-remove { position: absolute; top: -4px; right: -4px; width: 23px; height: 23px; padding: 0; border: 2px solid var(--panel); border-radius: 50%; background: #dc3545; color: #fff; font-size: 19px; line-height: 18px; cursor: pointer; opacity: 0; pointer-events: none; }
+.prompt-image.selected .prompt-image-remove, .prompt-image:focus-within .prompt-image-remove { opacity: 1; pointer-events: auto; }
+@media (hover: hover) { .prompt-image:hover .prompt-image-remove { opacity: 1; pointer-events: auto; } }
+.composer-shell.sending .prompt-image-remove { opacity: 0; pointer-events: none; }
 .prompt-input-stack { position: relative; }
 #prompt-input, .prompt-input-mirror { display: block; width: 100%; resize: none; border: 0; outline: 0; background: transparent; color: var(--text); line-height: 1.55; }
 #prompt-input { position: relative; z-index: 1; min-height: 29px; max-height: 180px; }
@@ -695,7 +709,7 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
     -webkit-overflow-scrolling: touch;
   }
   .message-block { margin-bottom: 17px; }
-  .message-block.user { padding: 11px 13px; border-radius: 8px; }
+  .user-message-bubble { padding: 11px 13px; border-radius: 8px; }
   .message-block.assistant, .message-block.notice, .message-block.session { grid-template-columns: 14px minmax(0, 1fr); gap: 7px; }
   .message-block.assistant.after-tool { margin-top: 23px; padding-top: 22px; }
   .block-marker, .tool-marker { font-size: 17px; }

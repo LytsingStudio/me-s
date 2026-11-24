@@ -2544,6 +2544,7 @@ pub fn run(
                         } = commands.submit(UiCommand::SubmitUserPrompt {
                             agent_id: agent_id.clone(),
                             content: prompt,
+                            image_paths: Vec::new(),
                         })?
                         else {
                             return Err(
@@ -7492,6 +7493,7 @@ mod tests {
                 id: 1,
                 timestamp_ms: started_at_ms,
                 content: "complete the work".into(),
+                images: Vec::new(),
             }),
             Event::AgentTurn(crate::event::AgentTurnEvent {
                 id: 2,
@@ -7635,6 +7637,7 @@ mod tests {
                     id: 0,
                     timestamp_ms: 1_000,
                     content: "work".into(),
+                    images: Vec::new(),
                 }),
                 Event::AgentTurn(crate::event::AgentTurnEvent {
                     id: 1,
@@ -8249,6 +8252,7 @@ mod tests {
                 id: 1,
                 timestamp_ms: 10,
                 content: "continue".into(),
+                images: Vec::new(),
             }),
             Event::WorkMapPendingReminder(crate::event::WorkMapPendingReminderEvent {
                 id: 2,

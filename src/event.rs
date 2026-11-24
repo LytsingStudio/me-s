@@ -607,10 +607,21 @@ pub struct SystemPromptEvent {
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub struct PromptImage {
+    pub path: String,
+    pub sha256: String,
+    pub format: String,
+    pub width: u32,
+    pub height: u32,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub struct UserPromptEvent {
     pub id: EventId,
     pub timestamp_ms: u64,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -633,6 +644,8 @@ pub struct FollowUpPromptEvent {
     pub timestamp_ms: u64,
     pub prompt_id: EventId,
     pub content: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<PromptImage>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -1393,6 +1406,19 @@ impl EventBase for UserPromptEvent {
     }
 
     fn getHash(&self) -> String {
+        if !self.images.is_empty() {
+            return stable_hash(
+                self.id,
+                self.timestamp_ms,
+                30,
+                &[],
+                &[],
+                &[
+                    &self.content,
+                    &serde_json::to_string(&self.images).expect("images serialize"),
+                ],
+            );
+        }
         stable_hash(self.id, self.timestamp_ms, 0, &[], &[], &[&self.content])
     }
 
@@ -1487,6 +1513,19 @@ impl EventBase for FollowUpPromptEvent {
     }
 
     fn getHash(&self) -> String {
+        if !self.images.is_empty() {
+            return stable_hash(
+                self.id,
+                self.timestamp_ms,
+                31,
+                &[self.prompt_id],
+                &[],
+                &[
+                    &self.content,
+                    &serde_json::to_string(&self.images).expect("images serialize"),
+                ],
+            );
+        }
         stable_hash(
             self.id,
             self.timestamp_ms,
@@ -2939,12 +2978,21 @@ impl EventDataBase {
     }
 
     pub fn append_user_prompt(&mut self, content: impl Into<String>) -> Result<EventId> {
+        self.append_user_prompt_with_images(content, Vec::new())
+    }
+
+    pub fn append_user_prompt_with_images(
+        &mut self,
+        content: impl Into<String>,
+        images: Vec<PromptImage>,
+    ) -> Result<EventId> {
         let id = self.next_event_id;
         let timestamp_ms = self.next_timestamp_ms()?;
         let event = Event::UserPrompt(UserPromptEvent {
             id,
             timestamp_ms,
             content: content.into(),
+            images,
         });
         self.append(event)?;
         Ok(id)
@@ -2977,6 +3025,15 @@ impl EventDataBase {
         prompt_id: EventId,
         content: impl Into<String>,
     ) -> Result<EventId> {
+        self.append_follow_up_prompt_with_images(prompt_id, content, Vec::new())
+    }
+
+    pub fn append_follow_up_prompt_with_images(
+        &mut self,
+        prompt_id: EventId,
+        content: impl Into<String>,
+        images: Vec<PromptImage>,
+    ) -> Result<EventId> {
         let id = self.next_event_id;
         let timestamp_ms = self.next_timestamp_ms()?;
         let event = Event::FollowUpPrompt(FollowUpPromptEvent {
@@ -2984,6 +3041,7 @@ impl EventDataBase {
             timestamp_ms,
             prompt_id,
             content: content.into(),
+            images,
         });
         self.append(event)?;
         Ok(id)
@@ -4008,7 +4066,14 @@ impl EventDataBase {
             timestamp_ms,
             title,
         }));
-        Self::create_from_events(path, events)
+        let attachments = crate::prompt_images::clone_attachments(&mut events, path)?;
+        let result = Self::create_from_events(path, events);
+        if result.is_err() {
+            for attachment in attachments {
+                let _ = fs::remove_file(attachment);
+            }
+        }
+        result
     }
 
     fn completed_turn_event(&self, event_id: EventId) -> Result<&AgentTurnEvent> {
@@ -4801,9 +4866,16 @@ fn encode_event_body(event: &Event) -> Vec<u8> {
         }
         Event::UserPrompt(event) => {
             let mut raw = Vec::with_capacity(1 + event.content.len());
-            raw.push(0);
+            raw.push(if event.images.is_empty() { 0 } else { 30 });
             encode_varint(event.timestamp_ms, &mut raw);
-            raw.extend_from_slice(event.content.as_bytes());
+            if event.images.is_empty() {
+                raw.extend_from_slice(event.content.as_bytes());
+            } else {
+                raw.extend_from_slice(
+                    &serde_json::to_vec(&(&event.content, &event.images))
+                        .expect("prompt attachment metadata serializes"),
+                );
+            }
             raw
         }
         Event::ManagerPrompt(event) => {
@@ -4822,10 +4894,17 @@ fn encode_event_body(event: &Event) -> Vec<u8> {
         }
         Event::FollowUpPrompt(event) => {
             let mut raw = Vec::with_capacity(12 + event.content.len());
-            raw.push(9);
+            raw.push(if event.images.is_empty() { 9 } else { 31 });
             encode_varint(event.timestamp_ms, &mut raw);
             encode_varint(event.prompt_id, &mut raw);
-            raw.extend_from_slice(event.content.as_bytes());
+            if event.images.is_empty() {
+                raw.extend_from_slice(event.content.as_bytes());
+            } else {
+                raw.extend_from_slice(
+                    &serde_json::to_vec(&(&event.content, &event.images))
+                        .expect("prompt attachment metadata serializes"),
+                );
+            }
             raw
         }
         Event::AssistResponse(event) => {
@@ -5660,10 +5739,32 @@ fn decode_event_with_format(
                 name,
             }))
         }
+        30 => {
+            let (content, images): (String, Vec<PromptImage>) = serde_json::from_slice(body)?;
+            Ok(Event::UserPrompt(UserPromptEvent {
+                id,
+                timestamp_ms,
+                content,
+                images,
+            }))
+        }
+        31 => {
+            let (prompt_id, consumed) = decode_varint(body)?;
+            let (content, images): (String, Vec<PromptImage>) =
+                serde_json::from_slice(&body[consumed..])?;
+            Ok(Event::FollowUpPrompt(FollowUpPromptEvent {
+                id,
+                timestamp_ms,
+                prompt_id,
+                content,
+                images,
+            }))
+        }
         0 => Ok(Event::UserPrompt(UserPromptEvent {
             id,
             timestamp_ms,
             content: String::from_utf8(body.to_vec())?,
+            images: Vec::new(),
         })),
         23 => Ok(Event::ManagerPrompt(ManagerPromptEvent {
             id,
@@ -5682,6 +5783,7 @@ fn decode_event_with_format(
                 timestamp_ms,
                 prompt_id,
                 content: String::from_utf8(body[consumed..].to_vec())?,
+                images: Vec::new(),
             }))
         }
         1 => {
@@ -6353,6 +6455,7 @@ mod tests {
             id: 0,
             timestamp_ms: 1,
             content: "missing identity".to_owned(),
+            images: Vec::new(),
         })];
         assert!(
             edb_id(&missing)
@@ -6404,6 +6507,7 @@ mod tests {
             id: 0,
             timestamp_ms: 1_000,
             content: "hello".to_owned(),
+            images: Vec::new(),
         };
         let second = UserPromptEvent {
             timestamp_ms: 1_001,
@@ -6705,7 +6809,7 @@ mod tests {
         assert!(migrated.events().iter().any(|event| {
             matches!(event, Event::UserPrompt(prompt) if prompt.content == "preserve v39")
         }));
-        assert_eq!(fs::read(&path).unwrap()[4], 41);
+        assert_eq!(fs::read(&path).unwrap()[4], 42);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -6721,6 +6825,7 @@ mod tests {
                 id: 0,
                 timestamp_ms: 1,
                 content: "run".to_owned(),
+                images: Vec::new(),
             }),
             Event::ApiStateUpdate(ApiStateUpdateEvent {
                 id: 1,
@@ -6810,7 +6915,7 @@ mod tests {
             migrated.get(6),
             Some(Event::TerminalSessionState(event)) if event.session_id == "pty-3"
         ));
-        assert_eq!(fs::read(&path).unwrap()[4], 41);
+        assert_eq!(fs::read(&path).unwrap()[4], 42);
         let migrated_id = migrated.edb_id().unwrap().to_owned();
         let migrated_bytes = fs::read(&path).unwrap();
         drop(migrated);
@@ -8408,7 +8513,7 @@ mod tests {
                     |update| update.kind == CompactKind::WorkerSingleTurn && update.stage.is_none()
                 )
         );
-        assert_eq!(fs::read(&path).unwrap()[4], 41);
+        assert_eq!(fs::read(&path).unwrap()[4], 42);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }
@@ -8468,7 +8573,7 @@ mod tests {
                 Some(Event::CompactStateUpdate(update))
                     if update.kind == expected && update.total_stages == 6
             ));
-            assert_eq!(fs::read(&path).unwrap()[4], 41);
+            assert_eq!(fs::read(&path).unwrap()[4], 42);
             drop(migrated);
             fs::remove_dir_all(directory).unwrap();
         }
@@ -8505,7 +8610,7 @@ mod tests {
             migrated.get(compact + 1),
             Some(Event::CompactStateUpdate(update)) if update.total_stages == 6
         ));
-        assert_eq!(fs::read(&path).unwrap()[4], 41);
+        assert_eq!(fs::read(&path).unwrap()[4], 42);
         drop(migrated);
         fs::remove_dir_all(directory).unwrap();
     }

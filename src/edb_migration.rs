@@ -13,8 +13,8 @@ use std::fs::File;
 use std::os::unix::fs::PermissionsExt;
 
 pub(crate) const COMPATIBILITY_BASELINE_VERSION: u8 = 29;
-pub(crate) const CURRENT_FILE_VERSION: u8 = 41;
-pub(crate) const CURRENT_FILE_MAGIC: [u8; 8] = *b"MEDB\x29\0\0\0";
+pub(crate) const CURRENT_FILE_VERSION: u8 = 42;
+pub(crate) const CURRENT_FILE_MAGIC: [u8; 8] = *b"MEDB\x2a\0\0\0";
 const FILE_SIGNATURE: &[u8; 4] = b"MEDB";
 const FILE_MAGIC_SIZE: usize = 8;
 const FILE_HEADER_SIZE: usize = 16;
@@ -88,6 +88,11 @@ const MIGRATION_STEPS: &[MigrationStep] = &[
         from: 40,
         to: 41,
         migrate: migrate_v40_to_v41,
+    },
+    MigrationStep {
+        from: 41,
+        to: 42,
+        migrate: migrate_v41_to_v42,
     },
 ];
 
@@ -262,6 +267,12 @@ fn migrate_v40_to_v41(bytes: Vec<u8>) -> Result<Vec<u8>> {
     crate::event::migrate_edb_id_v40_to_v41(bytes)
 }
 
+fn migrate_v41_to_v42(mut bytes: Vec<u8>) -> Result<Vec<u8>> {
+    validate_header_for_version(&bytes, 41)?;
+    bytes[FILE_SIGNATURE.len()] = 42;
+    Ok(bytes)
+}
+
 fn migration_temp_path(path: &Path) -> Result<PathBuf> {
     let parent = path.parent().ok_or("EDB path has no parent")?;
     let file_name = path
@@ -351,8 +362,8 @@ mod tests {
         source[8..16].copy_from_slice(&42_u64.to_le_bytes());
         let planned = plan(&source).unwrap().unwrap();
         assert_eq!(planned.source_version, 29);
-        assert_eq!(planned.target_version, 41);
-        assert_eq!(planned.bytes[4], 41);
+        assert_eq!(planned.target_version, 42);
+        assert_eq!(planned.bytes[4], 42);
         assert!(planned.bytes.len() > source.len());
         assert!(plan(&planned.bytes).unwrap().is_none());
     }
@@ -363,8 +374,8 @@ mod tests {
         source[8..16].copy_from_slice(&77_u64.to_le_bytes());
         let planned = plan(&source).unwrap().unwrap();
         assert_eq!(planned.source_version, 30);
-        assert_eq!(planned.target_version, 41);
-        assert_eq!(planned.bytes[4], 41);
+        assert_eq!(planned.target_version, 42);
+        assert_eq!(planned.bytes[4], 42);
         assert!(planned.bytes.len() > source.len());
     }
 
@@ -374,8 +385,8 @@ mod tests {
         source[8..16].copy_from_slice(&91_u64.to_le_bytes());
         let planned = plan(&source).unwrap().unwrap();
         assert_eq!(planned.source_version, 31);
-        assert_eq!(planned.target_version, 41);
-        assert_eq!(planned.bytes[4], 41);
+        assert_eq!(planned.target_version, 42);
+        assert_eq!(planned.bytes[4], 42);
         assert!(planned.bytes.len() > source.len());
     }
 
@@ -389,16 +400,17 @@ mod tests {
         );
         let v38 = plan(&header(38)).unwrap().unwrap();
         assert_eq!(v38.source_version, 38);
-        assert_eq!(v38.target_version, 41);
-        assert_eq!(v38.bytes[4], 41);
+        assert_eq!(v38.target_version, 42);
+        assert_eq!(v38.bytes[4], 42);
         let v39 = plan(&header(39)).unwrap().unwrap();
         assert_eq!(v39.source_version, 39);
-        assert_eq!(v39.target_version, 41);
-        assert_eq!(v39.bytes[4], 41);
+        assert_eq!(v39.target_version, 42);
+        assert_eq!(v39.bytes[4], 42);
         let v40 = plan(&header(40)).unwrap().unwrap();
-        assert_eq!(v40.target_version, 41);
-        assert!(plan(&header(41)).unwrap().is_none());
-        assert!(plan(&header(42)).unwrap_err().to_string().contains("newer"));
+        assert_eq!(v40.target_version, 42);
+        assert_eq!(plan(&header(41)).unwrap().unwrap().target_version, 42);
+        assert!(plan(&header(42)).unwrap().is_none());
+        assert!(plan(&header(43)).unwrap_err().to_string().contains("newer"));
         assert!(plan(b"MEDB").is_err());
     }
 }

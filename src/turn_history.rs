@@ -11,7 +11,8 @@ use crate::{
 struct UserTurnHistory {
     id: EventId,
     content: String,
-    follow_ups: Vec<String>,
+    image_paths: Vec<String>,
+    follow_ups: Vec<(String, Vec<String>)>,
 }
 
 pub(crate) fn snapshot(events: &[Event], boundary: EventId) -> Result<String> {
@@ -23,11 +24,23 @@ pub(crate) fn snapshot(events: &[Event], boundary: EventId) -> Result<String> {
             Event::UserPrompt(prompt) => turns.push(UserTurnHistory {
                 id: prompt.id,
                 content: prompt.content.clone(),
+                image_paths: prompt
+                    .images
+                    .iter()
+                    .map(|image| image.path.clone())
+                    .collect(),
                 follow_ups: Vec::new(),
             }),
             Event::FollowUpPrompt(prompt) => {
                 if let Some(turn) = turns.last_mut() {
-                    turn.follow_ups.push(prompt.content.clone());
+                    turn.follow_ups.push((
+                        prompt.content.clone(),
+                        prompt
+                            .images
+                            .iter()
+                            .map(|image| image.path.clone())
+                            .collect(),
+                    ));
                 }
             }
             _ => {}
@@ -59,11 +72,22 @@ fn render(turns: &[UserTurnHistory]) -> String {
     for turn in turns {
         output.push_str(&format!("\nturn-{:08}\n", turn.id));
         output.push_str(&format!("  User: {}\n", json_string(&turn.content)));
-        for follow_up in &turn.follow_ups {
-            output.push_str(&format!("  FollowUp: {}\n", json_string(follow_up)));
+        render_image_paths(&mut output, &turn.image_paths);
+        for (content, image_paths) in &turn.follow_ups {
+            output.push_str(&format!("  FollowUp: {}\n", json_string(content)));
+            render_image_paths(&mut output, image_paths);
         }
     }
     output.trim_end().to_owned()
+}
+
+fn render_image_paths(output: &mut String, paths: &[String]) {
+    if !paths.is_empty() {
+        output.push_str(&format!(
+            "  Attached image paths (not image content): {}\n",
+            to_string(paths).expect("paths serialize")
+        ));
+    }
 }
 
 fn json_string(value: &str) -> String {
@@ -185,6 +209,37 @@ mod tests {
 
         edb.append_context_cleared().unwrap();
         assert_eq!(latest_snapshot(edb.events()).unwrap(), None);
+    }
+
+    #[test]
+    fn attached_paths_are_historical_metadata_and_preserve_user_text_and_order() {
+        let mut edb = EventDataBase::new();
+        let image = |path: &str| crate::event::PromptImage {
+            path: path.into(),
+            sha256: "a".repeat(64),
+            format: "png".into(),
+            width: 1,
+            height: 1,
+        };
+        let prompt = edb
+            .append_user_prompt_with_images(
+                "exact <text>",
+                vec![image("/first.png"), image("/second.png")],
+            )
+            .unwrap();
+        edb.append_follow_up_prompt_with_images(prompt, "", vec![image("/third.png")])
+            .unwrap();
+        let boundary = edb
+            .append_tool_call(1, prompt, "compact", compact::TOOL_NAME, "{}")
+            .unwrap();
+        let history = snapshot(edb.events(), boundary).unwrap();
+        assert!(history.contains("  User: \"exact <text>\"\n"));
+        assert!(history.contains("  FollowUp: \"\"\n"));
+        assert!(history.contains(
+            "Attached image paths (not image content): [\"/first.png\",\"/second.png\"]"
+        ));
+        assert!(history.find("/second.png").unwrap() < history.find("/third.png").unwrap());
+        assert!(!history.contains("data:image"));
     }
 
     #[test]

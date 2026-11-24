@@ -770,27 +770,14 @@
       if (!upload || upload.state === "skipped") return;
       view.upload = { id: upload.upload_id, label: `上传 ${label}`, done: 0, total: file.size, cancelled: false };
       if (this.state === view) this.renderTask();
-      try {
-        let offset = 0;
-        while (offset < file.size) {
-          if (view.upload.cancelled) throw new Error("上传已取消");
-          const buffer = new Uint8Array(await file.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer());
-          await this.call("/api/files/uploads/chunk", {
-            upload_id: upload.upload_id,
-            offset,
-            data: bytesToBase64(buffer),
-          }, view.identity);
-          offset += buffer.byteLength;
+      await uploadContent((path, body) => this.call(path, body, view.identity), file, upload, {
+        cancelled: () => view.upload.cancelled,
+        onProgress: (offset) => {
           view.upload.done = offset;
           if (this.state === view) this.renderTask();
-        }
-        const finished = await this.call("/api/files/uploads/finish", { upload_id: upload.upload_id }, view.identity);
-        if (finished.state !== "completed") throw new Error(finished.error || "上传未完整完成");
-        this.completeTask(view, "upload");
-      } catch (error) {
-        await this.call("/api/files/uploads/cancel", { upload_id: upload.upload_id }, view.identity).catch(() => {});
-        throw error;
-      }
+        },
+      });
+      this.completeTask(view, "upload");
     }
 
     async downloadSelected() {
@@ -967,5 +954,25 @@
   function escapeHtml(value) { return String(value ?? "").replace(/[&<>"']/g, (character) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[character]); }
   function escapeAttr(value) { return escapeHtml(value).replace(/`/g, "&#96;"); }
 
-  global.MeFileManager = Object.freeze({ create });
+  async function uploadContent(call, file, upload, { cancelled = () => false, onProgress = () => {} } = {}) {
+    try {
+      let offset = 0;
+      while (offset < file.size) {
+        if (cancelled()) throw new Error("上传已取消");
+        const buffer = new Uint8Array(await file.slice(offset, offset + UPLOAD_CHUNK_BYTES).arrayBuffer());
+        await call("/api/files/uploads/chunk", { upload_id: upload.upload_id, offset, data: bytesToBase64(buffer) });
+        offset += buffer.byteLength;
+        onProgress(offset);
+      }
+      if (cancelled()) throw new Error("上传已取消");
+      const finished = await call("/api/files/uploads/finish", { upload_id: upload.upload_id });
+      if (finished.state !== "completed") throw new Error(finished.error || "上传未完整完成");
+      return finished;
+    } catch (error) {
+      await call("/api/files/uploads/cancel", { upload_id: upload.upload_id }).catch(() => {});
+      throw error;
+    }
+  }
+
+  global.MeFileManager = Object.freeze({ create, uploadContent });
 })(globalThis);

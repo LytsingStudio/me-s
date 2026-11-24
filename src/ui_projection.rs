@@ -231,6 +231,8 @@ pub enum UiPartProjection {
         key: String,
         revision: EventId,
         content: String,
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        images: Vec<crate::event::PromptImage>,
         timestamp: u64,
         #[serde(rename = "eventId")]
         event_id: EventId,
@@ -801,6 +803,7 @@ impl ProjectionData {
                     key: format!("user:{}", prompt.id),
                     revision: prompt.id,
                     content: prompt.content.clone(),
+                    images: prompt.images.clone(),
                     timestamp: prompt.timestamp_ms,
                     event_id: prompt.id,
                     rewindable: true,
@@ -819,6 +822,7 @@ impl ProjectionData {
                     key: format!("user:{}", prompt.id),
                     revision: prompt.id,
                     content: prompt.content.clone(),
+                    images: prompt.images.clone(),
                     timestamp: prompt.timestamp_ms,
                     event_id: prompt.id,
                     rewindable: false,
@@ -1132,6 +1136,7 @@ impl ProjectionData {
             key: format!("agent-prompt:{id}"),
             revision: id,
             content: content.to_owned(),
+            images: Vec::new(),
             timestamp,
             event_id: id,
             rewindable: false,

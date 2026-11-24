@@ -253,7 +253,15 @@ pub fn chatbot_catalog() -> Result<ToolboxCatalog> {
     tools.extend(title_tools);
     tools.extend(time_tools);
     tools.extend(compact_tools);
-    let mut catalog = catalog_from_parts(tools, vec![title_brief, time_brief, compact_brief])?;
+    let (image_tools, _) = crate::image_toolbox::catalog_parts(true);
+    let mut view = image_tools
+        .into_iter()
+        .find(|tool| tool.full_name == crate::image_toolbox::VIEW_TOOL_NAME)
+        .expect("Image.View exists");
+    view.route = "Load an image to inspect its visual content when the current model supports image input. Images over 3.5 million pixels are proportionally resized for inspection; original dimensions over 8192 pixels are rejected.".into();
+    view.instructions = "Supply a local path or image URL. Receiving an attachment path does not load its pixels: call Image.View when inspection is needed. A successful call adds the image to your context and returns its metadata and actual scale. The user can also preview and save the original. If the current model cannot accept images, the call fails; do not claim to have viewed it. Protect private images and use only authorized sources.".into();
+    tools.push(view);
+    let mut catalog = catalog_from_parts(tools, vec![title_brief, time_brief, compact_brief, ("Image".into(), "View images with Image.View. Image pixels enter your context only after a successful call, and only when the current model supports image input.".into())])?;
     catalog.prompt = render_chatbot_catalog_prompt(&catalog.tools, &catalog.briefs)?;
     Ok(catalog)
 }
@@ -264,7 +272,7 @@ fn render_chatbot_catalog_prompt(
 ) -> Result<String> {
     let mut sections = vec![r#"# Chatbot utilities and result envelope
 
-The utility catalog contains exactly SetTitle, CurrentTime, and Compact. Their Provider function names are identical to the names shown below.
+The utility catalog contains SetTitle, CurrentTime, Compact, and Image.View. Image.View uses the Provider function name Image_View; the other names are unchanged.
 
 Every utility response uses this runtime envelope:
 
@@ -2315,7 +2323,7 @@ mod tests {
     }
 
     #[test]
-    fn chatbot_catalog_contains_exactly_three_native_utility_tools() {
+    fn chatbot_catalog_contains_only_conversation_utilities_and_image_view() {
         let catalog = chatbot_catalog().unwrap();
         assert_eq!(
             catalog
@@ -2326,21 +2334,24 @@ mod tests {
             vec![
                 compact::TOOL_NAME,
                 current_time::TOOL_NAME,
+                crate::image_toolbox::VIEW_TOOL_NAME,
                 agent_title::TOOL_NAME,
             ]
         );
-        assert_eq!(catalog.model_definitions().len(), 3);
+        assert_eq!(catalog.model_definitions().len(), 4);
         assert!(catalog.resolve_api_name("SetTitle").is_some());
         assert!(catalog.resolve_api_name("CurrentTime").is_some());
         assert!(catalog.resolve_api_name("Compact").is_some());
         assert!(catalog.resolve_api_name("File_Read").is_none());
         assert!(catalog.resolve_api_name("Terminal_Create").is_none());
         assert!(catalog.resolve_api_name("WorkMap_Read").is_none());
-        assert!(catalog.resolve_api_name("Image_View").is_none());
+        assert!(catalog.resolve_api_name("Image_View").is_some());
+        assert!(catalog.resolve_api_name("Image_Info").is_none());
+        assert!(catalog.resolve_api_name("Image_Send").is_none());
         assert!(
             catalog
                 .prompt()
-                .contains("exactly SetTitle, CurrentTime, and Compact")
+                .contains("SetTitle, CurrentTime, Compact, and Image.View")
         );
         assert!(!catalog.prompt().contains("File.Read"));
         assert!(!catalog.prompt().contains("WorkMap"));

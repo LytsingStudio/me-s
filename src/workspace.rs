@@ -1172,8 +1172,18 @@ impl WorkspaceHandle {
         id: &AgentId,
         content: String,
     ) -> Result<(u64, u64)> {
+        self.submit_user_prompt_with_images(id, content, Vec::new())
+    }
+
+    pub(crate) fn submit_user_prompt_with_images(
+        &self,
+        id: &AgentId,
+        content: String,
+        image_paths: Vec<String>,
+    ) -> Result<(u64, u64)> {
+        let images = crate::prompt_images::resolve(&self.shared.root, id, image_paths)?;
         self.with_runtime(id, |runtime| {
-            runtime.submit_user_prompt_with_draft_revision(content)
+            runtime.submit_user_prompt_with_images(content, images)
         })
     }
 

@@ -174,6 +174,8 @@ pub(crate) struct UploadSnapshot {
     pub size_bytes: u64,
     pub received_bytes: u64,
     pub error: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub image: Option<crate::event::PromptImage>,
 }
 
 struct UploadSession {
@@ -184,6 +186,7 @@ struct UploadSession {
     received_bytes: u64,
     file: File,
     policy: Option<HostFileConflictPolicy>,
+    original_image: Option<crate::prompt_images::OriginalImage>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -530,6 +533,44 @@ impl HostFileManager {
         job_snapshot(&job)
     }
 
+    pub(crate) fn create_paste_image_upload(
+        &self,
+        agent: &crate::workspace::AgentId,
+        original: crate::prompt_images::OriginalImage,
+        size_bytes: u64,
+    ) -> Result<UploadCreateResult> {
+        let directory = crate::prompt_images::directory(&self.workspace, agent);
+        let path = crate::prompt_images::reserve(&directory, &original, size_bytes)?;
+        let result = self.create_upload(
+            &path_string(&directory),
+            path.file_name()
+                .and_then(|name| name.to_str())
+                .ok_or("Invalid image filename")?,
+            size_bytes,
+            None,
+        );
+        match result {
+            Ok(result) if result.upload.is_some() && !result.requires_confirmation => {
+                let id = &result.upload.as_ref().unwrap().upload_id;
+                self.uploads
+                    .lock()
+                    .map_err(|_| "Upload registry lock is poisoned")?
+                    .get_mut(id)
+                    .ok_or("Upload session not found")?
+                    .original_image = Some(original);
+                Ok(result)
+            }
+            Ok(_) => {
+                let _ = fs::remove_file(path.with_extension("yaml"));
+                Err("Image upload target already exists".into())
+            }
+            Err(error) => {
+                let _ = fs::remove_file(path.with_extension("yaml"));
+                Err(error)
+            }
+        }
+    }
+
     pub(crate) fn create_upload(
         &self,
         destination: &str,
@@ -571,6 +612,7 @@ impl HostFileManager {
                             size_bytes,
                             received_bytes: 0,
                             error: None,
+                            image: None,
                         }),
                     });
                 }
@@ -596,6 +638,7 @@ impl HostFileManager {
             received_bytes: 0,
             file,
             policy,
+            original_image: None,
         };
         let snapshot = upload_snapshot(&session, "uploading");
         self.uploads
@@ -653,6 +696,31 @@ impl HostFileManager {
             .map_err(|_| "Upload registry lock is poisoned")?
             .remove(upload_id)
             .ok_or("Upload session not found")?;
+        let original = upload.original_image.clone();
+        let target = upload.target_path.clone();
+        let mut result = self.finish_upload_inner(upload);
+        if let Some(original) = original {
+            if let Ok(snapshot) = &mut result {
+                result = match crate::prompt_images::finish(&target, &original) {
+                    Ok(image) if snapshot.state == "completed" => {
+                        snapshot.image = Some(image);
+                        Ok(snapshot.clone())
+                    }
+                    Ok(_) => Err("Image upload did not complete".into()),
+                    Err(error) => Err(error),
+                };
+                if result.is_err() {
+                    let _ = fs::remove_file(&target);
+                }
+            }
+            if result.is_err() {
+                let _ = fs::remove_file(target.with_extension("yaml"));
+            }
+        }
+        result
+    }
+
+    fn finish_upload_inner(&self, upload: UploadSession) -> Result<UploadSnapshot> {
         let UploadSession {
             id,
             temp_path,
@@ -661,6 +729,7 @@ impl HostFileManager {
             received_bytes,
             mut file,
             policy,
+            original_image: _,
         } = upload;
         if received_bytes != size_bytes {
             drop(file);
@@ -725,6 +794,7 @@ impl HostFileManager {
             size_bytes,
             received_bytes,
             error,
+            image: None,
         })
     }
 
@@ -736,6 +806,9 @@ impl HostFileManager {
             .remove(upload_id)
             .ok_or("Upload session not found")?;
         let snapshot = upload_snapshot(&upload, "cancelled");
+        if upload.original_image.is_some() {
+            let _ = fs::remove_file(upload.target_path.with_extension("yaml"));
+        }
         drop(upload.file);
         let _ = fs::remove_file(upload.temp_path);
         Ok(snapshot)
@@ -1886,6 +1959,7 @@ fn upload_snapshot(upload: &UploadSession, state: &str) -> UploadSnapshot {
         size_bytes: upload.size_bytes,
         received_bytes: upload.received_bytes,
         error: None,
+        image: None,
     }
 }
 

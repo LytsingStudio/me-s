@@ -180,12 +180,27 @@ pub trait UiBackend: Send + Sync {
         sha256: &str,
     ) -> Result<Option<crate::event::ImageContentEvent>> {
         let snapshot = self.snapshot()?;
-        Ok(snapshot.agent(agent_id).and_then(|agent| {
-            agent.events.iter().find_map(|event| match event {
-                Event::ImageContent(image) if image.content_sha256 == sha256 => Some(image.clone()),
-                _ => None,
-            })
-        }))
+        let Some(agent) = snapshot.agent(agent_id) else {
+            return Ok(None);
+        };
+        if let Some(image) = agent.events.iter().find_map(|event| match event {
+            Event::ImageContent(image) if image.content_sha256 == sha256 => Some(image.clone()),
+            _ => None,
+        }) {
+            return Ok(Some(image));
+        }
+        for event in agent.events.iter() {
+            let images = match event {
+                Event::UserPrompt(prompt) => &prompt.images,
+                Event::FollowUpPrompt(prompt) => &prompt.images,
+                _ => continue,
+            };
+            if let Some(image) = images.iter().find(|image| image.sha256 == sha256) {
+                return crate::prompt_images::content(image, event.id(), event.timestamp_ms())
+                    .map(Some);
+            }
+        }
+        Ok(None)
     }
 
     fn session_terminal_agent_ids(&self) -> Result<Vec<AgentId>> {
@@ -226,6 +241,7 @@ pub enum UiCommand {
     SubmitUserPrompt {
         agent_id: AgentId,
         content: String,
+        image_paths: Vec<String>,
     },
     ChangeEffort {
         agent_id: AgentId,
@@ -507,10 +523,14 @@ impl UiCommandGateway for WorkspaceUiCommandGateway {
                         .update_input_draft(&agent_id, expected_revision, content)?;
                 Ok(UiCommandReceipt::InputDraftUpdated { accepted, revision })
             }
-            UiCommand::SubmitUserPrompt { agent_id, content } => {
+            UiCommand::SubmitUserPrompt {
+                agent_id,
+                content,
+                image_paths,
+            } => {
                 let (prompt_revision, input_draft_revision) = self
                     .handle
-                    .submit_user_prompt_with_draft_revision(&agent_id, content)?;
+                    .submit_user_prompt_with_images(&agent_id, content, image_paths)?;
                 Ok(UiCommandReceipt::UserPromptSubmitted {
                     prompt_revision,
                     input_draft_revision,
