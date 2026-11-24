@@ -12,7 +12,7 @@
   const setHtml = (node, html) => { if (node.innerHTML !== html) node.innerHTML = html; };
 
   function create({ container, request, onUnauthorized }) {
-    container.innerHTML = `<div class="gais-page"><header class="gais-heading"><h2>GAIS</h2><span data-gais-updated></span></header>
+    container.innerHTML = `<div class="gais-page"><header class="gais-heading"><h2>GAIS</h2><select data-gais-server aria-label="生成服务"><option value="">正在获取…</option></select><span data-gais-updated></span></header>
       <p class="gais-message" data-gais-message role="status">正在获取…</p>
       <section class="gais-host" data-gais-host></section>
       <section class="gais-tasks"><header><h3>活跃任务</h3><span data-gais-count></span></header>
@@ -25,9 +25,21 @@
     let pending = false;
     let abort = null;
     let haveData = false;
+    let selectedId = null;
     const current = (epoch) => identity !== null && generation === epoch;
 
     function render(payload) {
+      const servers = Array.isArray(payload.servers) ? payload.servers : [];
+      const selected = payload.selected;
+      setHtml(node("server"), `<option value="" disabled>请选择服务</option>${servers.map((server) => `<option value="${escape(server.id)}">${escape(server.name)} · ${escape(server.id)}</option>`).join("")}`);
+      node("server").value = selected?.id || "";
+      if (selected) selectedId = selected.id;
+      if (!selected || !payload.host) {
+        node("host").innerHTML = ""; node("tasks").innerHTML = ""; rows.clear();
+        node("count").textContent = ""; node("updated").textContent = "";
+        node("message").textContent = payload.message || "暂无可用服务";
+        haveData = false; return;
+      }
       const host = payload.host || {};
       const metric = (label, value) => `<div class="gais-metric"><span>${escape(label)}</span><strong>${escape(value)}</strong></div>`;
       setHtml(node("host"), `<div class="gais-metrics">${metric("CPU", percent(host.cpu?.utilization_percent))}${metric("内存", memory(host.memory))}${metric("排队任务", host.queued_count ?? "—")}</div>
@@ -49,7 +61,7 @@
       }
       if (!tasks.length) node("tasks").innerHTML = '<p class="gais-empty">暂无活跃任务</p>';
       node("count").textContent = String(tasks.length);
-      node("message").textContent = "";
+      node("message").textContent = payload.unavailable ? `${payload.unavailable} 个服务暂不可用` : "";
       node("message").classList.remove("gais-error");
       node("updated").textContent = `更新于 ${new Date().toLocaleTimeString()}`;
       haveData = true;
@@ -60,7 +72,7 @@
       pending = true;
       abort = new AbortController();
       try {
-        const payload = await request("/api/gais/status", { signal: abort.signal });
+        const payload = await request("/api/gais/status", { signal: abort.signal, method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ id: selectedId }) });
         if (current(epoch)) render(payload);
       } catch (error) {
         if (current(epoch) && error.name !== "AbortError") {
@@ -100,50 +112,77 @@
       const key = identity;
       deactivate(); activate(key);
     }
+    node("server").addEventListener("change", () => {
+      if (!node("server").value) return;
+      selectedId = node("server").value; refresh();
+    });
     return { activate, deactivate, refresh };
   }
 
   function settingsHtml() {
-    return `<section class="settings-section settings-gais-section"><header class="settings-section-header"><div class="settings-section-heading"><h3>生成式 AI 服务</h3></div></header>
-      <div class="gais-settings" data-gais-settings><label>URL<input data-gais-url type="url" placeholder="http://127.0.0.1:47589" autocomplete="off" spellcheck="false" disabled></label>
-        <label>Token<input data-gais-token type="password" autocomplete="off" spellcheck="false" disabled></label>
-        <div class="gais-settings-actions"><span data-gais-result role="status">正在获取…</span><button type="button" class="ghost-button" data-gais-test disabled>测试</button><button type="button" class="primary-button" data-gais-save disabled>保存</button></div>
+    return `<section class="settings-section settings-gais-section" data-gais-settings><header class="settings-section-header"><div class="settings-section-heading"><h3>生成式 AI 服务</h3></div><button type="button" class="ghost-button" data-gais-add disabled>添加</button></header>
+      <div class="gais-settings"><div data-gais-entries></div><p class="settings-help" data-gais-empty hidden>尚未添加服务</p>
+        <div class="gais-settings-actions"><span data-gais-result role="status">正在获取…</span><button type="button" class="primary-button" data-gais-save disabled>保存</button></div>
       </div></section>`;
   }
   async function bindSettings(container, { request, current, onUnauthorized, onSaved, draft, onDraft }) {
     const root = container.querySelector("[data-gais-settings]");
     if (!root) return;
-    const url = root.querySelector("[data-gais-url]");
-    const token = root.querySelector("[data-gais-token]");
+    const list = root.querySelector("[data-gais-entries]");
     const result = root.querySelector("[data-gais-result]");
-    const controls = [...root.querySelectorAll("input,button")];
+    const entries = [];
     const alive = () => root.isConnected && current();
-    const values = () => ({ url: url.value, token: token.value });
-    const disabled = (value) => controls.forEach((node) => { node.disabled = value; });
+    const values = () => ({ servers: entries.map((entry) => ({ url: entry.url.value, token: entry.token.value })) });
+    const disabled = (value) => root.querySelectorAll("input,button").forEach((node) => { node.disabled = value; });
+    function changed() {
+      root.querySelector("[data-gais-empty]").hidden = entries.length > 0;
+      entries.forEach((entry, index) => { if (!entry.name) entry.title.textContent = `服务 ${index + 1}`; });
+      onDraft(values()); result.textContent = "";
+    }
+    function add(credentials = {}) {
+      const row = document.createElement("article"); row.className = "gais-entry";
+      row.innerHTML = `<header><strong data-gais-entry-title></strong><button type="button" class="ghost-button" data-gais-remove>移除</button></header><label>URL<input data-gais-url type="url" placeholder="http://127.0.0.1:47589" autocomplete="off" spellcheck="false"></label><label>Token<input data-gais-token type="password" autocomplete="off" spellcheck="false"></label><div class="gais-settings-actions"><span data-gais-entry-result role="status"></span><button type="button" class="ghost-button" data-gais-test>测试</button></div>`;
+      const entry = { row, title: row.querySelector("[data-gais-entry-title]"), url: row.querySelector("[data-gais-url]"), token: row.querySelector("[data-gais-token]") };
+      entry.url.value = credentials.url || ""; entry.token.value = credentials.token || "";
+      entries.push(entry); list.append(row);
+      for (const input of [entry.url, entry.token]) input.addEventListener("input", () => {
+        entry.name = null; row.querySelector("[data-gais-entry-result]").textContent = ""; changed();
+      });
+      row.querySelector("[data-gais-remove]").addEventListener("click", () => { entries.splice(entries.indexOf(entry), 1); row.remove(); changed(); });
+      row.querySelector("[data-gais-test]").addEventListener("click", async () => {
+        if (!alive()) return;
+        const message = row.querySelector("[data-gais-entry-result]");
+        disabled(true); message.textContent = "正在测试…";
+        try {
+          const payload = await request("/api/gais/test", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ url: entry.url.value, token: entry.token.value }) });
+          if (!alive()) return;
+          entry.name = payload.server.name; entry.title.textContent = entry.name;
+          message.textContent = `连接成功 · ${payload.server.id}`;
+        } catch (error) {
+          if (!alive()) return; message.textContent = error.message || "连接失败";
+          if (error.status === 401) onUnauthorized();
+        } finally { if (alive()) disabled(false); }
+      });
+      changed();
+    }
     try {
       const settings = draft || (await request("/api/gais/settings")).settings;
       if (!alive()) return;
-      url.value = settings.url || ""; token.value = settings.token || "";
-      result.textContent = "";
-      onDraft(values()); disabled(false);
+      for (const credentials of settings.servers || []) add(credentials);
+      changed(); disabled(false);
     } catch (error) {
-      if (!alive()) return;
-      result.textContent = error.message;
-      disabled(false);
+      if (!alive()) return; result.textContent = error.message; disabled(false);
       if (error.status === 401) onUnauthorized();
     }
-    for (const input of [url, token]) input.addEventListener("input", () => { onDraft(values()); result.textContent = ""; });
-    for (const action of ["test", "save"]) root.querySelector(`[data-gais-${action}]`).addEventListener("click", async () => {
+    root.querySelector("[data-gais-add]").addEventListener("click", () => { if (alive()) add(); });
+    root.querySelector("[data-gais-save]").addEventListener("click", async () => {
       if (!alive()) return;
-      disabled(true); result.textContent = action === "test" ? "正在测试…" : "正在保存…";
+      disabled(true); result.textContent = "正在保存…";
       try {
-        const payload = await request(action === "test" ? "/api/gais/test" : "/api/gais/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values()) });
-        if (!alive()) return;
-        result.textContent = payload.message || (action === "test" ? "连接成功" : "已保存");
-        if (action === "save") onSaved();
+        await request("/api/gais/settings", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(values()) });
+        if (!alive()) return; result.textContent = "已保存"; onSaved();
       } catch (error) {
-        if (!alive()) return;
-        result.textContent = error.message || "操作失败";
+        if (!alive()) return; result.textContent = error.message || "保存失败";
         if (error.status === 401) onUnauthorized();
       } finally { if (alive()) disabled(false); }
     });

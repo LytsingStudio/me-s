@@ -38,10 +38,19 @@ describe("shared WebUI tool presenters", () => {
   });
 
   test("explicitly covers every first-party and historical compatibility tool", () => {
-    expect(presenters.KNOWN_TOOLS).toHaveLength(70);
-    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(70);
+    expect(presenters.KNOWN_TOOLS).toHaveLength(71);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(71);
     expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
     for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
+  });
+
+  test("GAIS discovery lists identities and other tools keep the selected server visible", () => {
+    const result = succeeded({ servers: [{ id: "03a7f2bc", name: "图像 服务" }, { id: "abc12345", name: "图像 服务" }], unavailable: 1 });
+    const html = presenters.renderDetails(presenters.describe("GAIS.Available", {}, result));
+    for (const value of ["无参数", "可用服务", "03a7f2bc", "abc12345", "图像 服务", "暂不可用"]) expect(html).toContain(value);
+    expect(presenters.summarize("GAIS.Models", { id: "03a7f2bc" }).summary).toBe("03a7f2bc");
+    const model = presenters.renderDetails(presenters.describe("GAIS.Models", { id: "03a7f2bc" }, succeeded({ data: { server_id: "03a7f2bc", server_name: "图像 服务", models: [] } })));
+    expect(model).toContain("服务 ID"); expect(model).toContain("图像 服务");
   });
 
   test("keeps every input summary on one stable line", () => {

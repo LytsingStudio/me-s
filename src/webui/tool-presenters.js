@@ -14,7 +14,7 @@
     "File.Copy", "File.Move", "File.Delete", "File.Send",
     "Terminal.Create", "Terminal.Interact", "Terminal.Status", "Terminal.List", "Terminal.Kill",
     "Desktop.Play",
-    "GAIS.Models", "GAIS.Host", "GAIS.Guide", "GAIS.Upload", "GAIS.Assets", "GAIS.Download",
+    "GAIS.Available", "GAIS.Models", "GAIS.Host", "GAIS.Guide", "GAIS.Upload", "GAIS.Assets", "GAIS.Download",
     "GAIS.Permit", "GAIS.Start", "GAIS.Tasks", "GAIS.Cancel", "GAIS.Wait",
     "WebBrowser.Create", "WebBrowser.Navigate", "WebBrowser.Click", "WebBrowser.Type",
     "WebBrowser.Press", "WebBrowser.Scroll", "WebBrowser.RequireHumanAction",
@@ -1181,12 +1181,13 @@
     if (task.error) blocks.push(noticeBlock("任务错误", task.error.message || JSON.stringify(task.error), "error"));
     return blocks;
   }
-  for (const [name, title] of Object.entries({ Models:"查询模型", Host:"查询主机", Guide:"读取生成指南", Upload:"上传生成素材", Assets:"查询生成资产", Download:"下载生成资产", Permit:"申请生成任务", Start:"启动生成任务", Tasks:"查询生成任务", Cancel:"取消生成任务", Wait:"等待生成任务" })) {
+  for (const [name, title] of Object.entries({ Available:"查询可用服务", Models:"查询模型", Host:"查询主机", Guide:"读取生成指南", Upload:"上传生成素材", Assets:"查询生成资产", Download:"下载生成资产", Permit:"申请生成任务", Start:"启动生成任务", Tasks:"查询生成任务", Cancel:"取消生成任务", Wait:"等待生成任务" })) {
     define(`GAIS.${name}`, {
       title: `GAIS · ${title}`, icon: "tool",
-      summary: (input) => [input.task || input.handle || input.model || input.name || "", input.path || "", input.files ? itemCount(input.files, "个文件") : "", input.max_wait_seconds == null ? "" : `最长 ${input.max_wait_seconds} 秒`, input.state ? gaisState(input.state) : ""].filter(Boolean).join(" · "),
+      summary: (input) => [input.id || "", input.task || input.handle || input.model || input.name || "", input.path || "", input.files ? itemCount(input.files, "个文件") : "", input.max_wait_seconds == null ? "" : `最长 ${input.max_wait_seconds} 秒`, input.state ? gaisState(input.state) : ""].filter(Boolean).join(" · "),
       input(input) {
-        const blocks = [fieldBlock("参数", [["任务",input.task],["资产",input.handle],["模型",input.model],["目标文件",input.path],["名称筛选",input.name],["状态筛选",gaisState(input.state)],["标记",input.client_id],["每页数量",input.limit],["下一页",input.cursor],["最长等待",input.max_wait_seconds == null ? "" : `${input.max_wait_seconds} 秒`],["宽度",input.width],["高度",input.height],["时长",input.duration_seconds],["随机种子",input.seed]])];
+        if (name === "Available") return [noticeBlock("参数", "无参数")];
+        const blocks = [fieldBlock("参数", [["服务 ID",input.id],["任务",input.task],["资产",input.handle],["模型",input.model],["目标文件",input.path],["名称筛选",input.name],["状态筛选",gaisState(input.state)],["标记",input.client_id],["每页数量",input.limit],["下一页",input.cursor],["最长等待",input.max_wait_seconds == null ? "" : `${input.max_wait_seconds} 秒`],["宽度",input.width],["高度",input.height],["时长",input.duration_seconds],["随机种子",input.seed]])];
         if (input.prompt) blocks.push(codeBlock("提示词", input.prompt));
         if (input.files) blocks.push(tableBlock("上传文件", [{key:"path",label:"宿主机文件"},{key:"name",label:"资产名称"}], input.files));
         if (input.assets) blocks.push(tableBlock("输入资产", [{key:"handle",label:"句柄"},{key:"role",label:"用途"}], input.assets));
@@ -1196,11 +1197,13 @@
         if (!resultSucceeded(output)) return [];
         const value = objectValue(resultValue(output));
         const data = objectValue(value.data || value);
+        if (name === "Available") return [tableBlock("可用服务", [{key:"id",label:"服务 ID"},{key:"name",label:"名称"}], data.servers || []), fieldBlock("服务状态", [["暂不可用",data.unavailable ?? 0]])];
+        const server = fieldBlock("服务", [["服务 ID",data.server_id || input.id],["名称",data.server_name]]);
         if (name === "Wait") return [fieldBlock("等待结果", [["结束原因",({terminal:"任务已停止",deadline:"到达等待上限",query_error:"无法继续查询",interrupted:"等待已中断"})[data.reason] || data.reason],["等待耗时",`${Number(data.elapsed_seconds || 0).toFixed(2)} 秒`],["最后状态",gaisState(data.state)],["查询错误",data.query_error]]), ...gaisTaskBlocks(data.task_snapshot)];
         if (name === "Download") return [fieldBlock("已下载文件", [["资产",data.handle],["路径",data.path],["大小",formatBytes(data.size)],["SHA256",data.sha256]])];
         if (name === "Guide") return [fieldBlock("模型", [["名称",data.model]]), codeBlock("生成指南", data.guide || "")];
-        if (name === "Host") return [fieldBlock("主机资源", [["CPU 使用率",data.cpu?.utilization_percent == null ? "" : `${data.cpu.utilization_percent}%`],["已用内存",data.memory?.used_bytes == null ? "" : formatBytes(data.memory.used_bytes)],["总内存",data.memory?.total_bytes == null ? "" : formatBytes(data.memory.total_bytes)],["排队任务",data.queued_count],["等待原因",data.resource_wait_reason]]), tableBlock("GPU", [{key:"name",label:"名称"},{key:"usage",label:"使用率"}], (data.gpus || []).map((gpu) => ({name:gpu.name || gpu.id, usage:gpu.utilization_percent == null ? "—" : `${gpu.utilization_percent}%` })))];
-        if (name === "Models") return [tableBlock("模型", [{key:"model",label:"名称"},{key:"type",label:"类型"}], (data.models || []).map((model) => ({ model:model.model || model.name || model.id || "",type:model.type || "" }))), ...genericObjectBlocks("服务限制", data.limits || {}), ...(data.unavailable_reason ? [noticeBlock("暂不可用", data.unavailable_reason)] : [])];
+        if (name === "Host") return [server, fieldBlock("主机资源", [["CPU 使用率",data.cpu?.utilization_percent == null ? "" : `${data.cpu.utilization_percent}%`],["已用内存",data.memory?.used_bytes == null ? "" : formatBytes(data.memory.used_bytes)],["总内存",data.memory?.total_bytes == null ? "" : formatBytes(data.memory.total_bytes)],["排队任务",data.queued_count],["等待原因",data.resource_wait_reason]]), tableBlock("GPU", [{key:"name",label:"名称"},{key:"usage",label:"使用率"}], (data.gpus || []).map((gpu) => ({name:gpu.name || gpu.id, usage:gpu.utilization_percent == null ? "—" : `${gpu.utilization_percent}%` })))];
+        if (name === "Models") return [server, tableBlock("模型", [{key:"model",label:"名称"},{key:"type",label:"类型"}], (data.models || []).map((model) => ({ model:model.model || model.name || model.id || "",type:model.type || "" }))), ...genericObjectBlocks("服务限制", data.limits || {}), ...(data.unavailable_reason ? [noticeBlock("暂不可用", data.unavailable_reason)] : [])];
         if (name === "Upload") return [tableBlock("上传结果", [{key:"index",label:"序号"},{key:"state",label:"结果"},{key:"handle",label:"资产"},{key:"error",label:"错误"}], (data.items || []).map((item) => ({index:Number(item.index) + 1,state:item.ok ? "成功" : "失败",handle:item.asset?.handle || "",error:item.error?.message || item.error?.code || ""})))];
         if (name === "Assets") return [gaisAssets(data.items || []), fieldBlock("分页", [["下一页",data.next_cursor]])];
         if (name === "Tasks") {

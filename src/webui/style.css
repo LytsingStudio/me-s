@@ -1176,7 +1176,12 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .gais-task-meta, .gais-progress { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; margin-top: 10px; }
 .gais-task p, .gais-empty { color: var(--muted); font-size: 13px; }
 .gais-settings { display: grid; gap: 14px; padding-top: 12px; }
-.gais-settings > label { display: grid; gap: 7px; font-size: 13px; color: var(--muted); }
+.gais-entry { padding: 16px 0; border-bottom: 1px solid var(--border); display: grid; gap: 14px; }
+.gais-entry:first-child { padding-top: 0; }
+.gais-entry > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; }
+.gais-entry > header strong { min-width: 0; overflow-wrap: anywhere; }
+.gais-entry label { display: grid; gap: 7px; font-size: 13px; color: var(--muted); }
+.gais-heading select { min-width: 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); }
 .gais-settings input { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); font: inherit; }
 .gais-settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
 .gais-settings-actions > button { padding: 9px 14px; border-radius: 8px; font-size: 13px; }

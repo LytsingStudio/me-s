@@ -146,6 +146,9 @@ impl TruncationState {
         let Some(detail) = detail_mut(root) else {
             return false;
         };
+        if self.tool_name == "GAIS.Available" {
+            return self.truncate_detail_prefix(root, "servers", "servers");
+        }
         for field in ["items", "models"] {
             if let Some(items) = detail
                 .get_mut("data")
@@ -1686,6 +1689,21 @@ mod tests {
                 .map(|(offset, line)| ((first_line + offset as u64).to_string(), json!(line)))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn gais_available_crops_only_complete_server_entries() {
+        let servers: Vec<_> = (0..100)
+            .map(|i| json!({"id": format!("{i:08x}"), "name": "生成服务 ".repeat(20)}))
+            .collect();
+        let original = wrapper(json!({"servers":servers,"unavailable":2}));
+        let result = truncate_for_model_with_limit("GAIS.Available", original.clone(), 1500);
+        assert_eq!(result["truncate"], true);
+        assert_eq!(result["result"]["detail"]["unavailable"], 2);
+        let retained = result["result"]["detail"]["servers"].as_array().unwrap();
+        assert!(!retained.is_empty() && retained.len() < servers.len());
+        assert_eq!(retained, &servers[servers.len() - retained.len()..]);
+        assert_eq!(original["result"]["detail"]["servers"], json!(servers));
     }
 
     #[test]

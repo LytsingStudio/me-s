@@ -2661,7 +2661,7 @@ for line in sys.stdin:
                 .iter()
                 .filter(|tool| tool.toolbox == "GAIS")
                 .count(),
-            11
+            12
         );
         assert!(catalog.prompt().contains("# Toolbox GAIS"));
         assert_eq!(
@@ -2672,7 +2672,7 @@ for line in sys.stdin:
                 .iter()
                 .filter(|tool| tool.toolbox == "GAIS")
                 .count(),
-            11
+            12
         );
         assert!(
             chatbot_catalog()
@@ -2692,9 +2692,10 @@ for line in sys.stdin:
                 r#"{"task":"task-01234567","max_wait_seconds":0}"#,
                 |_| Ok(()),
             )
-            .unwrap();
-        assert_eq!(result["reason"], "deadline");
-        assert!(result["task_snapshot"].is_null());
+            .unwrap_err();
+        assert!(
+            matches!(result, ToolboxExecutionError::Tool { code, message, .. } if code == "invalid_arguments" && message.contains("required field"))
+        );
     }
 
     #[test]
@@ -2886,7 +2887,7 @@ for line in sys.stdin:
         let embedded_directory = python.path_directory.clone();
         let runtime =
             Arc::new(ToolboxRuntime::load_with_python(&workspace, vec![script], python).unwrap());
-        assert_eq!(runtime.catalog().tools().len(), 31);
+        assert_eq!(runtime.catalog().tools().len(), 32);
         assert_eq!(
             runtime.catalog().result_token_limit("Probe.Echo"),
             DEFAULT_TOOL_RESULT_TOKEN_LIMIT
