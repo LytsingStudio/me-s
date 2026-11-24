@@ -317,6 +317,35 @@ function getSessionTerminalController() {
   return sessionTerminalController;
 }
 
+let gaisController = null;
+
+function syncGaisView() {
+  if (!state.authenticated || state.pageClosing || state.view.kind !== "gais" || !state.selectedAgent) {
+    gaisController?.deactivate();
+    return;
+  }
+  if (!gaisController) gaisController = globalThis.MeGais.create({
+    container: document.getElementById("gais-view"),
+    request: api,
+    onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+  });
+  gaisController.activate(`${state.syncGeneration}:${state.workspaceId}:${state.selectedAgent}`);
+}
+
+function bindGaisSettings(container) {
+  if (!state.authenticated || !state.modal) return;
+  const modal = state.modal;
+  const generation = state.syncGeneration;
+  void globalThis.MeGais.bindSettings(container, {
+    request: api,
+    current: () => state.authenticated && state.modal === modal && generation === state.syncGeneration,
+    onUnauthorized: () => showLogin("登录已失效，请重新登录"),
+    onSaved: () => gaisController?.refresh(),
+    draft: modal.gaisDraft,
+    onDraft: (draft) => { modal.gaisDraft = draft; },
+  });
+}
+
 let remoteControlController = null;
 
 function remoteControlUnauthorized() {
@@ -704,6 +733,7 @@ function activateWorkspace(workspaceId, preferredAgent = null, beginPolling = tr
     return;
   }
   cancelBackgroundWorkspaceSync();
+  gaisController?.deactivate();
   deactivateSessionTerminalView();
   stopHttpPolling();
   saveDraft();
@@ -1633,6 +1663,7 @@ function setLoginBusy(busy) {
 }
 
 function showLogin(message = "") {
+  gaisController?.deactivate();
   if (fileManagerController?.dialogForm.classList.contains("file-preview-dialog")) fileManagerController.closeDialog(null);
   const alreadyVisible = !state.authenticated
     && !elements.loginScreen.classList.contains("hidden");
@@ -2719,6 +2750,7 @@ function finishAgentSelection(id) {
   closeUserMessageMenu();
   closeAgentMenu();
   closeWorkspaceMenu();
+  gaisController?.deactivate();
   deactivateSessionTerminalView();
   saveDraft();
   const previousStore = currentStore();
@@ -2769,7 +2801,7 @@ function syncSessionTerminalView() {
 
 function renderTabs() {
   const chatbot = isChatbotAgent();
-  const allowed = chatbot ? new Set(["chat", "system-prompt"]) : null;
+  const allowed = chatbot ? new Set(["chat", "system-prompt", "gais"]) : null;
   if ((chatbot && !allowed.has(state.view.kind)) || (!chatbot && state.view.kind === "system-prompt")) {
     state.view = { kind: "chat", sessionId: null };
   }
@@ -2796,6 +2828,8 @@ function renderTabs() {
   elements.remoteControlView.classList.toggle("active", state.view.kind === "remote-control");
   elements.filesView.classList.toggle("active", state.view.kind === "files");
   elements.terminalView.classList.toggle("active", state.view.kind === "terminal");
+  document.getElementById("gais-view").classList.toggle("active", state.view.kind === "gais");
+  syncGaisView();
   syncSessionTerminalView();
   syncFileManagerView();
   syncRemoteControlView();
@@ -2804,7 +2838,7 @@ function renderTabs() {
 function showView(view) {
   flushPendingRender();
   const chatbot = isChatbotAgent();
-  const nextView = (chatbot && !["chat", "system-prompt"].includes(view.kind))
+  const nextView = (chatbot && !["chat", "system-prompt", "gais"].includes(view.kind))
     || (!chatbot && view.kind === "system-prompt")
     ? { kind: "chat", sessionId: null } : view;
   if (nextView.kind === "terminal"
@@ -4505,7 +4539,7 @@ function localPreferenceSettingsHtml() {
     <div class="settings-preference-list">
       ${borderStyle}
     </div>
-  </section>` : ""}
+  </section>` : ""}${state.authenticated ? globalThis.MeGais.settingsHtml() : ""}
   <section class="settings-section settings-version-section">
     <header class="settings-section-header"><div class="settings-section-heading"><h3>版本</h3></div></header>
     <dl class="settings-version-list">
@@ -4520,6 +4554,7 @@ function localPreferenceSettingsHtml() {
 
 async function bindLocalPreferenceSettings(container = elements.modalContent) {
   void bindCodexUsageSettings(container);
+  bindGaisSettings(container);
   const borderStyle = container.querySelector('[data-local-preference="window-border-style"]');
   borderStyle?.addEventListener("change", () => setWindowBorderStyle(borderStyle.value));
   const serviceVersion = container.querySelector("[data-service-version]");
@@ -5416,12 +5451,14 @@ window.addEventListener("pagehide", () => {
   stopUiAnimation();
   deactivateSessionTerminalView();
   deactivateRemoteControlView();
+  gaisController?.deactivate();
   flushDraftBeforePageCloses();
 });
 window.addEventListener("pageshow", (event) => {
   if (!event.persisted) return;
   state.pageClosing = false;
   syncUiAnimationScheduler();
+  syncGaisView();
   if (state.authenticated && !state.connected) startHttpPolling();
   scheduleBackgroundWorkspaceSync(0);
   if (state.view.kind === "session-terminal" || state.view.kind === "remote-control") renderTabs();

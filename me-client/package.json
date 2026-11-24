@@ -1,7 +1,7 @@
 {
   "name": "me-client-frontend",
   "private": true,
-  "version": "0.1.120",
+  "version": "0.1.121",
   "scripts": {
     "build": "bun run build-frontend.js"
   }

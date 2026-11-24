@@ -114,6 +114,7 @@ impl TruncationState {
                 self.truncate_detail_prefix(&mut next, "opened_page_ids", "opened_pages")
             }
             "Agent.Wait" => self.truncate_wait(&mut next),
+            name if name.starts_with("GAIS.") => self.truncate_gais(&mut next),
             name if name.starts_with("WorkMap.") => self.truncate_workmap(&mut next),
             _ => false,
         } || self.truncate_error_or_updates(&mut next);
@@ -138,6 +139,32 @@ impl TruncationState {
                 .insert("ranges".into(), Value::Object(self.details.clone()));
         }
         value
+    }
+
+    fn truncate_gais(&mut self, root: &mut Value) -> bool {
+        let Some(detail) = detail_mut(root) else {
+            return false;
+        };
+        for field in ["items", "models"] {
+            if let Some(items) = detail
+                .get_mut("data")
+                .and_then(|data| data.get_mut(field))
+                .and_then(Value::as_array_mut)
+            {
+                let removed = remove_oldest_batch(items);
+                if removed > 0 {
+                    self.record_prefix(&format!("data.{field}"), removed);
+                    return true;
+                }
+            }
+        }
+        let mut paths = Vec::new();
+        collect_gais_text_paths(detail, &mut Vec::new(), &mut paths);
+        if crop_first_available_workmap_text(detail, paths) {
+            self.removed_units += 1;
+            return true;
+        }
+        false
     }
 
     fn truncate_detail_prefix(&mut self, root: &mut Value, field: &str, key: &str) -> bool {
@@ -608,6 +635,7 @@ fn strategy_name(tool_name: &str) -> &'static str {
         | "WebBrowser.RequireHumanAction"
         | "WebBrowser.Click"
         | "Agent.Wait" => "drop_oldest",
+        name if name.starts_with("GAIS.") => "structure_aware",
         name if name.starts_with("WorkMap.") => "structure_aware",
         _ => "unsupported",
     }
@@ -1479,6 +1507,36 @@ enum PathPart {
     Index(usize),
 }
 
+fn collect_gais_text_paths(
+    value: &Value,
+    current: &mut Vec<PathPart>,
+    paths: &mut Vec<Vec<PathPart>>,
+) {
+    match value {
+        Value::Object(object) => {
+            for (key, child) in object {
+                current.push(PathPart::Key(key.clone()));
+                if matches!(key.as_str(), "prompt" | "guide" | "description" | "message")
+                    && text_value_is_croppable(child)
+                {
+                    paths.push(current.clone());
+                } else {
+                    collect_gais_text_paths(child, current, paths);
+                }
+                current.pop();
+            }
+        }
+        Value::Array(items) => {
+            for (index, child) in items.iter().enumerate() {
+                current.push(PathPart::Index(index));
+                collect_gais_text_paths(child, current, paths);
+                current.pop();
+            }
+        }
+        _ => {}
+    }
+}
+
 fn collect_workmap_text_paths(
     value: &Value,
     current: &mut Vec<PathPart>,
@@ -1626,6 +1684,45 @@ mod tests {
                 .map(|(offset, line)| ((first_line + offset as u64).to_string(), json!(line)))
                 .collect(),
         )
+    }
+
+    #[test]
+    fn gais_crops_complete_items_and_fragments_text_without_faking_task_state() {
+        let result = truncate_for_model_with_limit(
+            "GAIS.Tasks",
+            wrapper(json!({
+                "protocol_version":"1.0","request_id":"mock","ok":true,
+                "data":{"items":(0..100).map(|i| json!({"task":format!("task-{i:08x}"),"state":"failed","prompt":"long prompt ".repeat(100)})).collect::<Vec<_>>(),"next_cursor":"next-page"}
+            })),
+            1500,
+        );
+        assert_eq!(result["truncate"], true);
+        assert_eq!(
+            result["result"]["detail"]["data"]["next_cursor"],
+            "next-page"
+        );
+        let items = result["result"]["detail"]["data"]["items"]
+            .as_array()
+            .unwrap();
+        assert!(!items.is_empty());
+        for item in items {
+            assert_eq!(item["state"], "failed");
+            assert!(item["task"].is_string());
+        }
+        let wait = truncate_for_model_with_limit(
+            "GAIS.Wait",
+            wrapper(
+                json!({"reason":"terminal","state":"failed","task_snapshot":{"task":"task-01234567","state":"failed","prompt":"large prompt ".repeat(5000)}}),
+            ),
+            1000,
+        );
+        assert_eq!(wait["truncate"], true);
+        assert_eq!(
+            wait["result"]["detail"]["task_snapshot"]["prompt"]["kind"],
+            "text_fragments"
+        );
+        assert_eq!(wait["result"]["detail"]["state"], "failed");
+        assert_eq!(wait["result"]["detail"]["reason"], "terminal");
     }
 
     #[test]

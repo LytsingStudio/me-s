@@ -14,6 +14,8 @@
     "File.Copy", "File.Move", "File.Delete",
     "Terminal.Create", "Terminal.Interact", "Terminal.Status", "Terminal.List", "Terminal.Kill",
     "Desktop.Play",
+    "GAIS.Models", "GAIS.Host", "GAIS.Guide", "GAIS.Upload", "GAIS.Assets", "GAIS.Download",
+    "GAIS.Permit", "GAIS.Start", "GAIS.Tasks", "GAIS.Cancel", "GAIS.Wait",
     "WebBrowser.Create", "WebBrowser.Navigate", "WebBrowser.Click", "WebBrowser.Type",
     "WebBrowser.Press", "WebBrowser.Scroll", "WebBrowser.RequireHumanAction",
     "WebBrowser.Snapshot", "WebBrowser.Pages", "WebBrowser.Back", "WebBrowser.Close",
@@ -1142,6 +1144,53 @@
       summary: (input) => input.session_id || "",
       input: (input) => agentInput(input),
       output: (input, output) => workerOutputBlocks(output),
+    });
+  }
+
+  const gaisState = (state) => ({ deinit: "未启动", queued: "排队中", running: "运行中", cancelling: "取消中", succeeded: "已完成", failed: "失败", cancelled: "已取消" })[state] || state;
+  const gaisAssets = (items) => tableBlock("资产", [{key:"handle",label:"句柄"},{key:"name",label:"名称"},{key:"size",label:"大小"},{key:"type",label:"类型"}], items.map((item) => ({ handle:item.handle || "", name:item.name || "", size:item.size == null ? "" : formatBytes(item.size), type:item.mime_type || item.type || "" })));
+  function gaisTaskBlocks(task) {
+    if (!task || typeof task !== "object") return [];
+    const blocks = [fieldBlock("任务", [["句柄",task.task],["状态",gaisState(task.state)],["模型",task.model],["阶段",task.progress?.stage],["耗时",task.elapsed_seconds == null ? "" : `${task.elapsed_seconds} 秒`]])];
+    if (task.prompt) blocks.push(codeBlock("提示词", task.prompt));
+    if (task.requested || task.effective) {
+      const fields = [...new Set([...Object.keys(task.requested || {}), ...Object.keys(task.effective || {})])];
+      const display = (value) => value == null ? "—" : typeof value === "object" ? JSON.stringify(value) : String(value);
+      blocks.push(tableBlock("生成参数", [{key:"field",label:"参数"},{key:"requested",label:"请求值"},{key:"effective",label:"实际值"}], fields.map((key) => ({ field:({width:"宽度",height:"高度",seed:"随机种子",duration_seconds:"时长",model:"模型",prompt:"提示词",assets:"输入资产"})[key] || key, requested:display(task.requested?.[key]), effective:display(task.effective?.[key]) }))));
+    }
+    if (task.adjustments?.length) blocks.push(listBlock("参数调整", task.adjustments.map((item) => typeof item === "string" ? item : JSON.stringify(item))));
+    if (task.outputs?.length) blocks.push(gaisAssets(task.outputs));
+    if (task.error) blocks.push(noticeBlock("任务错误", task.error.message || JSON.stringify(task.error), "error"));
+    return blocks;
+  }
+  for (const [name, title] of Object.entries({ Models:"查询模型", Host:"查询主机", Guide:"读取生成指南", Upload:"上传生成素材", Assets:"查询生成资产", Download:"下载生成资产", Permit:"申请生成任务", Start:"启动生成任务", Tasks:"查询生成任务", Cancel:"取消生成任务", Wait:"等待生成任务" })) {
+    define(`GAIS.${name}`, {
+      title: `GAIS · ${title}`, icon: "tool",
+      summary: (input) => [input.task || input.handle || input.model || input.name || "", input.path || "", input.files ? itemCount(input.files, "个文件") : "", input.max_wait_seconds == null ? "" : `最长 ${input.max_wait_seconds} 秒`, input.state ? gaisState(input.state) : ""].filter(Boolean).join(" · "),
+      input(input) {
+        const blocks = [fieldBlock("参数", [["任务",input.task],["资产",input.handle],["模型",input.model],["目标文件",input.path],["名称筛选",input.name],["状态筛选",gaisState(input.state)],["标记",input.client_id],["每页数量",input.limit],["下一页",input.cursor],["最长等待",input.max_wait_seconds == null ? "" : `${input.max_wait_seconds} 秒`],["宽度",input.width],["高度",input.height],["时长",input.duration_seconds],["随机种子",input.seed]])];
+        if (input.prompt) blocks.push(codeBlock("提示词", input.prompt));
+        if (input.files) blocks.push(tableBlock("上传文件", [{key:"path",label:"宿主机文件"},{key:"name",label:"资产名称"}], input.files));
+        if (input.assets) blocks.push(tableBlock("输入资产", [{key:"handle",label:"句柄"},{key:"role",label:"用途"}], input.assets));
+        return blocks;
+      },
+      output(input, output) {
+        if (!resultSucceeded(output)) return [];
+        const value = objectValue(resultValue(output));
+        const data = objectValue(value.data || value);
+        if (name === "Wait") return [fieldBlock("等待结果", [["结束原因",({terminal:"任务已停止",deadline:"到达等待上限",query_error:"无法继续查询",interrupted:"等待已中断"})[data.reason] || data.reason],["等待耗时",`${Number(data.elapsed_seconds || 0).toFixed(2)} 秒`],["最后状态",gaisState(data.state)],["查询错误",data.query_error]]), ...gaisTaskBlocks(data.task_snapshot)];
+        if (name === "Download") return [fieldBlock("已下载文件", [["资产",data.handle],["路径",data.path],["大小",formatBytes(data.size)],["SHA256",data.sha256]])];
+        if (name === "Guide") return [fieldBlock("模型", [["名称",data.model]]), codeBlock("生成指南", data.guide || "")];
+        if (name === "Host") return [fieldBlock("主机资源", [["CPU 使用率",data.cpu?.utilization_percent == null ? "" : `${data.cpu.utilization_percent}%`],["已用内存",data.memory?.used_bytes == null ? "" : formatBytes(data.memory.used_bytes)],["总内存",data.memory?.total_bytes == null ? "" : formatBytes(data.memory.total_bytes)],["排队任务",data.queued_count],["等待原因",data.resource_wait_reason]]), tableBlock("GPU", [{key:"name",label:"名称"},{key:"usage",label:"使用率"}], (data.gpus || []).map((gpu) => ({name:gpu.name || gpu.id, usage:gpu.utilization_percent == null ? "—" : `${gpu.utilization_percent}%` })))];
+        if (name === "Models") return [tableBlock("模型", [{key:"model",label:"名称"},{key:"type",label:"类型"}], (data.models || []).map((model) => ({ model:model.model || model.name || model.id || "",type:model.type || "" }))), ...genericObjectBlocks("服务限制", data.limits || {}), ...(data.unavailable_reason ? [noticeBlock("暂不可用", data.unavailable_reason)] : [])];
+        if (name === "Upload") return [tableBlock("上传结果", [{key:"index",label:"序号"},{key:"state",label:"结果"},{key:"handle",label:"资产"},{key:"error",label:"错误"}], (data.items || []).map((item) => ({index:Number(item.index) + 1,state:item.ok ? "成功" : "失败",handle:item.asset?.handle || "",error:item.error?.message || item.error?.code || ""})))];
+        if (name === "Assets") return [gaisAssets(data.items || []), fieldBlock("分页", [["下一页",data.next_cursor]])];
+        if (name === "Tasks") {
+          if (input.handle && data.items?.[0]) return gaisTaskBlocks(data.items[0]);
+          return [tableBlock("任务", [{key:"task",label:"句柄"},{key:"state",label:"状态"},{key:"model",label:"模型"},{key:"stage",label:"阶段"}], (data.items || []).map((task) => ({task:task.task,state:gaisState(task.state),model:task.model || "",stage:task.progress?.stage || ""}))), fieldBlock("分页", [["下一页",data.next_cursor]])];
+        }
+        return gaisTaskBlocks(data);
+      },
     });
   }
 

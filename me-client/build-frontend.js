@@ -23,6 +23,7 @@ const assets = [
   [resolve(webuiRoot, "file-manager.js"), "file-manager.js"],
   [resolve(webuiRoot, "session-terminal.js"), "session-terminal.js"],
   [resolve(webuiRoot, "remote-control.js"), "remote-control.js"],
+  [resolve(webuiRoot, "gais.js"), "gais.js"],
   [resolve(vendorRoot, "markdown-it.min.js"), "markdown-it.js"],
   [resolve(vendorRoot, "katex.min.js"), "katex.js"],
   [resolve(vendorRoot, "katex.min.css"), "katex.css"],

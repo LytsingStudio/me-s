@@ -5,6 +5,7 @@ const { readFileSync } = require("node:fs");
 const { join } = require("node:path");
 
 globalThis.MeMarkdown = require("../src/webui/markdown.js");
+new Function(readFileSync(join(import.meta.dir, "../src/webui/gais.js"), "utf8"))();
 
 globalThis.MeFrontendRuntime = {
   capabilities: { multipleWorkspaces: true, gatewaySettings: true },

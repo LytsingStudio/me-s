@@ -21,7 +21,7 @@ use serde_json::{Map, Value, json};
 use crate::{
     Result, agent_title, agent_toolbox, compact,
     config::{config_home, create_private_directory},
-    current_time, image_toolbox, python_runtime,
+    current_time, gais, image_toolbox, python_runtime,
     terminal::{
         self, TerminalFrame, TerminalLineUpdate, TerminalManager, TerminalRequest,
         TerminalSessionPreview, TerminalStatus,
@@ -300,6 +300,7 @@ Every utility response uses this runtime envelope:
 pub struct ToolboxRuntime {
     catalog: ToolboxCatalog,
     programs: BTreeMap<String, ToolboxClient>,
+    workspace: PathBuf,
 }
 
 pub(crate) fn disabled_tool_full_name(name: &str) -> Option<&'static str> {
@@ -321,6 +322,7 @@ impl ToolboxRuntime {
         Self {
             catalog: ToolboxCatalog::default(),
             programs: BTreeMap::new(),
+            workspace: PathBuf::new(),
         }
     }
 
@@ -332,6 +334,7 @@ impl ToolboxRuntime {
             return Ok(Self {
                 catalog: catalog_from_parts(tools, briefs)?,
                 programs: BTreeMap::new(),
+                workspace: workspace.to_owned(),
             });
         }
         let python = Python312::resolve()?;
@@ -359,6 +362,7 @@ impl ToolboxRuntime {
                     | workmap::WORKMAP_TOOLBOX_NAME
                     | compact::TOOLBOX_NAME
                     | image_toolbox::TOOLBOX_NAME
+                    | gais::TOOLBOX_NAME
             ) {
                 return Err(format!(
                     "toolbox namespace {toolbox} is reserved for a native me toolbox"
@@ -436,7 +440,11 @@ impl ToolboxRuntime {
         }
 
         let catalog = catalog_from_parts(tools, briefs)?;
-        Ok(Self { catalog, programs })
+        Ok(Self {
+            catalog,
+            programs,
+            workspace: workspace.to_owned(),
+        })
     }
 
     pub fn catalog(&self) -> &ToolboxCatalog {
@@ -516,6 +524,9 @@ impl ToolboxRuntime {
                 retryable: false,
                 tip: None,
             })?;
+        if tool.toolbox == gais::TOOLBOX_NAME {
+            return gais::execute(&self.workspace, &tool.local_name, input, &mut should_cancel);
+        }
         let program =
             self.programs
                 .get(&tool.toolbox)
@@ -559,13 +570,21 @@ fn native_catalog_parts() -> (Vec<ToolboxTool>, Vec<(String, String)>) {
     let (workmap_tools, workmap_brief) = workmap::catalog_parts();
     let (compact_tools, compact_brief) = compact::catalog_parts();
     let (image_tools, image_brief) = image_toolbox::catalog_parts(false);
+    let (gais_tools, gais_brief) = gais::catalog_parts();
     tools.extend(title_tools);
     tools.extend(workmap_tools);
     tools.extend(compact_tools);
     tools.extend(image_tools);
+    tools.extend(gais_tools);
     (
         tools,
-        vec![title_brief, workmap_brief, compact_brief, image_brief],
+        vec![
+            title_brief,
+            workmap_brief,
+            compact_brief,
+            image_brief,
+            gais_brief,
+        ],
     )
 }
 
@@ -2634,6 +2653,51 @@ for line in sys.stdin:
         assert_eq!(interact["properties"]["truncated"]["type"], "boolean");
     }
     #[test]
+    fn gais_is_native_static_and_dispatches_without_a_worker_or_configuration() {
+        let catalog = ToolboxCatalog::native_for_test();
+        assert_eq!(
+            catalog
+                .tools()
+                .iter()
+                .filter(|tool| tool.toolbox == "GAIS")
+                .count(),
+            11
+        );
+        assert!(catalog.prompt().contains("# Toolbox GAIS"));
+        assert_eq!(
+            catalog
+                .manager_view()
+                .unwrap()
+                .tools()
+                .iter()
+                .filter(|tool| tool.toolbox == "GAIS")
+                .count(),
+            11
+        );
+        assert!(
+            chatbot_catalog()
+                .unwrap()
+                .tools()
+                .iter()
+                .all(|tool| tool.toolbox != "GAIS")
+        );
+        let runtime = ToolboxRuntime {
+            catalog,
+            programs: BTreeMap::new(),
+            workspace: PathBuf::new(),
+        };
+        let result = runtime
+            .execute(
+                "GAIS.Wait",
+                r#"{"task":"task-01234567","max_wait_seconds":0}"#,
+                |_| Ok(()),
+            )
+            .unwrap();
+        assert_eq!(result["reason"], "deadline");
+        assert!(result["task_snapshot"].is_null());
+    }
+
+    #[test]
     fn native_catalog_does_not_expose_disabled_agent_toolbox() {
         let catalog = ToolboxCatalog::native_for_test();
         let agent_api_names = agent_toolbox::catalog_parts()
@@ -2822,7 +2886,7 @@ for line in sys.stdin:
         let embedded_directory = python.path_directory.clone();
         let runtime =
             Arc::new(ToolboxRuntime::load_with_python(&workspace, vec![script], python).unwrap());
-        assert_eq!(runtime.catalog().tools().len(), 19);
+        assert_eq!(runtime.catalog().tools().len(), 31);
         assert_eq!(
             runtime.catalog().result_token_limit("Probe.Echo"),
             DEFAULT_TOOL_RESULT_TOKEN_LIMIT

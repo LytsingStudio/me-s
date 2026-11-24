@@ -22,6 +22,7 @@ function node() {
     removeAttribute: (key) => attributes.delete(key),
     append(...children) { this.children.push(...children); },
     prepend(...children) { this.children.unshift(...children); },
+    before() {},
     addEventListener() {}, querySelector() { return null; }, focus() {},
   };
 }

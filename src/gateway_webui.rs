@@ -248,6 +248,13 @@ fn route(
         ));
     }
 
+    if matches!(
+        path.as_str(),
+        "/api/gais/settings" | "/api/gais/test" | "/api/gais/status"
+    ) {
+        return crate::webui::gais_response(request, &path);
+    }
+
     match (request.method(), path.as_str()) {
         (&Method::Get, "/api/codex/usage") => {
             Ok(json_response(StatusCode(200), &codex_usage.snapshot()))

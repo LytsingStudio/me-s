@@ -39,6 +39,7 @@ function loadShowLogin(relative) {
     "cancelBackgroundWorkspaceSync", "setConnectionPhase",
     "runtimeCapabilities", "frontendRuntime", "rememberedDevices", "setLoginView",
     "renderLoginDevices", "synchronizeWindowTitle",
+    "fileManagerController", "gaisController",
     `${source.slice(start, end)}\nreturn showLogin;`,
   );
   const showLogin = factory(
@@ -54,6 +55,7 @@ function loadShowLogin(relative) {
     () => {},
     () => {},
     () => {},
+    null, null,
   );
   return { showLogin, state, elements, counters };
 }

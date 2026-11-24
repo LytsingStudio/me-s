@@ -27,8 +27,8 @@ describe("shared WebUI tool presenters", () => {
   });
 
   test("explicitly covers every first-party and historical compatibility tool", () => {
-    expect(presenters.KNOWN_TOOLS).toHaveLength(58);
-    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(58);
+    expect(presenters.KNOWN_TOOLS).toHaveLength(69);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(69);
     expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
     for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
   });

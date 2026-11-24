@@ -1137,3 +1137,43 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
   .remote-control-statusbar { gap: 9px; padding-inline: 10px; }
   .remote-control-release-hint { display: none; }
 }
+
+.gais-view.active { display: block; overflow: auto; overscroll-behavior: contain; }
+.gais-page { max-width: 1040px; margin: 0 auto; padding: 28px; }
+.gais-heading, .gais-tasks > header, .gais-task-top { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.gais-heading h2 { margin: 0; font-size: 22px; }
+.gais-heading > span, .gais-tasks > header > span { color: var(--muted); font-size: 12px; }
+.gais-message { color: var(--muted); font-size: 13px; margin: 12px 0; }
+.gais-message:empty { display: none; }
+.gais-error, .gais-wait-reason { color: var(--orange); }
+.gais-metrics { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin-top: 22px; }
+.gais-metric { padding: 18px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.gais-metric > span { display: block; color: var(--muted); font-size: 12px; margin-bottom: 9px; }
+.gais-metric > strong { font-size: 18px; font-weight: 600; font-variant-numeric: tabular-nums; }
+.gais-gpus { display: grid; gap: 8px; margin: 14px 0; }
+.gais-gpu { display: flex; align-items: center; flex-wrap: wrap; gap: 12px 22px; padding: 14px 18px; border-radius: 10px; background: var(--panel-2); font-size: 13px; }
+.gais-gpu > span, .gais-task-meta, .gais-progress { color: var(--muted); }
+.gais-wait-reason { font-size: 13px; }
+.gais-tasks { margin-top: 30px; }
+.gais-tasks > header { margin-bottom: 14px; }
+.gais-tasks h3 { margin: 0; font-size: 15px; }
+.gais-task-list { display: grid; gap: 10px; }
+.gais-task { border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; background: var(--panel); }
+.gais-task-top > strong { font-size: 13px; font-weight: 600; overflow-wrap: anywhere; }
+.gais-task-state { flex: none; color: var(--cyan); font-size: 12px; }
+.gais-task-meta, .gais-progress { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; margin-top: 10px; }
+.gais-task p, .gais-empty { color: var(--muted); font-size: 13px; }
+.gais-settings { display: grid; gap: 14px; }
+.gais-settings > label { display: grid; gap: 7px; font-size: 13px; color: var(--muted); }
+.gais-settings input { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); font: inherit; }
+.gais-settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
+.gais-settings-actions > button { padding: 9px 14px; border-radius: 8px; font-size: 13px; }
+.gais-settings-actions > span { margin-right: auto; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+@media (max-width: 600px) {
+  .gais-page { padding: 20px 16px; }
+  .gais-metrics { grid-template-columns: minmax(0, 1fr); gap: 8px; }
+  .gais-metric { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; }
+  .gais-metric > span { margin: 0; }
+  .gais-metric > strong { font-size: 16px; }
+  .gais-task { padding: 14px; }
+}

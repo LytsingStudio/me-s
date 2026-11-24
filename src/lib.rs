@@ -13,6 +13,7 @@ mod edb_migration;
 mod encrypted_http;
 pub mod event;
 pub mod file_search;
+pub mod gais;
 pub mod gateway;
 pub mod gateway_process;
 pub mod gateway_settings;

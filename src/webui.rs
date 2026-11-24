@@ -166,6 +166,10 @@ pub(crate) fn shared_webui_component_asset(path: &str) -> Option<(&'static str, 
         )),
         "/session-terminal.js" => Some(("text/javascript; charset=utf-8", SESSION_TERMINAL_JS)),
         "/remote-control.js" => Some(("text/javascript; charset=utf-8", REMOTE_CONTROL_JS)),
+        "/gais.js" => Some((
+            "text/javascript; charset=utf-8",
+            include_str!("webui/gais.js"),
+        )),
         "/xterm.js" => Some(("text/javascript; charset=utf-8", XTERM_JS)),
         "/xterm-addon-fit.js" => Some(("text/javascript; charset=utf-8", XTERM_ADDON_FIT_JS)),
         "/xterm-addon-unicode11.js" => {
@@ -898,6 +902,12 @@ fn route(
     if request.method() == &Method::Get && path == "/api/codex/usage" {
         return Ok(json_response(StatusCode(200), &codex_usage.snapshot()));
     }
+    if matches!(
+        path,
+        "/api/gais/settings" | "/api/gais/test" | "/api/gais/status"
+    ) {
+        return gais_response(request, path);
+    }
     operational_route(
         request,
         backend,
@@ -1187,6 +1197,63 @@ fn host_file_response(
         Err(error) => json_response(
             StatusCode(400),
             &json!({"ok": false, "error": error.to_string()}),
+        ),
+    })
+}
+
+pub(crate) fn gais_response(request: &mut Request, path: &str) -> Result<HttpResponse> {
+    use crate::gais::Settings;
+    let result = match (request.method(), path) {
+        (&Method::Get, "/api/gais/settings") => {
+            Settings::load().map(|settings| json!({"ok":true,"settings":settings}))
+        }
+        (&Method::Post, "/api/gais/settings") | (&Method::Post, "/api/gais/test") => {
+            let settings: Settings = match read_json(request, 16 * 1024) {
+                Ok(settings) => settings,
+                Err(_) => {
+                    return Ok(json_response(
+                        StatusCode(400),
+                        &json!({"ok":false,"error":"设置格式无效"}),
+                    ));
+                }
+            };
+            if path == "/api/gais/test" {
+                settings
+                    .test()
+                    .map(|()| json!({"ok":true,"message":"连接成功"}))
+            } else {
+                settings
+                    .save()
+                    .map(|()| json!({"ok":true,"message":"已保存"}))
+            }
+        }
+        (&Method::Get, "/api/gais/status") => crate::gais::status(),
+        _ => {
+            return Ok(json_response(
+                StatusCode(404),
+                &json!({"ok":false,"error":"未找到该页面"}),
+            ));
+        }
+    };
+    Ok(match result {
+        Ok(value) => json_response(StatusCode(200), &value),
+        Err(crate::toolbox::ToolboxExecutionError::Tool { code, message, .. }) => {
+            let summary = match code.as_str() {
+                "gais_not_configured" => "请先在设置中配置 ME-GAIS",
+                "UNAUTHORIZED" => "认证失败，请检查 Token",
+                "gais_connection" => "无法连接 ME-GAIS，请检查服务地址与网络",
+                "gais_configuration" | "invalid_arguments" => "请检查 ME-GAIS 设置",
+                _ => "ME-GAIS 请求失败",
+            };
+            // Remote authentication failure is not a WebUI login failure.
+            json_response(
+                StatusCode(502),
+                &json!({"ok":false,"code":code,"error":summary,"reason":message}),
+            )
+        }
+        Err(_) => json_response(
+            StatusCode(502),
+            &json!({"ok":false,"error":"ME-GAIS 请求失败"}),
         ),
     })
 }
@@ -2572,7 +2639,14 @@ fn no_store() -> Header {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, io::Read as _, net::TcpListener, path::PathBuf, thread};
+    use serde_json::Value;
+    use std::{
+        fs,
+        io::Read as _,
+        net::TcpListener,
+        path::{Path, PathBuf},
+        thread,
+    };
 
     use super::*;
     use crate::{
@@ -2581,6 +2655,105 @@ mod tests {
         ui_backend::{UiAgentSnapshot, UiApiActivity, UiEnvironment, workspace_ui_ports},
         workspace::Workspace,
     };
+
+    #[test]
+    #[ignore = "requires an explicitly isolated ME_CONFIG_HOME and GAIS_ISOLATED_TEST=1"]
+    fn gais_settings_http_uses_unsaved_test_values_and_hot_saved_configuration() {
+        assert_eq!(std::env::var("GAIS_ISOLATED_TEST").as_deref(), Ok("1"));
+        let home = PathBuf::from(std::env::var("ME_CONFIG_HOME").expect("isolated config home"));
+        assert!(
+            !home.join("gais.toml").exists(),
+            "use a new isolated config directory"
+        );
+        let server = tiny_http::Server::http("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", server.server_addr());
+        let join = thread::spawn(move || {
+            for expected in [
+                "Bearer unsaved-token",
+                "Bearer new-token",
+                "Bearer invalid-token",
+            ] {
+                let request = server
+                    .recv_timeout(Duration::from_secs(5))
+                    .unwrap()
+                    .expect("expected query");
+                assert_eq!(request.url(), "/api/v1/models");
+                assert_eq!(
+                    request
+                        .headers()
+                        .iter()
+                        .find(|h| h.field.equiv("Authorization"))
+                        .unwrap()
+                        .value
+                        .as_str(),
+                    expected
+                );
+                let valid = expected != "Bearer invalid-token";
+                request.respond(tiny_http::Response::from_string(json!({"protocol_version":"1.0","request_id":"test","ok":valid,"data":{"models":[]},"error":if valid {Value::Null} else {json!({"code":"UNAUTHORIZED","message":"Invalid token"})}}).to_string()).with_status_code(if valid {200} else {401})).unwrap();
+            }
+        });
+        fn call(method: &str, path: &str, body: Value) -> (u16, Value) {
+            let bytes = serde_json::to_vec(&body).unwrap();
+            let mut request = Request::new(
+                me_transport::RequestHead {
+                    method: method.into(),
+                    url: path.into(),
+                    headers: Vec::new(),
+                    body_length: bytes.len(),
+                },
+                bytes,
+            )
+            .unwrap();
+            let response = gais_response(&mut request, path).unwrap();
+            (
+                response.status_code().0,
+                serde_json::from_reader(response.into_reader()).unwrap(),
+            )
+        }
+        assert_eq!(
+            call(
+                "POST",
+                "/api/gais/settings",
+                json!({"url":url,"token":"saved-token"})
+            )
+            .0,
+            200
+        );
+        assert_eq!(
+            call(
+                "POST",
+                "/api/gais/test",
+                json!({"url":url,"token":"unsaved-token"})
+            )
+            .0,
+            200
+        );
+        assert_eq!(crate::gais::Settings::load().unwrap().token, "saved-token");
+        assert_eq!(
+            call(
+                "POST",
+                "/api/gais/settings",
+                json!({"url":url,"token":"new-token"})
+            )
+            .0,
+            200
+        );
+        let model = crate::gais::execute(Path::new("."), "Models", json!({}), || false).unwrap();
+        assert_eq!(model["ok"], true);
+        assert_eq!(
+            call("GET", "/api/gais/settings", Value::Null).1["settings"]["token"],
+            "new-token"
+        );
+        let rejected = call(
+            "POST",
+            "/api/gais/test",
+            json!({"url":url,"token":"invalid-token"}),
+        );
+        assert_eq!(rejected.0, 502);
+        assert_eq!(rejected.1["code"], "UNAUTHORIZED");
+        assert_eq!(crate::gais::Settings::load().unwrap().token, "new-token");
+        join.join().unwrap();
+    }
 
     #[test]
     fn auth_status_reports_running_product_version() {
@@ -2709,6 +2882,27 @@ mod tests {
                 client.get(format!("{address}/")).send().unwrap().status(),
                 200
             );
+            for path in ["/api/gais/settings", "/api/gais/status"] {
+                assert_eq!(
+                    client
+                        .get(format!("{address}{path}"))
+                        .send()
+                        .unwrap()
+                        .status(),
+                    401
+                );
+            }
+            for path in ["/api/gais/settings", "/api/gais/test"] {
+                assert_eq!(
+                    client
+                        .post(format!("{address}{path}"))
+                        .json(&json!({"url":"http://127.0.0.1:1","token":"fixture"}))
+                        .send()
+                        .unwrap()
+                        .status(),
+                    401
+                );
+            }
             assert_eq!(
                 client
                     .get(format!("{address}/api/snapshot"))
