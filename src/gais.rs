@@ -724,17 +724,10 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
             "Start",
             object(
                 json!({"task":string(),"model":string(),"prompt":string(),"seed":{"type":["integer","null"],"minimum":0},"width":{"type":"integer"},"height":{"type":"integer"},"duration_seconds":{"type":"number"},"assets":{"type":"array","items":object(json!({"handle":string(),"role":string()}), &["handle","role"])}}),
-                &[
-                    "task",
-                    "model",
-                    "prompt",
-                    "width",
-                    "height",
-                    "duration_seconds",
-                ],
+                &["task", "model", "prompt", "width", "height"],
             ),
             "Submit an authorized generation request using an existing unstarted task handle.",
-            "Required fields are task, model, prompt, width, height and duration_seconds. Query Models for allowed parameters and read Guide when needed. seed is optional (null/omitted lets GAIS choose and keep a seed for this task); assets is an optional ordered array of {handle,role}. Keep asset order and roles exactly as intended; do not silently deduplicate or drop tracks. Success means the request was accepted, usually queued, NOT that media has been generated. Inspect returned requested/effective/adjustments to learn which parameters will actually be used. If the response times out or is lost, query Tasks with handle=the SAME task. Resubmitting that same handle can return TASK_ALREADY_STARTED; query it rather than allocate another task. Never automatically Permit a replacement for an uncertain Start.",
+            "Required fields are task, model, prompt, width and height. duration_seconds is optional in this tool: include it when the selected model requires a duration, and omit it when duration is unsupported. Omission sends no duration field; do not substitute 0 or null for an unsupported duration. Query Models for the model's requirements and allowed parameters, and read Guide when needed. seed is optional (null/omitted lets GAIS choose and keep a seed for this task); assets is an optional ordered array of {handle,role}. Keep asset order and roles exactly as intended; do not silently deduplicate or drop tracks. Success means the request was accepted, usually queued, NOT that media has been generated. Inspect returned requested/effective/adjustments to learn which parameters will actually be used. If the response times out or is lost, query Tasks with handle=the SAME task. Resubmitting that same handle can return TASK_ALREADY_STARTED; query it rather than allocate another task. Never automatically Permit a replacement for an uncertain Start.",
             "{\"task\":\"task-01234567\",\"model\":\"MiniMax-H3\",\"prompt\":\"A calm lake at sunrise\",\"width\":640,\"height\":480,\"duration_seconds\":6}",
         ),
         (
@@ -937,6 +930,44 @@ mod tests {
         assert_eq!(zero["reason"], "deadline");
         assert!(zero["task_snapshot"].is_null());
         assert!(Connection::new(Settings::default()).is_err());
+    }
+    #[test]
+    fn start_duration_is_optional_and_forwarded_only_when_supplied() {
+        let image =
+            json!({"task":"t","model":"H3-Image","prompt":"A red circle","width":256,"height":256});
+        validate_input("Start", &image).unwrap();
+        for field in ["task", "model", "prompt", "width", "height"] {
+            let mut missing = image.clone();
+            missing.as_object_mut().unwrap().remove(field);
+            assert!(
+                validate_input("Start", &missing).is_err(),
+                "missing {field}"
+            );
+        }
+        for invalid_duration in [Value::Null, json!("6")] {
+            let mut invalid = image.clone();
+            invalid["duration_seconds"] = invalid_duration;
+            assert!(validate_input("Start", &invalid).is_err());
+        }
+        for duration in [None, Some(6.5)] {
+            let mut input = image.clone();
+            if let Some(seconds) = duration {
+                input["model"] = json!("MiniMax-H3");
+                input["duration_seconds"] = json!(seconds);
+            }
+            validate_input("Start", &input).unwrap();
+            let expected = input.clone();
+            let (connection, join) = mock(1, move |_, request| {
+                assert_eq!(request.url(), "/api/v1/tasks/start");
+                let body: Value = serde_json::from_reader(request.as_reader()).unwrap();
+                assert_eq!(body, expected);
+                reply(json!({"task":"t","state":"queued"}))
+            });
+            let result =
+                execute_with(&connection, Path::new("."), "Start", input, &mut || false).unwrap();
+            assert_eq!(result["data"]["state"], "queued");
+            join.join().unwrap();
+        }
     }
     #[test]
     fn model_docs_explain_creation_and_use_without_service_implementation() {
