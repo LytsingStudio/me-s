@@ -105,6 +105,7 @@ impl TruncationState {
             "File.Find" => self.truncate_detail_prefix(&mut next, "results", "results"),
             "File.Search" => self.truncate_file_search(&mut next),
             "File.Stat" => self.truncate_detail_prefix(&mut next, "entries", "entries"),
+            "File.Send" => self.truncate_detail_prefix(&mut next, "files", "files"),
             "Terminal.Create" | "Terminal.Interact" => self.truncate_terminal(&mut next),
             "Terminal.List" => self.truncate_detail_prefix(&mut next, "sessions", "sessions"),
             "WebBrowser.Snapshot" => self.truncate_web_snapshot(&mut next),
@@ -628,6 +629,7 @@ fn strategy_name(tool_name: &str) -> &'static str {
         | "File.Find"
         | "File.Search"
         | "File.Stat"
+        | "File.Send"
         | "Terminal.Create"
         | "Terminal.Interact"
         | "Terminal.List"
@@ -2089,6 +2091,7 @@ mod tests {
             ("File.List", "entries"),
             ("File.Find", "results"),
             ("File.Stat", "entries"),
+            ("File.Send", "files"),
         ] {
             let items = (0..300)
                 .map(|index| {

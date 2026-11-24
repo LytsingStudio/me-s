@@ -334,6 +334,18 @@ button { color: inherit; }
 .tool-card.failed .tool-marker { color: var(--red); }
 @keyframes tool-marker-breathe { 0%, 100% { opacity: 1; } 50% { opacity: .3; } }
 @media (prefers-reduced-motion: reduce) { .tool-card.running .tool-marker { animation: none; } }
+.tool-files { display: grid; gap: 8px; max-width: 520px; margin: 10px 0 8px 22px; cursor: default; }
+.tool-file-card { display: flex; align-items: center; gap: 16px; min-width: 0; height: 64px; padding: 10px 12px; background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-sizing: border-box; }
+.tool-file-info { display: grid; gap: 3px; flex: 1; min-width: 0; }
+.tool-file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; font-weight: 600; color: var(--text); }
+.tool-file-size { color: var(--muted); font-size: 11px; }
+.tool-file-download { display: grid; place-items: center; flex: 0 0 36px; width: 36px; height: 36px; padding: 0; border: 0; border-radius: 8px; background: transparent; color: var(--text); cursor: pointer; }
+.tool-file-download:hover { background: var(--hover-fill-soft); }
+.tool-file-download svg { width: 20px; height: 20px; }
+.tool-file-download:disabled { cursor: progress; }
+.tool-file-download .tool-file-ring { width: 30px; height: 30px; overflow: visible; fill: none; stroke-width: 2.5; transform: rotate(-90deg); }
+.tool-file-ring-track { stroke: var(--border); }
+.tool-file-ring-value { stroke: var(--accent); stroke-linecap: round; }
 me-image-gallery { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); gap: 12px; max-width: 720px; margin: 10px 0 8px 22px; cursor: default; }
 me-image-gallery figure { min-width: 0; margin: 0; }
 .tool-image-frame { position: relative; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 8px; height: 220px; overflow: hidden; background: var(--panel); border: 1px solid var(--border); border-radius: 9px; }

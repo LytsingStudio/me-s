@@ -12,12 +12,13 @@ function loadToolPresenters() {
   return globalThis.MeToolPresenters;
 }
 
-function loadProjectionRuntime() {
-  installDirectFrontendRuntime();
+function loadProjectionRuntime(options = {}) {
+  Object.assign(installDirectFrontendRuntime(), options.runtime || {});
   const source = readFileSync(join(import.meta.dir, "../src/webui/app.js"), "utf8");
   const eventBindings = source.indexOf("\nelements.tabs.querySelectorAll");
   if (eventBindings < 0) throw new Error("could not isolate WebUI projection runtime");
   const factory = new Function("document", "performance", "matchMedia", "MeToolPresenters", `${source.slice(0, eventBindings)}
+    const notices = []; toast = (...args) => notices.push(args);
     return {
       state,
       createAgentStore, installProjectionState, applyCompactApiActivity, projectedContextBreakdown,
@@ -25,12 +26,13 @@ function loadProjectionRuntime() {
       toolBrief,
       renderToolCard,
       toolImageItems,
+      toolFileCardsHtml, updateToolFileCards, downloadToolFile, toolFileDownloads, notices,
       updateToolImageGallery,
       renderMessageHtml,
     };`);
   const runtime = factory(
-    { querySelector: () => null, documentElement: { classList: { toggle() {} } } },
-    { now: () => 0 },
+    { querySelector: () => null, querySelectorAll: () => options.buttons || [], documentElement: { classList: { toggle() {} } } },
+    { now: options.now || (() => 0) },
     () => ({ matches: false, addEventListener: () => {} }),
     loadToolPresenters(),
   );
@@ -38,6 +40,79 @@ function loadProjectionRuntime() {
 }
 
 describe("WebUI projection presentation", () => {
+  test("file cards render without fetching contents, including image files", () => {
+    const runtime = loadProjectionRuntime();
+    const tool = { id: 8, name: "File.Send", args: {}, started: 0, result: { state: "Succeeded", finished: 1, detail: JSON.stringify({ files: [
+      { path: "/output/picture.png", name: '<picture>.png', size: 1024 },
+      { path: "/output/empty.txt", name: "empty.txt", size: 0 },
+    ] }) } };
+    const html = runtime.renderToolCard(tool);
+    expect(html).toContain('class="tool-files"');
+    expect(html).toContain("&lt;picture&gt;.png");
+    expect(html).toContain("1.0 KiB");
+    expect(html).toContain("0 B");
+    expect(html).not.toMatch(/<img|<me-image-gallery|href=|src=/);
+    const files = [{ path: "/output/a", name: "a", size: 1 }];
+    const existing = { dataset: { files: JSON.stringify(files) } };
+    runtime.updateToolFileCards({ querySelector: () => existing }, { name: "File.Send", result: { state: "Succeeded", detail: JSON.stringify({ files }) } });
+  });
+
+  test("click download uses captured workspace and reports progress only inside its file card", async () => {
+    let report, finish, now = 1000; const calls = [];
+    const status = { textContent: "" };
+    const key = JSON.stringify(["w1", "main", 8, 0]);
+    const button = { dataset: { downloadKey: key, workspace: "w1", fileDownload: "/output/report.pdf" },
+      setAttribute() {}, closest: () => ({ querySelector: () => status }) };
+    const runtime = loadProjectionRuntime({ buttons: [button], now: () => now, runtime: {
+      apiPath: (path, workspace) => `/api/workspaces/${workspace}${path.slice(4)}`,
+      fetch: async (path, options) => { calls.push([path, JSON.parse(options.body)]); return { ok: true, json: async () => ({ state: "ready", download_id: "one", filename: "report.pdf", size_bytes: 2048 }) }; },
+      downloadFile: (path, filename, options) => {
+        calls.push([path, filename]); report = options.onProgress;
+        return new Promise((resolve) => { finish = resolve; });
+      },
+    } });
+    const pending = runtime.downloadToolFile(button);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    runtime.state.workspaceId = "other";
+    now = 1500;
+    report(1024);
+    expect(status.textContent).toContain("1.0 KiB / 2.0 KiB");
+    expect(status.textContent).toContain("2.0 KiB/s");
+    runtime.state.workspaceId = "w1"; runtime.state.selectedAgent = "main";
+    expect(runtime.toolFileCardsHtml({ id: 8, name: "File.Send", result: { state: "Succeeded", detail: JSON.stringify({ files: [{ path: "/output/report.pdf", name: "report.pdf", size: 2048 }] }) } })).toContain('aria-valuenow="50"');
+    runtime.state.workspaceId = "other";
+    expect(button.innerHTML).toContain('aria-valuenow="50"');
+    expect(button.disabled).toBe(true);
+    await runtime.downloadToolFile(button);
+    expect(calls).toHaveLength(2);
+    finish({ size: 2048 }); await pending;
+    expect(calls[0]).toEqual(["/api/workspaces/w1/files/downloads/create", { sources: ["/output/report.pdf"], file_only: true }]);
+    expect(calls[1]).toEqual(["/api/workspaces/w1/files/downloads/one/content", "report.pdf"]);
+    expect(calls[2][0]).toBe("/api/workspaces/w1/files/downloads/cancel");
+    expect(status.textContent).toBe("下载完成 · 2.0 KiB / 2.0 KiB");
+    expect(button.disabled).toBe(false);
+    expect(runtime.toolFileDownloads.size).toBe(0);
+    expect(runtime.notices).toEqual([]);
+  });
+
+  test("failed file download clears progress and can be retried", async () => {
+    let fail = true; const status = { textContent: "" };
+    const button = { dataset: { downloadKey: "failure", workspace: "w1", fileDownload: "/output/a" },
+      setAttribute() {}, closest: () => ({ querySelector: () => status }) };
+    const runtime = loadProjectionRuntime({ buttons: [button], runtime: {
+      fetch: async () => ({ ok: true, json: async () => ({ state: "ready", download_id: "one", filename: "a", size_bytes: 0 }) }),
+      downloadFile: async () => { if (fail) throw new Error("连接中断"); return { size: 0 }; },
+    } });
+    await runtime.downloadToolFile(button);
+    expect(status.textContent).toBe("下载失败，点击重试");
+    expect(runtime.notices).toEqual([["连接中断", true]]);
+    expect(runtime.toolFileDownloads.size).toBe(0);
+    expect(button.disabled).toBe(false);
+    fail = false; await runtime.downloadToolFile(button);
+    expect(status.textContent).toBe("下载完成 · 0 B / 0 B");
+    expect(runtime.toolFileDownloads.size).toBe(0);
+  });
+
   test("View and Send show ordered previews while collapsed and preserve a stable gallery", () => {
     const runtime = loadProjectionRuntime();
     runtime.state.selectedAgent = "main";

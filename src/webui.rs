@@ -1146,6 +1146,8 @@ struct HostFileUploadRequest {
 #[serde(deny_unknown_fields)]
 struct HostFileDownloadCreateRequest {
     sources: Vec<String>,
+    #[serde(default)]
+    file_only: bool,
 }
 
 #[derive(Deserialize)]
@@ -1376,7 +1378,10 @@ fn host_file_response_inner(
         (&Method::Post, "/api/files/downloads/create") => {
             let value: HostFileDownloadCreateRequest =
                 read_json(request, MAX_HOST_FILE_BODY_BYTES)?;
-            json_response(StatusCode(200), &host_files.create_download(value.sources)?)
+            json_response(
+                StatusCode(200),
+                &host_files.create_download(value.sources, value.file_only)?,
+            )
         }
         (&Method::Post, "/api/files/downloads/status") => {
             let value: HostFileDownloadRequest = read_json(request, MAX_HOST_FILE_BODY_BYTES)?;

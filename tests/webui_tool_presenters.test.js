@@ -26,9 +26,20 @@ describe("shared WebUI tool presenters", () => {
     expect(presenters.imageAttachments("Image.Send", succeeded({ images: [{ image: { ...image, width: 0 } }, { image: { ...image, sha256: "bad" } }] }))).toEqual([]);
   });
 
+  test("File.Send exposes only ordered file metadata and never image attachments", () => {
+    const files = [{ path: "/output/photo.png", name: "photo.png", size: 0 }, { path: "/output/report.zip", name: "report.zip", size: 1024 }];
+    expect(presenters.fileAttachments("File.Send", succeeded({ files }))).toEqual(files);
+    expect(presenters.imageAttachments("File.Send", succeeded({ files }))).toEqual([]);
+    expect(presenters.fileAttachments("File.Send", undefined)).toEqual([]);
+    expect(presenters.fileAttachments("File.Send", { result: { state: "Failed", value: { files } } })).toEqual([]);
+    expect(presenters.fileAttachments("File.Stat", succeeded({ files }))).toEqual([]);
+    expect(presenters.fileAttachments("File.Send", succeeded({ files: [null, {}, { ...files[0], size: -1 }, { ...files[0], name: null }] }))).toEqual([]);
+    expect(presenters.summarize("File.Send", { paths: ["a", "b"] })).toMatchObject({ title: "发送文件", summary: "2 个文件" });
+  });
+
   test("explicitly covers every first-party and historical compatibility tool", () => {
-    expect(presenters.KNOWN_TOOLS).toHaveLength(69);
-    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(69);
+    expect(presenters.KNOWN_TOOLS).toHaveLength(70);
+    expect(new Set(presenters.KNOWN_TOOLS).size).toBe(70);
     expect(presenters.names().sort()).toEqual([...presenters.KNOWN_TOOLS].sort());
     for (const name of presenters.KNOWN_TOOLS) expect(presenters.has(name)).toBe(true);
   });

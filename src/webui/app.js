@@ -3038,6 +3038,8 @@ function renderEmptyTranscript(container) {
 function estimateTranscriptMessageHeight(message, _index, width = elements.transcriptContent?.clientWidth || 742) {
   if (!messageIsVisible(message)) return 0;
   if (message.kind === "tool") {
+    const files = MeToolPresenters.fileAttachments(message.tool.name, toolPresentationOutput(message.tool));
+    if (files.length) return 51 + 18 + files.length * 64 + (files.length - 1) * 8;
     const images = MeToolPresenters.imageAttachments(message.tool.name, toolPresentationOutput(message.tool));
     if (images.length) {
       const galleryWidth = Math.min(720, Math.max(0, width - 22));
@@ -3348,7 +3350,7 @@ function isToolLikeKind(kind) {
 
 function bindToolCard(card) {
   const toggle = (event) => {
-    if (event?.target?.closest?.(".tool-details")) return;
+    if (event?.target?.closest?.(".tool-details, .tool-files")) return;
     if (window.getSelection()?.toString()) return;
     const key = `${state.selectedAgent}:${card.dataset.toolCard}`;
     if (state.expandedTools.has(key)) state.expandedTools.delete(key); else state.expandedTools.add(key);
@@ -3362,8 +3364,13 @@ function bindToolCard(card) {
       transcriptVirtualizer?.layoutChanged();
     }
   };
-  card.addEventListener("click", toggle);
+  card.addEventListener("click", (event) => {
+    const button = event.target?.closest?.("[data-file-download]");
+    if (button) { event.preventDefault(); void downloadToolFile(button); return; }
+    toggle(event);
+  });
   card.addEventListener("keydown", (event) => {
+    if (event.target?.closest?.(".tool-files")) return;
     if (event.key === "Enter" || event.key === " ") { event.preventDefault(); toggle(event); }
   });
 }
@@ -3411,11 +3418,108 @@ function updateToolImageGallery(node, tool) {
   else node.insertBefore(gallery, node.querySelector(":scope > .tool-details"));
 }
 
+const toolFileDownloads = new Map();
+
+function toolFileProgressText(progress) {
+  return `${formatBytes(progress.done)} / ${formatBytes(progress.total)} · ${formatBytes(progress.rate)}/s`;
+}
+
+function toolFileDownloadIcon(progress) {
+  if (progress) {
+    const percent = progress.total > 0 ? Math.min(100, progress.done / progress.total * 100) : 0;
+    return `<svg class="tool-file-ring" viewBox="0 0 36 36" role="progressbar" aria-label="下载进度" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.floor(percent)}"><circle class="tool-file-ring-track" cx="18" cy="18" r="15"/><circle class="tool-file-ring-value" cx="18" cy="18" r="15" pathLength="100" stroke-dasharray="100" stroke-dashoffset="${100 - percent}"/></svg>`;
+  }
+  return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m-5-5 5 5 5-5M4 16v4h16v-4"/></svg>';
+}
+
+function toolFileCardsHtml(tool) {
+  const files = MeToolPresenters.fileAttachments(tool.name, toolPresentationOutput(tool));
+  if (!files.length) return "";
+  const encoded = escapeAttr(JSON.stringify(files));
+  return `<div class="tool-files" data-files="${encoded}">${files.map((file, index) => {
+    const key = JSON.stringify([state.workspaceId, state.selectedAgent, tool.id, index]);
+    const progress = toolFileDownloads.get(key);
+    return `<div class="tool-file-card"><div class="tool-file-info"><span class="tool-file-name" title="${escapeAttr(file.name)}">${escapeHtml(file.name)}</span><span class="tool-file-size">${escapeHtml(progress ? toolFileProgressText(progress) : formatBytes(file.size))}</span></div><button type="button" class="tool-file-download" data-download-key="${escapeAttr(key)}" data-file-download="${escapeAttr(file.path)}" data-workspace="${escapeAttr(state.workspaceId)}" title="下载文件" aria-label="下载 ${escapeAttr(file.name)}"${progress ? ' disabled aria-busy="true"' : ""}>${toolFileDownloadIcon(progress)}</button></div>`;
+  }).join("")}</div>`;
+}
+
+function updateToolFileCards(node, tool) {
+  const files = MeToolPresenters.fileAttachments(tool.name, toolPresentationOutput(tool));
+  const existing = node.querySelector(":scope > .tool-files");
+  if (!files.length) { existing?.remove(); return; }
+  if (existing?.dataset.files === JSON.stringify(files)) return;
+  const template = document.createElement("template");
+  template.innerHTML = toolFileCardsHtml(tool);
+  const replacement = template.content.firstElementChild;
+  if (existing) existing.replaceWith(replacement);
+  else node.insertBefore(replacement, node.querySelector(":scope > .tool-details"));
+}
+
+function updateToolFileProgress(key, progress, finalText) {
+  for (const button of document.querySelectorAll(".tool-file-download")) {
+    if (button.dataset.downloadKey !== key) continue;
+    button.disabled = Boolean(progress);
+    button.setAttribute("aria-busy", String(Boolean(progress)));
+    button.innerHTML = toolFileDownloadIcon(progress);
+    button.closest(".tool-file-card").querySelector(".tool-file-size").textContent = progress ? toolFileProgressText(progress) : finalText;
+  }
+}
+
+async function downloadToolFile(button) {
+  const key = button.dataset.downloadKey;
+  if (toolFileDownloads.has(key)) return;
+  const workspaceId = button.dataset.workspace;
+  const progress = { done: 0, total: 0, rate: 0 };
+  toolFileDownloads.set(key, progress);
+  updateToolFileProgress(key, progress);
+  let download = null, timer = null, finalText = "下载失败，点击重试";
+  try {
+    download = await api("/api/files/downloads/create", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sources: [button.dataset.fileDownload], file_only: true }),
+    }, workspaceId);
+    if (download.state !== "ready") throw new Error("文件暂时无法下载");
+    progress.total = download.size_bytes;
+    let lastBytes = 0, lastTime = performance.now();
+    const refresh = () => {
+      const now = performance.now();
+      const elapsed = (now - lastTime) / 1000;
+      if (elapsed >= .25) {
+        progress.rate = Math.max(0, Math.round((progress.done - lastBytes) / elapsed));
+        lastBytes = progress.done; lastTime = now;
+      }
+      updateToolFileProgress(key, progress);
+    };
+    refresh();
+    timer = setInterval(refresh, 500);
+    const saved = await frontendRuntime.downloadFile(
+      frontendRuntime.apiPath(`/api/files/downloads/${encodeURIComponent(download.download_id)}/content`, workspaceId),
+      download.filename, { onProgress: (done) => { progress.done = done; refresh(); } },
+    );
+    finalText = `下载完成 · ${formatBytes(progress.total)} / ${formatBytes(progress.total)}`;
+    if (saved?.path) toast(`已保存到 ${saved.path}`);
+  } catch (error) {
+    if (error.status === 401) showLogin("登录已失效，请重新登录");
+    else toast(error.message || "下载失败，请重试", true);
+  } finally {
+    clearInterval(timer);
+    toolFileDownloads.delete(key);
+    updateToolFileProgress(key, null, finalText);
+    if (download?.download_id) {
+      void api("/api/files/downloads/cancel", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ download_id: download.download_id }),
+      }, workspaceId).catch(() => {});
+    }
+  }
+}
+
 function renderToolCard(tool, followsTool = false) {
   const view = toolCardView(tool);
   return `<div class="tool-card ${view.status} ${view.expanded ? "expanded" : ""} ${followsTool ? "follows-tool" : ""}" data-tool-card="${escapeAttr(tool.id)}" role="button" tabindex="0" aria-expanded="${view.expanded}">
     <div class="tool-header"><span class="tool-marker">●</span><span class="tool-name" title="${escapeAttr(tool.name)}">${escapeHtml(view.title)}</span><span class="tool-brief">${escapeHtml(view.brief)}</span><span class="tool-time"${view.runningStarted == null ? "" : ` data-running-started="${view.runningStarted}"`}>${escapeHtml(view.time)}</span></div>
     ${toolImageGalleryHtml(tool)}
+    ${toolFileCardsHtml(tool)}
     ${view.details ? MeToolPresenters.renderDetails(view.details) : ""}
   </div>`;
 }
@@ -3450,6 +3554,7 @@ function updateToolCardNode(node, tool, followsTool = node.classList.contains("f
   if (view.runningStarted == null) delete time.dataset.runningStarted;
   else time.dataset.runningStarted = String(view.runningStarted);
   updateToolImageGallery(node, tool);
+  updateToolFileCards(node, tool);
   const details = node.querySelector(":scope > .tool-details");
   if (!view.expanded) {
     details?.remove();

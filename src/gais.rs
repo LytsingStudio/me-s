@@ -641,11 +641,13 @@ pub const BRIEF: &str = r#"GAIS is a generative AI service for creating media. U
 
 Query GAIS.Models to discover the available models, output types, generation modes and input requirements. Only use capabilities declared by the selected model. GAIS tools also let you upload input materials, submit generation tasks, inspect progress, wait for completion, cancel authorized tasks and download results.
 
-Typical sequence: Models -> Guide when needed -> Upload inputs when needed -> Permit -> Start using that task handle -> Tasks or Wait -> Download outputs. Read the current model capabilities before choosing generation parameters and input roles. Inspect returned requested/effective values and adjustments to learn which parameters will actually be used. Start acceptance is not generation success. A successful query can contain a failed task.
+Typical sequence: Models -> Guide when needed -> Upload inputs when needed -> Permit -> Start using that task handle -> Tasks or Wait -> Download outputs -> File.Send when delivery is needed. Read the current model capabilities before choosing generation parameters and input roles. Inspect returned requested/effective values and adjustments to learn which parameters will actually be used. Start acceptance is not generation success. A successful query can contain a failed task.
 
 Tasks and assets are shared in GAIS, not private to this conversation. Do not cancel or modify another task without user authority. Start can consume substantial resources; obtain authority for generation. If a Start response is lost, query or resubmit the SAME task handle. Never obtain another permit automatically to recover an uncertain Start. cancelling is not a stopped state; verify a terminal state with Tasks or Wait. Stopping a wait or leaving a page does not cancel a task.
 
 Local upload/download paths refer to the host running these tools, not the device displaying the UI. Relative paths resolve from the workspace. Upload discloses host file contents to GAIS; require user authority for the selected files and destination. Download creates a host file; obey the system's exact-target authorization rule for paths outside the workspace. A GAIS asset handle is not a local path.
+
+When a task has succeeded and its outputs need to be delivered to the user, first use GAIS.Download to save each required output on the tool host, then use File.Send with those local paths. One File.Send call can deliver multiple outputs. A GAIS asset handle or a host file path in a text reply is not file delivery. File.Send provides download cards, not media previews or visual inspection; use Image.View separately if you need to inspect a supported image yourself.
 
 Having these tools does not prove GAIS is configured or reachable. If configuration or connection fails, report that limitation rather than inventing capabilities or task results. Inspect each task state and each upload item's ok/error separately; a successful tool call does not mean generation or every upload succeeded. Lists may have next_cursor; retrieve further pages when needed. If the outer runtime envelope says truncate=true, the displayed result is incomplete: read its truncation information and query a smaller page or a specific handle as needed. Handles in examples are illustrative; always copy actual handles returned by GAIS."#;
 
@@ -710,7 +712,7 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 &["handle", "path"],
             ),
             "Download one GAIS asset to a new file on the host running these tools.",
-            "Pass an exact asset handle and destination file path, not a directory. Parent directory must exist; existing destinations are never overwritten. Relative paths resolve from the workspace. The destination is created only for a complete, verified download; failed or incomplete transfers do not create it. Returns handle, path, size, sha256 and request metadata. This does not display media to the model or user; use Image tools separately for supported images. Outside-workspace writes require explicit user authorization for this operation and exact target.",
+            "Pass an exact asset handle and destination file path, not a directory. Parent directory must exist; existing destinations are never overwritten. Relative paths resolve from the workspace. The destination is created only for a complete, verified download; failed or incomplete transfers do not create it. Returns handle, path, size, sha256 and request metadata. Download alone does not deliver the file to the user or display media. To deliver an output, call File.Send with its downloaded local path; multiple downloaded outputs can be sent together. Use Image.View separately if you need visual inspection of a supported image. Outside-workspace writes require explicit user authorization for this operation and exact target.",
             "{\"handle\":\"file-01234567\",\"path\":\"output/clip.mov\"}",
         ),
         (
@@ -980,6 +982,10 @@ mod tests {
             "continuing previous generations",
             "Query GAIS.Models",
             "Only use capabilities declared by the selected model",
+            "first use GAIS.Download",
+            "then use File.Send",
+            "One File.Send call can deliver multiple outputs",
+            "not file delivery",
         ] {
             assert!(brief.contains(usage), "missing GAIS usage: {usage}");
         }

@@ -301,18 +301,95 @@ fn generated_file_toolbox(workspace: &Path) -> PathBuf {
 }
 
 #[test]
+fn send_returns_ordered_metadata_without_opening_file_contents() {
+    let workspace = temporary_workspace();
+    let script = generated_file_toolbox(&workspace);
+    fs::write(workspace.join("report.pdf"), b"report").unwrap();
+    fs::write(workspace.join("photo.png"), [0, 255, 1]).unwrap();
+    fs::write(workspace.join("empty.txt"), []).unwrap();
+    let wrapper = workspace.join("audit-send.py");
+    fs::write(&wrapper, format!(
+        "import sys, runpy\ndef audit(event, args):\n    if event == 'open' and str(args[0]).endswith(('.pdf', '.png', '.txt')):\n        raise RuntimeError('File.Send must not open file contents')\nsys.addaudithook(audit)\nrunpy.run_path({}, run_name='__main__')\n",
+        serde_json::to_string(&script.to_string_lossy()).unwrap(),
+    )).unwrap();
+    let mut toolbox = ToolboxProcess::start(&workspace, &wrapper);
+    let output = toolbox.execute(
+        "Send",
+        json!({"paths":["photo.png","report.pdf","empty.txt","photo.png"]}),
+    );
+    assert_eq!(output["type"], "result", "{output}");
+    let files = output["output"]["files"].as_array().unwrap();
+    assert_eq!(files.len(), 4);
+    for (index, (name, size)) in [
+        ("photo.png", 3),
+        ("report.pdf", 6),
+        ("empty.txt", 0),
+        ("photo.png", 3),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        assert_eq!(files[index]["name"], name);
+        assert_eq!(files[index]["size"], size);
+        assert!(Path::new(files[index]["path"].as_str().unwrap()).is_absolute());
+        assert_eq!(files[index].as_object().unwrap().len(), 3);
+    }
+    for paths in [
+        json!([]),
+        json!(["report.pdf", "missing.pdf"]),
+        json!(["."]),
+        json!([""]),
+        json!([" "]),
+        json!([1]),
+        json!(vec!["report.pdf"; 257]),
+    ] {
+        assert_eq!(
+            toolbox.execute("Send", json!({"paths":paths}))["type"],
+            "error"
+        );
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(workspace.join("report.pdf"), workspace.join("link.pdf"))
+            .unwrap();
+        assert_eq!(
+            toolbox.execute("Send", json!({"paths":["link.pdf"]}))["error"]["code"],
+            "invalid_path"
+        );
+    }
+    let absolute = toolbox.execute("Send", json!({"paths":[workspace.join("report.pdf")]}));
+    assert_eq!(absolute["output"]["files"][0], files[1]);
+    let schema = toolbox.query("getInputSchema", Some("Send"));
+    assert_eq!(schema["output"]["required"], json!(["paths"]));
+    assert_eq!(schema["output"]["properties"]["paths"]["maxItems"], 256);
+    let docs = toolbox.query("getInstructions", Some("Send"));
+    for usage in [
+        "host running these tools",
+        "whole batch",
+        "does not read",
+        "at click time",
+        "authorized their disclosure",
+    ] {
+        assert!(docs["output"].as_str().unwrap().contains(usage));
+    }
+    toolbox.finish();
+    fs::remove_dir_all(workspace).unwrap();
+}
+
+#[test]
 fn generated_file_toolbox_is_self_describing_while_stdin_remains_open() {
     let workspace = temporary_workspace();
     let script = generated_file_toolbox(&workspace);
     let mut toolbox = ToolboxProcess::start(&workspace, &script);
     let tools = toolbox.query("getTools", None);
     assert_eq!(tools["type"], "result");
-    assert_eq!(tools["output"].as_array().unwrap().len(), 15);
+    assert_eq!(tools["output"].as_array().unwrap().len(), 16);
     assert_eq!(tools["output"][0], "Read");
     assert_eq!(tools["output"][2], "EditBytes");
     assert_eq!(tools["output"][7], "MakeDirectory");
     assert_eq!(tools["output"][12], "Copy");
     assert_eq!(tools["output"][14], "Delete");
+    assert_eq!(tools["output"][15], "Send");
     let tool_names = tools["output"]
         .as_array()
         .unwrap()

@@ -83,7 +83,7 @@ The Worker may be much less capable than you and must never be assumed to rememb
 
 Before requesting any modification outside the workspace, personally verify that the actual user explicitly authorized the exact operation and target or precisely bounded target set. Every Worker.Ask that performs such a modification must explicitly state that actual-user authorization and its exact scope. Never treat your ability to instruct the Worker as a substitute for the actual user's authorization.
 
-The Worker's tools are your primary operational ability to observe and act in the execution environment. You are an environment-capable Agent, not a text-only chatbot. Image is also directly available for metadata, firsthand visual inspection, and sending images to the user; only Image.View requires the current model to support image input. Other non-Agent low-level tools are directly available to you only as a restricted fallback. Their availability does not make direct use the normal path and must not be passed to the user as a reason to bypass the Worker.
+The Worker's tools are your primary operational ability to observe and act in the execution environment. You are an environment-capable Agent, not a text-only chatbot. Image is also directly available for metadata, firsthand visual inspection, and sending images to the user; only Image.View requires the current model to support image input. File.Send is directly available for delivering local files to the user. Other non-Agent low-level tools are directly available to you only as a restricted fallback. Their availability does not make direct use the normal path and must not be passed to the user as a reason to bypass the Worker.
 
 ## User-facing boundary
 
@@ -120,11 +120,12 @@ Before every Worker.Ask, check all of the following:
 
 ## Tool boundary
 
-- Your normal tools are Worker.Ask, Worker.Wait, Worker.Stop, Worker.ClearContext, WorkMap, Compact, SetTitle, and Image.
+- Your normal tools are Worker.Ask, Worker.Wait, Worker.Stop, Worker.ClearContext, WorkMap, Compact, SetTitle, Image, and File.Send.
 - You may call Image.Info and Image.View directly whenever image metadata or firsthand visual inspection is useful. Use Image.Send directly when the user asks to receive or review one or more images; Send does not let you inspect them. Image is not subject to the direct-tool fallback restriction.
+- Use File.Send directly to deliver local files to the user as download cards. File.Send is a normal user-facing delivery tool and does not require a direct-tool fallback condition. It does not read file contents; ordinary file inspection and modification still go through the Worker.
 - The remaining non-Agent low-level toolbox sections describe capabilities available both to the Worker and, under the strict fallback rules below, directly to you. Use these definitions to understand what the Worker can do and what evidence it can return.
 - The Agent toolbox is unavailable to you. Use the one dedicated Worker through Worker tools; do not create or control other Agents.
-- A low-level tool other than Image being callable is not permission to use it routinely. Ordinary file, terminal, browser, and other environment operations must go through Worker.Ask.
+- A low-level tool other than Image or File.Send being callable is not permission to use it routinely. Ordinary file inspection and modification, terminal, browser, and other environment operations must go through Worker.Ask.
 
 ## Operating method
 
@@ -142,7 +143,7 @@ If the evidence is insufficient, do not guess and do not ask the Worker to decid
 
 ## Direct-tool fallback
 
-Image.Info and Image.View are normal Manager tools and do not require a fallback condition. Image.Send is also a normal direct tool for presenting images to the user. Perform all other ordinary operational work through the Worker. You may call another low-level tool yourself only when at least one of these conditions is actually true:
+Image.Info and Image.View are normal Manager tools and do not require a fallback condition. Image.Send is also a normal direct tool for presenting images to the user, and File.Send is a normal direct tool for delivering files to the user. Perform all other ordinary operational work through the Worker. You may call another low-level tool yourself only when at least one of these conditions is actually true:
 
 - the Worker remains unavailable because of an unrecoverable failure after reasonable recovery or retry attempts;
 - the user explicitly requires you, rather than the Worker, to perform the operation directly;
@@ -11831,6 +11832,9 @@ data: [DONE]
         assert!(manager_system.contains("Image is not subject to the direct-tool fallback"));
         assert!(manager_system.contains("inspect it yourself with Image.View"));
         assert!(manager_system.contains("Image.Info and Image.View are normal Manager tools"));
+        assert!(manager_system.contains("Use File.Send directly"));
+        assert!(manager_system.contains("File.Send is a normal user-facing delivery tool"));
+        assert!(manager_system.contains("other than Image or File.Send"));
         assert!(manager_system.contains("may execute review or acceptance procedures"));
         assert!(manager_system.contains("execute the exact checks"));
         assert!(manager_system.contains("may collect image evidence without inspecting it"));
@@ -11923,6 +11927,7 @@ data: [DONE]
                     | workmap::WORKMAP_TOOLBOX_NAME
                     | compact::TOOLBOX_NAME
                     | image_toolbox::TOOLBOX_NAME
+                    | crate::gais::TOOLBOX_NAME
             )
         }));
 

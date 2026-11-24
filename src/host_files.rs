@@ -741,7 +741,11 @@ impl HostFileManager {
         Ok(snapshot)
     }
 
-    pub(crate) fn create_download(&self, sources: Vec<String>) -> Result<DownloadSnapshot> {
+    pub(crate) fn create_download(
+        &self,
+        sources: Vec<String>,
+        file_only: bool,
+    ) -> Result<DownloadSnapshot> {
         if sources.is_empty() {
             return Err("At least one download path is required".into());
         }
@@ -750,6 +754,9 @@ impl HostFileManager {
             .map(|source| existing_path_preserve_leaf(source))
             .collect::<Result<Vec<_>>>()?;
         validate_non_overlapping_sources(&sources)?;
+        if file_only && (sources.len() != 1 || !fs::symlink_metadata(&sources[0])?.is_file()) {
+            return Err("Download target must be one regular file".into());
+        }
         let id = self.next_id("download");
         let created_at_ms = now_ms();
         if sources.len() == 1 {
@@ -2223,7 +2230,7 @@ mod tests {
         manager.finish_upload(&upload.upload_id).unwrap();
 
         let download = manager
-            .create_download(vec![path_string(fixture.path.join("payload.bin"))])
+            .create_download(vec![path_string(fixture.path.join("payload.bin"))], false)
             .unwrap();
         let mut stream = manager
             .open_download(&download.download_id, Some("bytes=1-3"))
@@ -2354,7 +2361,9 @@ mod tests {
         let folder = fixture.path.join("folder");
         fs::create_dir_all(&folder).unwrap();
         fs::write(folder.join("nested.txt"), b"archive").unwrap();
-        let download = manager.create_download(vec![path_string(&folder)]).unwrap();
+        let download = manager
+            .create_download(vec![path_string(&folder)], false)
+            .unwrap();
         let ready = (0..200)
             .find_map(|_| {
                 let snapshot = manager.download_status(&download.download_id).unwrap();
@@ -2431,12 +2440,54 @@ mod tests {
     }
 
     #[test]
+    fn file_card_download_accepts_only_one_regular_file_without_archiving() {
+        let fixture = Fixture::new("file-card");
+        let manager = HostFileManager::new(&fixture.path).unwrap();
+        let file = fixture.path.join("result.bin");
+        fs::write(&file, b"result").unwrap();
+        for paths in [
+            vec![],
+            vec![path_string(&fixture.path)],
+            vec![path_string(&file); 2],
+        ] {
+            assert!(manager.create_download(paths, true).is_err());
+        }
+        #[cfg(unix)]
+        {
+            let link = fixture.path.join("link");
+            std::os::unix::fs::symlink(&file, &link).unwrap();
+            assert!(
+                manager
+                    .create_download(vec![path_string(link)], true)
+                    .is_err()
+            );
+        }
+        assert!(manager.downloads.lock().unwrap().is_empty());
+        let download = manager
+            .create_download(vec![path_string(file)], true)
+            .unwrap();
+        assert_eq!(download.state, "ready");
+        assert_eq!(download.filename, "result.bin");
+        assert_eq!(download.size_bytes, Some(6));
+        assert!(
+            !manager
+                .download(&download.download_id)
+                .unwrap()
+                .lock()
+                .unwrap()
+                .owned_temp
+        );
+    }
+
+    #[test]
     fn empty_file_download_has_zero_content_length() {
         let fixture = Fixture::new("empty");
         let manager = HostFileManager::new(&fixture.path).unwrap();
         let empty = fixture.path.join("empty.txt");
         fs::write(&empty, []).unwrap();
-        let download = manager.create_download(vec![path_string(&empty)]).unwrap();
+        let download = manager
+            .create_download(vec![path_string(&empty)], true)
+            .unwrap();
         let mut stream = manager.open_download(&download.download_id, None).unwrap();
         let mut body = Vec::new();
         stream.reader.read_to_end(&mut body).unwrap();

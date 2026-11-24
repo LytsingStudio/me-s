@@ -11,7 +11,7 @@
     "Image.Info", "Image.View", "Image.Send",
     "File.Read", "File.ReadBytes", "File.EditBytes", "File.List", "File.Find", "File.Search",
     "File.Stat", "File.MakeDirectory", "File.Create", "File.Edit", "File.Append", "File.Replace",
-    "File.Copy", "File.Move", "File.Delete",
+    "File.Copy", "File.Move", "File.Delete", "File.Send",
     "Terminal.Create", "Terminal.Interact", "Terminal.Status", "Terminal.List", "Terminal.Kill",
     "Desktop.Play",
     "GAIS.Models", "GAIS.Host", "GAIS.Guide", "GAIS.Upload", "GAIS.Assets", "GAIS.Download",
@@ -473,6 +473,24 @@
       if (outputTip(value)) blocks.push(outputTip(value));
       return blocks;
     },
+  });
+
+  function fileAttachments(name, output) {
+    if (name !== "File.Send" || !resultSucceeded(output)) return [];
+    const files = resultValue(output)?.files;
+    if (!Array.isArray(files)) return [];
+    return files.filter((file) => file && typeof file.path === "string" && file.path
+      && typeof file.name === "string" && file.name && Number.isSafeInteger(file.size) && file.size >= 0)
+      .map(({ path, name, size }) => ({ path, name, size }));
+  }
+
+  define("File.Send", {
+    title: "发送文件", icon: fileIcon,
+    summary: (input) => input.paths?.length === 1 ? input.paths[0] : itemCount(input.paths, "个文件"),
+    input: (input) => [listBlock("文件路径", input.paths || [])],
+    output: (input, output) => [tableBlock("已发送文件", [
+      { key: "name", label: "文件名" }, { key: "size", label: "大小" }, { key: "path", label: "路径" },
+    ], fileAttachments("File.Send", output).map((file) => ({ ...file, size: formatBytes(file.size) })))],
   });
 
   define("File.MakeDirectory", {
@@ -1206,6 +1224,7 @@
     present,
     renderDetails,
     imageAttachments,
+    fileAttachments,
     safeJson,
   });
 })();

@@ -125,6 +125,7 @@ TOOLS = [
     "Copy",
     "Move",
     "Delete",
+    "Send",
 ]
 
 
@@ -486,6 +487,10 @@ INPUT_SCHEMAS: dict[str, dict[str, Any]] = {
                 "maxItems": 256,
             }
         },
+        ["paths"],
+    ),
+    "Send": object_schema(
+        {"paths": {"type": "array", "items": INPUT_PATH_SCHEMA, "minItems": 1, "maxItems": 256}},
         ["paths"],
     ),
     "MakeDirectory": object_schema(
@@ -867,6 +872,17 @@ OUTPUT_SCHEMAS: dict[str, dict[str, Any]] = {
         },
         ["entries", "returned"],
     ),
+    "Send": object_schema(
+        {"files": {
+            "type": "array", "minItems": 1, "maxItems": 256,
+            "items": object_schema(
+                {"path": {"type": "string", "description": "Absolute path on the tool host."},
+                 "name": {"type": "string"}, "size": {"type": "integer", "minimum": 0}},
+                ["path", "name", "size"],
+            ),
+        }},
+        ["files"],
+    ),
     "MakeDirectory": object_schema(
         {
             "path": OUTPUT_PATH_SCHEMA,
@@ -986,6 +1002,7 @@ ROUTES = {
     "Find": "Find filesystem paths by glob patterns with optional recursion depth.",
     "Search": "Search text with literal or Rust regular expressions across common text encodings, with a fixed 120-second deadline.",
     "Stat": "Inspect existence, type, metadata, and current content hashes.",
+    "Send": "Send one or more local files to the user as download cards, without reading their contents.",
     "MakeDirectory": "Create one explicit directory, optionally including its missing parent chain.",
     "Create": "Create a new text file in an explicit encoding, defaulting to UTF-8; never overwrite an existing file.",
     "Edit": "Atomically replace, delete, or insert one or more independently located line ranges in a known text file.",
@@ -1017,6 +1034,7 @@ INSTRUCTIONS = {
         "The complete search has a fixed 120-second deadline and returns no partial result if that deadline expires. search_timeout is non-retryable; search a smaller path, reduce depth, or use narrower globs. max_matches limits the number of returned matches, and truncated=true means that limit was reached."
     ),
     "Stat": "A missing path is a normal result. Content hashes are returned only for ordinary files, not directories or symbolic links.",
+    "Send": "Use to deliver files to the user. paths accepts 1..256 local file paths on the host running these tools, not the device displaying the UI. Relative paths resolve from the workspace. Each target must be an existing regular file; directories, symbolic links and special files are rejected. The whole batch is validated before any cards are sent; one invalid target fails the batch. Returns files in input order, each with its absolute path, name and size in bytes. The cards show only name, size and a download button, including for images. Sending does not read, copy, preview or automatically download file contents, and adds no file contents to model context. The user must click a download button to download that file. Keep the source files available: cards do not preserve file contents, downloads read the file at click time, and later changes can change the download or make it unavailable. Do not send private files unless the user has authorized their disclosure.",
     "MakeDirectory": "parents defaults to false, requiring the immediate parent to exist. Set parents=true to create every missing directory in the path. The target itself must not already exist; existing files, directories, and symbolic links return already_exists.",
     "Create": "The parent directory must already exist. encoding defaults to utf-8 because a new file has no bytes to inspect; bom defaults to false and is allowed only for UTF encodings. Creation fails if the destination exists.",
     "Edit": (
@@ -1053,6 +1071,7 @@ EXAMPLES = {
     "Find": 'Unlimited recursion (depth omitted):\n{"path":".","patterns":["**/*.rs"],"exclude":["target/**"]}\n\nOnly direct children:\n{"path":"src","patterns":["*.rs"],"depth":1}',
     "Search": 'Unlimited recursion (depth omitted):\n{"path":"src","query":"ToolboxRuntime","globs":["**/*.rs"]}\n\nOnly files directly inside src:\n{"path":"src","query":"ToolboxRuntime","globs":["*.rs"],"depth":1}',
     "Stat": '{"paths":["Cargo.toml","src/main.rs","missing.txt"]}',
+    "Send": '{"paths":["output/report.pdf","output/results.zip"]}',
     "MakeDirectory": '{"path":"build/generated/assets","parents":true}',
     "Create": '{"path":"notes.txt","content":"first line\\n","encoding":"utf-8"}',
     "Edit": (
@@ -2979,6 +2998,19 @@ def execute_delete(data: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def execute_send(data: dict[str, Any]) -> dict[str, Any]:
+    files = []
+    for source in string_list(data, "paths", required=True):
+        if not source.strip():
+            raise ToolError("invalid_arguments", "paths must contain non-empty file paths")
+        path = inspection_path(source)
+        metadata = path.lstat()
+        if not stat.S_ISREG(metadata.st_mode):
+            raise ToolError("invalid_path", f"not a regular file: {source}")
+        files.append({"path": public_absolute_path(path), "name": path.name, "size": metadata.st_size})
+    return {"files": files}
+
+
 EXECUTORS = {
     "Read": execute_read,
     "ReadBytes": execute_read_bytes,
@@ -2987,6 +3019,7 @@ EXECUTORS = {
     "Find": execute_find,
     "Search": execute_search,
     "Stat": execute_stat,
+    "Send": execute_send,
     "MakeDirectory": execute_make_directory,
     "Create": execute_create,
     "Edit": execute_edit,
@@ -3009,7 +3042,7 @@ def handle(request: Any) -> None:
     if command == "getBrief":
         result(
             request_id,
-            "File tools read exact text or bytes, list and find paths, search text, inspect metadata, create directories and files, and safely mutate existing files. Relative paths resolve from the workspace; absolute paths are accepted. Paths inside the workspace are returned relative to it, while paths outside are returned as normalized absolute paths. PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION: obey the governing external-path safety rule before modifying anything outside the workspace. Use File.Read before File.Edit, and use File.ReadBytes before File.EditBytes. Hash-gated mutations require the current hash returned by a recent File inspection and fail if the file has changed. Text operations preserve detected encoding, BOM, permissions, and line endings where applicable, and reject uncertain or lossy writes. Search automatically handles common Unicode, East Asian, and Windows text encodings, follows ignore rules, and has a fixed 120-second deadline. Recoverable failures may include a short tip describing the next safe action.",
+            "File tools read exact text or bytes, list and find paths, search text, inspect metadata, deliver files to the user with File.Send, create directories and files, and safely mutate existing files. Relative paths resolve from the workspace; absolute paths are accepted. Paths inside the workspace are returned relative to it, while paths outside are returned as normalized absolute paths; File.Send returns absolute paths for downloading. PATH SUPPORT IS CAPABILITY, NOT AUTHORIZATION: obey the governing external-path safety rule before modifying anything outside the workspace. Use File.Read before File.Edit, and use File.ReadBytes before File.EditBytes. Hash-gated mutations require the current hash returned by a recent File inspection and fail if the file has changed. Text operations preserve detected encoding, BOM, permissions, and line endings where applicable, and reject uncertain or lossy writes. Search automatically handles common Unicode, East Asian, and Windows text encodings, follows ignore rules, and has a fixed 120-second deadline. Recoverable failures may include a short tip describing the next safe action.",
         )
         return
     tool = request.get("tool")
