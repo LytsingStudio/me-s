@@ -929,10 +929,10 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
             "Start",
             object(
                 json!({"task":string(),"model":string(),"prompt":string(),"seed":{"type":["integer","null"],"minimum":0},"width":{"type":"integer"},"height":{"type":"integer"},"duration_seconds":{"type":"number"},"assets":{"type":"array","items":object(json!({"handle":string(),"role":string()}), &["handle","role"])}}),
-                &["task", "model", "prompt", "width", "height"],
+                &["task", "model"],
             ),
             "Submit an authorized generation request using an existing unstarted task handle.",
-            "Required fields are id, task, model, prompt, width and height. duration_seconds is optional in this tool: include it when the selected model requires a duration, and omit it when duration is unsupported. Omission sends no duration field; do not substitute 0 or null for an unsupported duration. Query Models for the model's requirements and allowed parameters, and read Guide when needed, using the same id. seed is optional (null/omitted lets GAIS choose and keep a seed for this task); assets is an optional ordered array of {handle,role}. Keep asset order and roles exactly as intended; do not silently deduplicate or drop tracks. Success means the request was accepted, usually queued, NOT that media has been generated. Inspect returned requested/effective/adjustments to learn which parameters will actually be used. If the response times out or is lost, query Tasks with id and handle=the SAME task on the SAME service. Resubmitting that same handle can return TASK_ALREADY_STARTED; query it rather than allocate another task. Never automatically Permit a replacement for an uncertain Start.",
+            "Required fields are id, task and model. prompt, width, height and duration_seconds are optional in this tool. Query Models for the selected model's requirements and allowed parameters, and read Guide when needed, using the same id. Supply parameters required by that model and omit unsupported ones. Omitted fields are not sent; do not substitute empty strings, 0 or null for omitted parameters. seed is optional (null/omitted lets GAIS choose and keep a seed for this task); assets is an optional ordered array of {handle,role}. Keep asset order and roles exactly as intended; do not silently deduplicate or drop tracks. Success means the request was accepted, usually queued, NOT that media has been generated. Inspect returned requested/effective/adjustments to learn which parameters will actually be used. If the response times out or is lost, query Tasks with id and handle=the SAME task on the SAME service. Resubmitting that same handle can return TASK_ALREADY_STARTED; query it rather than allocate another task. Never automatically Permit a replacement for an uncertain Start.",
             "{\"task\":\"task-01234567\",\"model\":\"MiniMax-H3\",\"prompt\":\"A calm lake at sunrise\",\"width\":640,\"height\":480,\"duration_seconds\":6}",
         ),
         (
@@ -1369,29 +1369,62 @@ mod tests {
         assert!(Connection::new(Credentials::default()).is_err());
     }
     #[test]
-    fn start_duration_is_optional_and_forwarded_only_when_supplied() {
-        let image = json!({"id":"03a7f2bc","task":"t","model":"H3-Image","prompt":"A red circle","width":256,"height":256});
-        validate_input("Start", &image).unwrap();
-        for field in ["id", "task", "model", "prompt", "width", "height"] {
-            let mut missing = image.clone();
+    fn start_parameters_are_optional_and_forwarded_only_when_supplied() {
+        let minimal = json!({"id":"03a7f2bc","task":"t","model":"H3-Image"});
+        let start = catalog_parts()
+            .0
+            .into_iter()
+            .find(|tool| tool.local_name == "Start")
+            .unwrap();
+        assert_eq!(
+            start.input_schema["required"],
+            json!(["id", "task", "model"])
+        );
+        assert!(
+            start
+                .instructions
+                .contains("prompt, width, height and duration_seconds are optional")
+        );
+        validate_input("Start", &minimal).unwrap();
+        for field in ["id", "task", "model"] {
+            let mut missing = minimal.clone();
             missing.as_object_mut().unwrap().remove(field);
             assert!(
                 validate_input("Start", &missing).is_err(),
                 "missing {field}"
             );
         }
-        for invalid_duration in [Value::Null, json!("6")] {
-            let mut invalid = image.clone();
-            invalid["duration_seconds"] = invalid_duration;
-            assert!(validate_input("Start", &invalid).is_err());
+        let parameters = [
+            ("prompt", json!("A red circle"), json!(1)),
+            ("width", json!(256), json!("256")),
+            ("height", json!(256), json!(256.5)),
+            ("duration_seconds", json!(6.5), json!("6")),
+        ];
+        for (field, _, invalid_value) in &parameters {
+            for value in [Value::Null, invalid_value.clone()] {
+                let mut invalid = minimal.clone();
+                invalid[*field] = value;
+                assert!(
+                    validate_input("Start", &invalid).is_err(),
+                    "invalid {field}"
+                );
+            }
         }
-        for duration in [None, Some(6.5)] {
-            let mut input = image.clone();
-            if let Some(seconds) = duration {
-                input["model"] = json!("MiniMax-H3");
-                input["duration_seconds"] = json!(seconds);
+        for mask in 0..16 {
+            let mut input = minimal.clone();
+            for (index, (field, value, _)) in parameters.iter().enumerate() {
+                if mask & (1 << index) != 0 {
+                    input[*field] = value.clone();
+                }
             }
             validate_input("Start", &input).unwrap();
+        }
+        let mut full = minimal.clone();
+        for (field, value, _) in parameters {
+            full[field] = value;
+        }
+        full["model"] = json!("MiniMax-H3");
+        for mut input in [minimal, full] {
             input.as_object_mut().unwrap().remove("id");
             let expected = input.clone();
             let (connection, join) = mock(1, move |_, request| {
