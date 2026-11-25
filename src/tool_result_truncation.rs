@@ -1707,6 +1707,35 @@ mod tests {
     }
 
     #[test]
+    fn gais_models_crops_complete_entries_without_rewriting_descriptions() {
+        let original = wrapper(json!({
+            "protocol_version":"1.0", "ok":true,
+            "data":{"server_id":"03a7f2bc","models":[{
+                "model":"older-preset", "type":"image",
+                "description":"模型简介".repeat(5000)
+            },{
+                "model":"newer-preset", "type":"image",
+                "description":"用于有序参考图编辑。",
+                "input_capabilities":{"reference":["image"]}
+            }]}
+        }));
+        let result = truncate_for_model_with_limit("GAIS.Models", original.clone(), 1500);
+        assert_eq!(result["truncate"], true);
+        assert_eq!(
+            result["result"]["detail"]["data"]["models"],
+            json!([original["result"]["detail"]["data"]["models"][1]])
+        );
+        assert_eq!(
+            original["result"]["detail"]["data"]["models"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert!(original["result"]["detail"]["data"]["models"][0]["description"].is_string());
+    }
+
+    #[test]
     fn gais_crops_complete_items_and_fragments_text_without_faking_task_state() {
         let result = truncate_for_model_with_limit(
             "GAIS.Tasks",

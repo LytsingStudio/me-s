@@ -53,6 +53,25 @@ describe("shared WebUI tool presenters", () => {
     expect(model).toContain("服务 ID"); expect(model).toContain("图像 服务");
   });
 
+  test("GAIS models display ordered descriptions as text and tolerate historical records without them", () => {
+    const result = succeeded({ protocol_version: "1.0", ok: true, data: {
+      server_id: "03a7f2bc", server_name: "图像 服务",
+      models: [
+        { model: "MOSS-Image-Base", type: "image", description: '有序参考图编辑 <img src=x onerror="alert(1)">' },
+        { model: "Older-Model", type: "video" },
+      ],
+    } });
+    const details = presenters.describe("GAIS.Models", { id: "03a7f2bc" }, result);
+    const html = presenters.renderDetails(details);
+    const primary = html.split('<details class="tool-raw"')[0];
+    expect(primary).toContain("简介");
+    expect(primary).toContain("有序参考图编辑 &lt;img");
+    expect(primary).not.toContain("<img");
+    expect(primary).not.toContain("undefined");
+    expect(primary.indexOf("MOSS-Image-Base")).toBeLessThan(primary.indexOf("Older-Model"));
+    expect(result.result.value.data.models[0].description).toContain("<img");
+  });
+
   test("keeps every input summary on one stable line", () => {
     for (const name of presenters.KNOWN_TOOLS) {
       const first = presenters.summarize(name, {});

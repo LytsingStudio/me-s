@@ -833,7 +833,7 @@ fn status_with(connection: &Connection, host: Option<Value>) -> Result<Value> {
 
 pub const BRIEF: &str = r#"GAIS is a generative AI service for creating media. Use it for supported creation requests, such as generating still images or videos from text, animating images, creating clips conditioned on first/last-frame images, or continuing previous generations.
 
-First call GAIS.Available to discover configured services and their current id and name. Every other GAIS tool requires id as its first parameter. Query GAIS.Models with the chosen id to discover the available models, output types, generation modes and input requirements. Only use capabilities declared by the selected model on that service. GAIS tools also let you upload input materials, submit generation tasks, inspect progress, wait for completion, cancel authorized tasks and download results.
+First call GAIS.Available to discover configured services and their current id and name. Every other GAIS tool requires id as its first parameter. Query GAIS.Models with the chosen id to discover the available models and their descriptions, output types, generation modes and input requirements. Only use capabilities declared by the selected model on that service. GAIS tools also let you upload input materials, submit generation tasks, inspect progress, wait for completion, cancel authorized tasks and download results.
 
 Typical sequence: Available -> Models(id) -> Guide when needed -> Upload inputs when needed -> Permit -> Start using that task handle -> Tasks or Wait -> Download outputs -> File.Send when delivery is needed. Keep the same server id throughout the operation. Read the current model capabilities before choosing generation parameters and input roles. Inspect returned requested/effective values and adjustments to learn which parameters will actually be used. Start acceptance is not generation success. A successful query can contain a failed task.
 
@@ -873,8 +873,8 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
         (
             "Models",
             object(json!({}), &[]),
-            "Query current model capabilities and service limits before preparing generation.",
-            "Returns the current model catalog, availability, supported output types, generation modes, input requirements and limits. This query does not start generation. Use these declarations instead of guessing capabilities, sizes, durations, input roles or model names.",
+            "Query model descriptions, capabilities and service limits before preparing generation.",
+            "Returns the current model catalog, availability, supported output types, generation modes, input requirements and limits. Each model's description summarizes its intended uses and important capability boundaries; use it to select a model, and use Guide for detailed prompting guidance. This query does not start generation. Use these declarations instead of guessing capabilities, sizes, durations, input roles or model names.",
             "{}",
         ),
         (
@@ -978,7 +978,19 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
                 "Available" => json!({"type":"object","required":["servers","unavailable"],"properties":{"servers":{"type":"array","items":{"type":"object","required":["id","name"],"properties":{"id":{"type":"string"},"name":{"type":"string"}},"additionalProperties":false}},"unavailable":{"type":"integer","minimum":0}},"additionalProperties":false}),
                 "Wait" => json!({"type":"object","required":["reason","elapsed_seconds","state","task_snapshot","query_error"],"properties":{"reason":{"enum":["terminal","deadline","query_error","interrupted"]},"elapsed_seconds":{"type":"number"},"state":{"type":["string","null"]},"task_snapshot":{"type":["object","null"]},"query_error":{"type":["string","null"]}}}),
                 "Download" => json!({"type":"object","required":["handle","path","size","sha256"],"properties":{"handle":{"type":"string"},"path":{"type":"string"},"size":{"type":"integer"},"sha256":{"type":"string"},"protocol_version":{"type":"string"},"request_id":{"type":["string","null"]}}}),
-                _ => json!({"type":"object","required":["protocol_version","ok","data"],"properties":{"protocol_version":{"const":"1.0"},"request_id":{"type":"string"},"ok":{"const":true},"data":{"type":"object","description":"Service data: Models returns models and limits; Host returns resources and queue; Guide returns model and guide; Assets/Tasks/Upload return items (paged lists also have next_cursor); Permit/Start/Cancel return the task or task receipt. Inspect per-item upload errors and the task state independently of query success."},"error":{"type":["object","null"]}}}),
+                _ => json!({"type":"object","required":["protocol_version","ok","data"],"properties":{"protocol_version":{"const":"1.0"},"request_id":{"type":"string"},"ok":{"const":true},"data": if name == "Models" {
+                    json!({"type":"object","properties":{
+                        "server_id":{"type":"string"},"server_name":{"type":"string"},
+                        "models":{"type":"array","items":{"type":"object","properties":{
+                            "model":{"type":"string"},"type":{"type":"string"},"revision":{"type":"string"},
+                            "description":{"type":"string","minLength":1,"description":"Brief model-selection summary of intended uses and important capability boundaries; detailed prompting guidance is returned by Guide."},
+                            "basic_parameters":{"type":"object"},"input_capabilities":{"type":"object"},"input_limits":{"type":"object"}
+                        }}},
+                        "limits":{"type":"object"}
+                    }})
+                } else {
+                    json!({"type":"object","description":"Service data: Host returns resources and queue; Guide returns model and guide; Assets/Tasks/Upload return items (paged lists also have next_cursor); Permit/Start/Cancel return the task or task receipt. Inspect per-item upload errors and the task state independently of query success."})
+                },"error":{"type":["object","null"]}}}),
             },
             instructions:instructions.into(), route:route.into(), examples:format!("Input: {example}"), result_token_limit:DEFAULT_TOOL_RESULT_TOKEN_LIMIT }
     }).collect();
@@ -1122,6 +1134,45 @@ mod tests {
         ));
         fs::create_dir_all(&directory).unwrap();
         directory
+    }
+    #[test]
+    fn models_preserves_descriptions_and_capabilities_without_generation() {
+        let expected = json!({
+            "service":"ME-GAIS", "server_id":"03a7f2bc", "server_name":"测试服务",
+            "accepting_tasks":true, "unavailable_reason":null,
+            "models":[{
+                "model":"MOSS-Image-Base", "type":"image", "revision":"preset-r1",
+                "description":"用于图像生成；支持有序参考图编辑。\n详细用法见指南。",
+                "basic_parameters":{"size":{"multiple_of":16},"duration":{"supported":false}},
+                "input_capabilities":{"reference":["image"]},
+                "input_limits":{"max_references":{"image":4}},
+                "future_capability":{"supported":true}
+            }],
+            "limits":{"prompt_bytes":32768}
+        });
+        let response = expected.clone();
+        let (connection, join) = mock(2, move |index, request| {
+            assert_eq!(request.method(), &tiny_http::Method::Get);
+            if index == 0 {
+                assert_eq!(request.url(), "/api/v1/host");
+                reply(json!({"server_id":"03a7f2bc","server_name":"测试服务"}))
+            } else {
+                assert_eq!(request.url(), "/api/v1/models");
+                reply(response.clone())
+            }
+        });
+        let result = execute_configured(
+            &Settings {
+                servers: vec![connection.settings],
+            },
+            Path::new("."),
+            "Models",
+            json!({"id":"03a7f2bc"}),
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(result, envelope(expected));
+        join.join().unwrap();
     }
     #[test]
     fn discovery_is_ordered_and_rechecks_current_ids_before_routing() {
@@ -1368,6 +1419,7 @@ mod tests {
             "first/last-frame images",
             "continuing previous generations",
             "Query GAIS.Models",
+            "models and their descriptions",
             "Only use capabilities declared by the selected model",
             "first use GAIS.Download",
             "then use File.Send",
@@ -1376,6 +1428,20 @@ mod tests {
         ] {
             assert!(brief.contains(usage), "missing GAIS usage: {usage}");
         }
+        let models = tools
+            .iter()
+            .find(|tool| tool.local_name == "Models")
+            .unwrap();
+        assert!(models.instructions.contains("use it to select a model"));
+        assert!(
+            models
+                .instructions
+                .contains("use Guide for detailed prompting guidance")
+        );
+        let description = &models.output_schema["properties"]["data"]["properties"]["models"]["items"]
+            ["properties"]["description"];
+        assert_eq!(description["type"], "string");
+        assert_eq!(description["minLength"], 1);
         let mut docs = brief;
         for tool in tools {
             docs.push_str(&tool.route);
