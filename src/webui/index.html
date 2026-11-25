@@ -119,7 +119,7 @@
         </div>
         <div id="objective-summary" class="objective-summary hidden"></div>
         <div id="composer-shell" class="composer-shell">
-          <div class="composer-attachment-tools"><button id="add-prompt-images" type="button" title="添加图片" aria-label="添加图片">+</button><input id="prompt-image-files" type="file" accept="image/*,.tif,.tiff" multiple hidden></div>
+          <input id="prompt-image-files" type="file" accept="image/*,.tif,.tiff" multiple hidden>
           <div id="prompt-images" class="prompt-images hidden" aria-label="待发送图片"></div>
           <div class="prompt-input-stack">
             <textarea id="prompt-input" rows="1" placeholder="发送消息"></textarea>
@@ -128,6 +128,7 @@
           <div class="composer-actions">
             <span id="input-hint">Enter 换行 · Shift/Alt+Enter 发送 · Esc 中止/撤回/清空</span>
             <div class="composer-buttons">
+              <button id="add-prompt-images" class="ghost-button composer-button" type="button">添加图片</button>
               <button id="stop-generation" class="composer-button stop-button" type="button" disabled>停止</button>
               <button id="send-prompt" class="primary-button composer-button" type="button"><span id="send-prompt-spinner" class="send-prompt-spinner hidden" aria-hidden="true"></span><span id="send-prompt-label">发送</span></button>
             </div>

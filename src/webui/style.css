@@ -424,10 +424,6 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .objective-plan.active { color: var(--text); }
 .composer-shell { position: relative; margin: 0 max(24px, calc((100% - 1200px) / 2)) 13px; padding: 11px 13px 9px; border: 1px solid var(--border-bright); border-radius: 13px; background: var(--panel); box-shadow: var(--shadow); }
 .composer-shell:focus-within { border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-ring), var(--shadow); }
-.composer-attachment-tools { display: flex; justify-content: flex-end; height: 24px; margin: -4px -4px 3px 0; }
-#add-prompt-images { width: 26px; height: 26px; padding: 0; border: 0; border-radius: 7px; background: transparent; color: var(--muted); font-size: 23px; line-height: 1; cursor: pointer; }
-#add-prompt-images:hover:not(:disabled) { background: var(--hover-fill); color: var(--text); }
-#add-prompt-images:disabled { opacity: .4; cursor: default; }
 .prompt-images { display: flex; gap: 10px; overflow-x: auto; padding: 5px 3px 10px; scrollbar-width: none; }
 .prompt-images::-webkit-scrollbar { display: none; }
 .prompt-image { position: relative; flex: 0 0 72px; height: 72px; }
@@ -446,7 +442,7 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 #prompt-input::placeholder { color: var(--dim); }
 .composer-actions { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 7px; }
 #input-hint { color: var(--dim); font-size: 11px; }
-.composer-buttons { display: flex; align-items: center; gap: 7px; margin-left: auto; }
+.composer-buttons { display: flex; flex-shrink: 0; align-items: center; gap: 7px; margin-left: auto; }
 .composer-button { min-width: 50px; min-height: 29px; padding: 4px 10px; border-radius: 8px; font-size: 12px; }
 #send-prompt { display: inline-flex; align-items: center; justify-content: center; gap: 6px; }
 #send-prompt[aria-busy="true"]:disabled { opacity: 1; cursor: wait; }

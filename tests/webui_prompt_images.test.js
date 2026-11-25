@@ -14,6 +14,19 @@ function fn(name) {
 const uploadGlobal = {};
 new Function("globalThis", files)(uploadGlobal);
 
+test("add images shares the bottom action row with stop and send without a separate toolbar", () => {
+  const html = readFileSync(new URL("../src/webui/index.html", import.meta.url), "utf8");
+  const buttons = html.match(/<div class="composer-buttons">([\s\S]*?)<\/div>/)[1];
+  expect(buttons).toContain('id="add-prompt-images" class="ghost-button composer-button" type="button">添加图片</button>');
+  expect(buttons.indexOf('id="add-prompt-images"')).toBeLessThan(buttons.indexOf('id="stop-generation"'));
+  expect(buttons.indexOf('id="stop-generation"')).toBeLessThan(buttons.indexOf('id="send-prompt"'));
+  expect(html).not.toContain("composer-attachment-tools");
+  expect(css).not.toContain("composer-attachment-tools");
+  expect(css).not.toContain("#add-prompt-images {");
+  expect(app).toContain('$("#add-prompt-images").addEventListener("click", () => $("#prompt-image-files").click())');
+  expect(html.indexOf('id="prompt-images"')).toBeLessThan(html.indexOf('id="prompt-input"'));
+});
+
 function harness({ failUpload = false, unknown = false, known = false } = {}) {
   const one = new File([new Uint8Array([1, 2, 3])], "one.png", { type: "image/png", lastModified: 42 });
   const two = new File([new Uint8Array([4, 5])], "two.jpg", { type: "image/jpeg", lastModified: 43 });
