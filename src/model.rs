@@ -155,7 +155,7 @@ impl ModelApi {
         if let Some(api_key) = self.model.request_api_key()? {
             request = request.bearer_auth(api_key);
         }
-        let response = request.send()?;
+        let response = request.send().map_err(request_error_details)?;
         if response.status().is_success() {
             return Ok(response);
         }
@@ -206,7 +206,8 @@ impl ModelApi {
             .header("ChatGPT-Account-ID", &credential.account_id)
             .bearer_auth(&credential.access_token)
             .json(body)
-            .send()?)
+            .send()
+            .map_err(request_error_details)?)
     }
 
     fn endpoint(&self) -> String {
@@ -301,6 +302,16 @@ impl ModelApi {
         }
         Ok(Value::Object(body))
     }
+}
+
+fn request_error_details(error: reqwest::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = std::error::Error::source(&error);
+    while let Some(cause) = source {
+        message.push_str(&format!(" ({cause})"));
+        source = cause.source();
+    }
+    message
 }
 
 fn clamp_output_limit(body: &mut Value, limit: u64) -> Result<()> {
@@ -810,6 +821,98 @@ mod tests {
 
         assert_eq!(response["ok"], true);
         server.join().unwrap();
+    }
+
+    #[test]
+    fn request_timeout_includes_cause_and_respects_model_preset() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let (release, held) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.read_exact(&mut [0_u8; 1]).unwrap();
+            let _ = held.recv_timeout(std::time::Duration::from_secs(5));
+        });
+        let mut configured = config();
+        configured.base_url = format!("http://{address}");
+        configured.timeout_seconds = 1;
+        let mut api = ModelApi::new(configured).unwrap();
+        api.client = Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(api.model.timeout_seconds))
+            .build()
+            .unwrap();
+        let error = api
+            .complete_stream(&ModelContext::user("hello"), None, |_| Ok(()))
+            .unwrap_err()
+            .to_string();
+        let _ = release.send(());
+        server.join().unwrap();
+
+        assert!(
+            error.starts_with("error sending request for url ("),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("http://{address}/chat/completions")),
+            "{error}"
+        );
+        assert!(error.contains("(operation timed out)"), "{error}");
+    }
+
+    #[test]
+    fn codex_request_failure_includes_causes_without_credentials() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut request = BufReader::new(stream);
+            loop {
+                let mut line = String::new();
+                request.read_line(&mut line).unwrap();
+                if line == "\r\n" {
+                    break;
+                }
+            }
+            request.read_exact(&mut [0_u8; 2]).unwrap();
+            request
+                .into_inner()
+                .write_all(b"HTTP/1.1 invalid\r\n\r\n")
+                .unwrap();
+        });
+        let mut configured = codex_config();
+        configured.base_url = format!("http://{address}");
+        let mut api = ModelApi::new(configured).unwrap();
+        api.client = Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(api.model.timeout_seconds))
+            .build()
+            .unwrap();
+        let credential = codex_oauth::CodexRequestCredential {
+            access_token: "test-secret-access-token".into(),
+            account_id: "test-secret-account-id".into(),
+        };
+        let error = api
+            .send_codex_once(&json!({}), &credential)
+            .unwrap_err()
+            .to_string();
+        server.join().unwrap();
+
+        assert!(
+            error.starts_with("error sending request for url ("),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!("http://{address}/responses")),
+            "{error}"
+        );
+        assert!(error.contains("client error"), "{error}");
+        assert!(
+            error.contains("(invalid HTTP status-code parsed)"),
+            "{error}"
+        );
+        assert!(!error.contains(&credential.access_token));
+        assert!(!error.contains(&credential.account_id));
     }
 
     #[test]
