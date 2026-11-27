@@ -120,7 +120,7 @@
   }
 
   function settingsHtml() {
-    return `<section class="settings-section settings-gais-section" data-gais-settings><header class="settings-section-header"><div class="settings-section-heading"><h3>生成式 AI 服务</h3></div><button type="button" class="ghost-button" data-gais-add disabled>添加</button></header>
+    return `<section class="settings-section settings-gais-section" data-gais-settings><header class="settings-section-header"><div class="settings-section-heading"><h3>生成式 AI 服务</h3></div><button type="button" class="ghost-button gais-icon-button" data-gais-add title="添加服务" aria-label="添加服务" disabled><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg></button></header>
       <div class="gais-settings"><div data-gais-entries></div><p class="settings-help" data-gais-empty hidden>尚未添加服务</p>
         <div class="gais-settings-actions"><span data-gais-result role="status">正在获取…</span><button type="button" class="primary-button" data-gais-save disabled>保存</button></div>
       </div></section>`;
@@ -141,7 +141,7 @@
     }
     function add(credentials = {}) {
       const row = document.createElement("article"); row.className = "gais-entry";
-      row.innerHTML = `<header><strong data-gais-entry-title></strong><button type="button" class="ghost-button" data-gais-remove>移除</button></header><label>URL<input data-gais-url type="url" placeholder="http://127.0.0.1:47589" autocomplete="off" spellcheck="false"></label><label>Token<input data-gais-token type="password" autocomplete="off" spellcheck="false"></label><div class="gais-settings-actions"><span data-gais-entry-result role="status"></span><button type="button" class="ghost-button" data-gais-test>测试</button></div>`;
+      row.innerHTML = `<header><strong data-gais-entry-title></strong><div class="gais-entry-actions"><button type="button" class="ghost-button" data-gais-test>测试</button><button type="button" class="ghost-button gais-icon-button" data-gais-remove title="移除服务" aria-label="移除服务"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 6h18M9 6V4h6v2M5 6l1 14h12l1-14M10 10v6M14 10v6"/></svg></button></div></header><label>URL<input data-gais-url type="url" placeholder="http://127.0.0.1:47589" autocomplete="off" spellcheck="false"></label><label>Token<input data-gais-token type="password" autocomplete="off" spellcheck="false"></label><span class="gais-entry-result" data-gais-entry-result role="status"></span>`;
       const entry = { row, title: row.querySelector("[data-gais-entry-title]"), url: row.querySelector("[data-gais-url]"), token: row.querySelector("[data-gais-token]") };
       entry.url.value = credentials.url || ""; entry.token.value = credentials.token || "";
       entries.push(entry); list.append(row);

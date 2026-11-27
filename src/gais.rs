@@ -24,6 +24,7 @@ type Result<T> = std::result::Result<T, ToolboxExecutionError>;
 const JSON_LIMIT: u64 = 8 * 1024 * 1024;
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(1800);
+const DISCOVERY_ATTEMPTS: usize = 4;
 pub const TOOLBOX_NAME: &str = "GAIS";
 
 #[derive(Clone, Default, Deserialize, Serialize)]
@@ -170,6 +171,120 @@ impl Credentials {
     }
 }
 
+#[cfg(target_os = "macos")]
+fn system_proxy_bypasses(host: &str, exceptions: &[String], simple: bool) -> bool {
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let ip = host.parse::<std::net::IpAddr>().ok();
+    if simple && ip.is_none() && !host.contains('.') {
+        return true;
+    }
+    exceptions.iter().any(|rule| {
+        let rule = rule.trim();
+        if rule == "<local>" {
+            return ip.is_none() && !host.contains('.');
+        }
+        if let Ok(network) = rule.parse::<ipnet::IpNet>() {
+            return ip.is_some_and(|ip| network.contains(&ip));
+        }
+        globset::GlobBuilder::new(rule)
+            .case_insensitive(true)
+            .literal_separator(false)
+            .build()
+            .is_ok_and(|glob| glob.compile_matcher().is_match(host))
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn macos_system_bypass(url: &Url) -> bool {
+    use system_configuration::{
+        core_foundation::{
+            array::CFArray,
+            base::{CFType, TCFType},
+            number::CFNumber,
+            string::CFString,
+        },
+        dynamic_store::SCDynamicStoreBuilder,
+        sys::schema_definitions::{
+            kSCPropNetProxiesExceptionsList, kSCPropNetProxiesExcludeSimpleHostnames,
+        },
+    };
+    let proxy_key = if url.scheme() == "https" {
+        "HTTPS_PROXY"
+    } else {
+        "HTTP_PROXY"
+    };
+    let explicit = |key: &str| {
+        std::env::var(key)
+            .or_else(|_| std::env::var(key.to_ascii_lowercase()))
+            .unwrap_or_default()
+    };
+    if !explicit(proxy_key).is_empty() || !explicit("ALL_PROXY").is_empty() {
+        return false;
+    }
+    let Some(proxies) = SCDynamicStoreBuilder::new("me-s-gais")
+        .build()
+        .and_then(|store| store.get_proxies())
+    else {
+        return false;
+    };
+    // reqwest reads macOS proxy addresses but not the system bypass list.
+    let exceptions = proxies
+        .find(unsafe { kSCPropNetProxiesExceptionsList })
+        .and_then(|value| value.downcast::<CFArray>())
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(|value| {
+                    unsafe { CFType::wrap_under_get_rule(*value) }.downcast::<CFString>()
+                })
+                .map(|value| value.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let simple = proxies
+        .find(unsafe { kSCPropNetProxiesExcludeSimpleHostnames })
+        .and_then(|value| value.downcast::<CFNumber>())
+        .and_then(|value| value.to_i32())
+        .unwrap_or(0)
+        == 1;
+    system_proxy_bypasses(url.host_str().unwrap_or_default(), &exceptions, simple)
+}
+
+fn cause_details(cause: &(dyn std::error::Error + 'static)) -> String {
+    let display = |cause: &(dyn std::error::Error + 'static)| {
+        let text = cause.to_string();
+        match cause
+            .downcast_ref::<reqwest::Error>()
+            .and_then(|cause| cause.url())
+        {
+            Some(url) => text.replace(url.as_str(), &url.origin().ascii_serialization()),
+            None => text,
+        }
+    };
+    let mut message = display(cause);
+    let mut source = cause.source();
+    while let Some(cause) = source {
+        message.push_str(&format!(" ({})", display(cause)));
+        source = cause.source();
+    }
+    message
+}
+
+fn safe_target(credentials: &Credentials) -> String {
+    let target = Url::parse(&credentials.url)
+        .map(|url| url.origin().ascii_serialization())
+        .unwrap_or_else(|_| "configured service".into());
+    sanitized(&target, &credentials.token)
+}
+
+fn sanitized(text: &str, token: &str) -> String {
+    if token.trim().is_empty() {
+        text.into()
+    } else {
+        text.replace(token.trim(), "[redacted]")
+    }
+}
+
 struct Connection {
     settings: Credentials,
     client: Client,
@@ -177,19 +292,55 @@ struct Connection {
 impl Connection {
     fn new(settings: Credentials) -> Result<Self> {
         let settings = settings.normalized()?;
-        let client = Client::builder()
+        let builder = Client::builder()
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
-            .connect_timeout(Duration::from_secs(5))
-            .build()
-            .map_err(|_| {
-                error(
-                    "gais_connection",
-                    "Unable to initialize the GAIS connection.",
-                    false,
-                )
-            })?;
+            .connect_timeout(Duration::from_secs(5));
+        #[cfg(target_os = "macos")]
+        let builder = if macos_system_bypass(&Url::parse(&settings.url).unwrap()) {
+            builder.no_proxy()
+        } else {
+            builder
+        };
+        let client = builder.build().map_err(|cause| {
+            error(
+                "gais_connection",
+                sanitized(
+                    &format!(
+                        "Unable to initialize GAIS connection to {}: {}",
+                        safe_target(&settings),
+                        cause_details(&cause.without_url())
+                    ),
+                    &settings.token,
+                ),
+                false,
+            )
+        })?;
         Ok(Self { settings, client })
+    }
+    fn failure(
+        &self,
+        code: &str,
+        message: impl AsRef<str>,
+        retryable: bool,
+    ) -> ToolboxExecutionError {
+        error(
+            code,
+            sanitized(
+                &format!("{}: {}", safe_target(&self.settings), message.as_ref()),
+                &self.settings.token,
+            ),
+            retryable,
+        )
+    }
+    fn network_error(
+        &self,
+        stage: &str,
+        cause: &(dyn std::error::Error + 'static),
+    ) -> ToolboxExecutionError {
+        self.failure("gais_connection", format!(
+            "{stage}: {}. A submitted task may still be running; query the same task handle before retrying Start.",
+            cause_details(cause)), true)
     }
     fn request(
         &self,
@@ -216,61 +367,73 @@ impl Connection {
         body: Option<&Value>,
         timeout: Duration,
     ) -> Result<Value> {
-        let mut request = self.request(method, endpoint, query, timeout);
+        let mut request = self.request(method.clone(), endpoint, query, timeout);
         if let Some(body) = body {
             request = request.json(body);
         }
-        self.decode(request.send().map_err(network_error)?)
+        let response = request.send().map_err(|cause| {
+            self.network_error(
+                &format!("Sending {method} /api/v1/{endpoint}"),
+                &cause.without_url(),
+            )
+        })?;
+        self.decode(response)
     }
     fn decode(&self, mut response: Response) -> Result<Value> {
         let status = response.status();
+        let response_id = response
+            .headers()
+            .get("X-Request-ID")
+            .and_then(|v| v.to_str().ok())
+            .unwrap_or("unknown")
+            .to_owned();
+        let context = format!("HTTP {status}, request_id={response_id}");
         let mut bytes = Vec::new();
         response
             .by_ref()
             .take(JSON_LIMIT + 1)
             .read_to_end(&mut bytes)
-            .map_err(network_error)?;
+            .map_err(|cause| {
+                self.network_error(&format!("Reading response ({context})"), &cause)
+            })?;
         if bytes.len() as u64 > JSON_LIMIT {
-            return Err(error(
-                "gais_response_too_large",
-                "ME-GAIS returned too much JSON. Use a smaller page or a single task query.",
-                false,
-            ));
+            return Err(self.failure("gais_response_too_large",
+                format!("{context}: JSON exceeds {JSON_LIMIT} bytes. Use a smaller page or a single task query."), false));
         }
-        let mut value: Value = serde_json::from_slice(&bytes).map_err(|_| {
-            error(
+        let mut value: Value = serde_json::from_slice(&bytes).map_err(|cause| {
+            self.failure(
                 "gais_protocol",
-                "ME-GAIS did not return a valid JSON response.",
+                format!("{context}: invalid JSON response: {cause}"),
                 false,
             )
         })?;
         redact(&mut value, &self.settings.token);
+        let context = format!(
+            "HTTP {status}, request_id={}",
+            value["request_id"].as_str().unwrap_or(&response_id)
+        );
         if value["protocol_version"] != "1.0" || !value["ok"].is_boolean() {
-            return Err(error(
+            return Err(self.failure(
                 "gais_protocol",
-                "Unsupported ME-GAIS response format or protocol version.",
+                format!("{context}: expected protocol_version=1.0 and a boolean ok field."),
                 false,
             ));
         }
         if !status.is_success() || value["ok"] != true {
             let remote = &value["error"];
-            return Err(error(
+            return Err(self.failure(
                 remote["code"].as_str().unwrap_or("gais_request_failed"),
-                remote["message"]
-                    .as_str()
-                    .unwrap_or("ME-GAIS rejected the request."),
+                format!(
+                    "{context}: {}",
+                    remote["message"]
+                        .as_str()
+                        .unwrap_or("GAIS rejected the request.")
+                ),
                 remote["retryable"].as_bool().unwrap_or(false),
             ));
         }
         Ok(value)
     }
-}
-fn network_error(_: impl std::fmt::Display) -> ToolboxExecutionError {
-    error(
-        "gais_connection",
-        "ME-GAIS request could not be completed (connection lost, timeout or transfer error). A submitted task may still be running; query the same task handle before retrying Start.",
-        true,
-    )
 }
 fn redact(value: &mut Value, token: &str) {
     match value {
@@ -310,7 +473,7 @@ fn server_identity(response: &Value) -> Result<ServerIdentity> {
         }),
         _ => Err(error(
             "gais_protocol",
-            "The service did not return a valid server_id and server_name.",
+            "Identity response must contain data.server_id (8 lowercase hexadecimal characters) and a non-empty data.server_name.",
             false,
         )),
     }
@@ -320,15 +483,38 @@ struct DiscoveredServer {
     identity: ServerIdentity,
     connection: Connection,
     host: Value,
+    attempts: usize,
+}
+#[derive(Serialize)]
+struct DiscoveryFailure {
+    target: String,
+    attempts: usize,
+    code: String,
+    message: String,
+}
+impl DiscoveryFailure {
+    fn new(credentials: &Credentials, attempts: usize, cause: ToolboxExecutionError) -> Self {
+        let (code, message) = match cause {
+            ToolboxExecutionError::Tool { code, message, .. } => (code, message),
+            other => ("gais_discovery_failed".into(), other.to_string()),
+        };
+        Self {
+            target: safe_target(credentials),
+            attempts,
+            code: sanitized(&code, &credentials.token),
+            message: sanitized(&message, &credentials.token),
+        }
+    }
 }
 struct Discovery {
     servers: Vec<DiscoveredServer>,
-    unavailable: usize,
+    failures: Vec<DiscoveryFailure>,
     ambiguous: std::collections::BTreeSet<String>,
 }
 impl Discovery {
     fn value(&self) -> Value {
-        json!({"servers":self.servers.iter().map(|server| &server.identity).collect::<Vec<_>>(),"unavailable":self.unavailable})
+        json!({"servers":self.servers.iter().map(|server| &server.identity).collect::<Vec<_>>(),
+            "unavailable":self.failures.len(),"failures":self.failures})
     }
     fn select(self, id: &str) -> Result<DiscoveredServer> {
         if self.ambiguous.contains(id) {
@@ -338,39 +524,72 @@ impl Discovery {
                 false,
             ));
         }
-        self.servers.into_iter().find(|server| server.identity.id == id).ok_or_else(|| error(
+        if let Some(server) = self
+            .servers
+            .into_iter()
+            .find(|server| server.identity.id == id)
+        {
+            return Ok(server);
+        }
+        if !self.failures.is_empty() {
+            return Err(error(
+                "gais_discovery_failed",
+                format!(
+                    "Cannot resolve service id {id}; identity probes failed. The requested operation was not sent. {}",
+                    self.failures
+                        .iter()
+                        .map(|failure| format!(
+                            "{} after {} attempts [{}]: {}",
+                            failure.target, failure.attempts, failure.code, failure.message
+                        ))
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+                true,
+            ));
+        }
+        Err(error(
             "gais_server_not_found",
-            "No available configured service matches id. The service may have restarted; call GAIS.Available again and select its current id.",
+            format!(
+                "No configured service currently reports id {id}. Call GAIS.Available and select a current id."
+            ),
             false,
         ))
     }
 }
 fn discover(settings: &Settings, cancelled: &mut impl FnMut() -> bool) -> Result<Discovery> {
     let mut servers = Vec::new();
-    let mut unavailable = 0;
+    let mut failures = Vec::new();
     let mut counts = std::collections::BTreeMap::<String, usize>::new();
     for credentials in &settings.servers {
-        if cancelled() {
-            return Err(ToolboxExecutionError::Interrupted(
-                "GAIS discovery interrupted; no remote tasks were changed.".into(),
-            ));
-        }
-        let probe: Result<DiscoveredServer> = (|| {
-            let connection = Connection::new(credentials.clone())?;
-            let host = connection.json(Method::GET, "host", &[], None, REQUEST_TIMEOUT)?;
-            let identity = server_identity(&host)?;
-            Ok(DiscoveredServer {
-                identity,
-                connection,
-                host,
-            })
-        })();
-        match probe {
-            Ok(server) => {
-                *counts.entry(server.identity.id.clone()).or_default() += 1;
-                servers.push(server);
+        for attempt in 1..=DISCOVERY_ATTEMPTS {
+            if cancelled() {
+                return Err(ToolboxExecutionError::Interrupted(
+                    "GAIS discovery interrupted; no remote tasks were changed.".into(),
+                ));
             }
-            Err(_) => unavailable += 1,
+            let probe: Result<DiscoveredServer> = (|| {
+                let connection = Connection::new(credentials.clone())?;
+                let host = connection.json(Method::GET, "host", &[], None, REQUEST_TIMEOUT)?;
+                let identity = server_identity(&host)?;
+                Ok(DiscoveredServer {
+                    identity,
+                    connection,
+                    host,
+                    attempts: attempt,
+                })
+            })();
+            match probe {
+                Ok(server) => {
+                    *counts.entry(server.identity.id.clone()).or_default() += 1;
+                    servers.push(server);
+                    break;
+                }
+                Err(cause) if attempt == DISCOVERY_ATTEMPTS => {
+                    failures.push(DiscoveryFailure::new(credentials, attempt, cause));
+                }
+                Err(_) => thread::sleep(Duration::from_millis(250)),
+            }
         }
     }
     let ambiguous = counts
@@ -379,7 +598,15 @@ fn discover(settings: &Settings, cancelled: &mut impl FnMut() -> bool) -> Result
         .collect::<std::collections::BTreeSet<_>>();
     servers.retain(|server| {
         if ambiguous.contains(&server.identity.id) {
-            unavailable += 1;
+            failures.push(DiscoveryFailure::new(
+                &server.connection.settings,
+                server.attempts,
+                error(
+                    "gais_ambiguous_id",
+                    format!("Duplicate server id {}.", server.identity.id),
+                    false,
+                ),
+            ));
             false
         } else {
             true
@@ -387,7 +614,7 @@ fn discover(settings: &Settings, cancelled: &mut impl FnMut() -> bool) -> Result
     });
     Ok(Discovery {
         servers,
-        unavailable,
+        failures,
         ambiguous,
     })
 }
@@ -618,7 +845,9 @@ fn upload(connection: &Connection, workspace: &Path, input: &Value) -> Result<Va
         )
         .body(Body::sized(UploadBody(readers), total))
         .send()
-        .map_err(network_error)?;
+        .map_err(|cause| {
+            connection.network_error("Sending POST /api/v1/assets/upload", &cause.without_url())
+        })?;
     connection.decode(response)
 }
 fn download(
@@ -643,7 +872,9 @@ fn download(
             TRANSFER_TIMEOUT,
         )
         .send()
-        .map_err(network_error)?;
+        .map_err(|cause| {
+            connection.network_error("Sending GET /api/v1/assets/download", &cause.without_url())
+        })?;
     if !response.status().is_success() {
         return connection.decode(response);
     }
@@ -699,7 +930,9 @@ fn download(
                     "Download interrupted; remote task unchanged.".into(),
                 ));
             }
-            let count = response.read(&mut buffer).map_err(network_error)?;
+            let count = response
+                .read(&mut buffer)
+                .map_err(|cause| connection.network_error("Reading asset download", &cause))?;
             if count == 0 {
                 break;
             }
@@ -761,10 +994,10 @@ pub fn status(id: Option<&str>) -> Result<Value> {
                 payload["host"] = status["host"].clone();
                 payload["tasks"] = status["tasks"].clone();
             }
-            Err(_) => {
+            Err(cause) => {
                 payload["host"] = Value::Null;
                 payload["tasks"] = json!([]);
-                payload["message"] = json!("暂时无法获取所选服务的状态");
+                payload["message"] = json!(format!("暂时无法获取所选服务的状态：{cause}"));
             }
         }
     } else {
@@ -772,7 +1005,7 @@ pub fn status(id: Option<&str>) -> Result<Value> {
         payload["host"] = Value::Null;
         payload["tasks"] = json!([]);
         payload["message"] = json!(if id.is_some() {
-            "所选服务暂不可用或已重启，请重新选择"
+            "所选服务暂不可用，请查看服务发现结果"
         } else {
             "暂无可用服务，请检查设置与服务状态"
         });
@@ -784,7 +1017,13 @@ fn status_with(connection: &Connection, host: Option<Value>) -> Result<Value> {
     let remaining = || {
         let duration = REQUEST_TIMEOUT.saturating_sub(started.elapsed());
         if duration.is_zero() {
-            Err(network_error("status deadline"))
+            Err(connection.network_error(
+                "Querying active tasks",
+                &io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "15-second status deadline exceeded",
+                ),
+            ))
         } else {
             Ok(duration)
         }
@@ -867,7 +1106,7 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
             "Available",
             object(json!({}), &[]),
             "Discover the current ids and names of available configured GAIS services before choosing a server.",
-            "Takes no arguments. Returns servers in configuration order as {id,name}, plus unavailable: the number of configured entries that could not be used. Offline, unauthenticated, invalid-identity and duplicate-id entries are not offered for selection; other services can still be returned. An empty list does not mean no services were configured. Availability here means authenticated identity discovery succeeded, not that every model is ready to generate. Use an exact returned id as the first parameter to every other GAIS tool. A service restart changes its id, so rediscover when an old id no longer matches. Names are display labels and need not be unique. This call only queries service information; it does not create or start tasks.",
+            "Takes no arguments. Returns servers in configuration order as {id,name}, unavailable (the number of unusable configured entries), and failures with a sanitized target, attempt count, error code and detailed message for each unavailable entry. Identity discovery allows up to four attempts per service; actual tool requests are not automatically retried. A failed probe does not establish that the service restarted or its id changed. Offline, unauthenticated, invalid-identity and duplicate-id entries are not offered for selection; other services can still be returned. An empty list does not mean no services were configured. Availability means authenticated identity discovery succeeded, not that every model is ready to generate. Use an exact returned id as the first parameter to every other GAIS tool. A service restart changes its id, so rediscover when an old id no longer matches. Names are display labels and need not be unique. This call only queries service information; it does not create or start tasks.",
             "{}",
         ),
         (
@@ -975,7 +1214,11 @@ pub fn catalog_parts() -> (Vec<ToolboxTool>, (String, String)) {
         let full_name = format!("GAIS.{name}");
         ToolboxTool { toolbox: TOOLBOX_NAME.into(), local_name:name.into(), api_name:api_safe_name(&full_name), full_name,
             input_schema, output_schema: match name {
-                "Available" => json!({"type":"object","required":["servers","unavailable"],"properties":{"servers":{"type":"array","items":{"type":"object","required":["id","name"],"properties":{"id":{"type":"string"},"name":{"type":"string"}},"additionalProperties":false}},"unavailable":{"type":"integer","minimum":0}},"additionalProperties":false}),
+                "Available" => object(json!({
+                    "servers":{"type":"array","items":object(json!({"id":string(),"name":string()}), &["id","name"])},
+                    "unavailable":{"type":"integer","minimum":0},
+                    "failures":{"type":"array","items":object(json!({"target":string(),"attempts":{"type":"integer","minimum":1,"maximum":4},"code":string(),"message":string()}), &["target","attempts","code","message"])}
+                }), &["servers","unavailable","failures"]),
                 "Wait" => json!({"type":"object","required":["reason","elapsed_seconds","state","task_snapshot","query_error"],"properties":{"reason":{"enum":["terminal","deadline","query_error","interrupted"]},"elapsed_seconds":{"type":"number"},"state":{"type":["string","null"]},"task_snapshot":{"type":["object","null"]},"query_error":{"type":["string","null"]}}}),
                 "Download" => json!({"type":"object","required":["handle","path","size","sha256"],"properties":{"handle":{"type":"string"},"path":{"type":"string"},"size":{"type":"integer"},"sha256":{"type":"string"},"protocol_version":{"type":"string"},"request_id":{"type":["string","null"]}}}),
                 _ => json!({"type":"object","required":["protocol_version","ok","data"],"properties":{"protocol_version":{"const":"1.0"},"request_id":{"type":"string"},"ok":{"const":true},"data": if name == "Models" {
@@ -1215,9 +1458,11 @@ mod tests {
         )
         .unwrap();
         assert_eq!(
-            list,
-            json!({"servers":[{"id":"0000000a","name":"same"},{"id":"0000000b","name":"same"}],"unavailable":1})
+            list["servers"],
+            json!([{"id":"0000000a","name":"same"},{"id":"0000000b","name":"same"}])
         );
+        assert_eq!(list["unavailable"], 1);
+        assert_eq!(list["failures"][0]["attempts"], 4);
         let stale = execute_configured(
             &settings,
             Path::new("."),
@@ -1226,7 +1471,7 @@ mod tests {
             &mut || false,
         )
         .unwrap_err();
-        assert!(stale.to_string().contains("gais_server_not_found"));
+        assert!(stale.to_string().contains("gais_discovery_failed"));
         execute_configured(
             &settings,
             Path::new("."),
@@ -1267,7 +1512,10 @@ mod tests {
             &mut || false,
         )
         .unwrap();
-        assert_eq!(list, json!({"servers":[],"unavailable":2}));
+        assert_eq!(list["servers"], json!([]));
+        assert_eq!(list["unavailable"], 2);
+        assert_eq!(list["failures"].as_array().unwrap().len(), 2);
+        assert_eq!(list["failures"][0]["code"], "gais_ambiguous_id");
         let err = execute_configured(
             &settings,
             Path::new("."),
@@ -1299,7 +1547,7 @@ mod tests {
     }
     #[test]
     fn invalid_identity_is_unavailable_and_empty_settings_do_not_connect() {
-        let (server, join) = mock(1, |_, _| {
+        let (server, join) = mock(4, |_, _| {
             reply(json!({"server_id":"ABCDEF00","server_name":"invalid"}))
         });
         let found = discover(
@@ -1309,13 +1557,17 @@ mod tests {
             &mut || false,
         )
         .unwrap();
-        assert_eq!(found.value(), json!({"servers":[],"unavailable":1}));
+        let value = found.value();
+        assert_eq!(value["servers"], json!([]));
+        assert_eq!(value["unavailable"], 1);
+        assert_eq!(value["failures"][0]["attempts"], 4);
+        assert_eq!(value["failures"][0]["code"], "gais_protocol");
         join.join().unwrap();
         assert_eq!(
             discover(&Settings::default(), &mut || false)
                 .unwrap()
                 .value(),
-            json!({"servers":[],"unavailable":0})
+            json!({"servers":[],"unavailable":0,"failures":[]})
         );
         assert!(
             server_identity(&envelope(json!({"server_id":"0000000a","server_name":" "}))).is_err()
@@ -1774,21 +2026,84 @@ mod tests {
         body.read_to_end(&mut bytes).unwrap();
         assert_eq!(bytes, b"abc");
     }
+    #[cfg(target_os = "macos")]
     #[test]
-    #[ignore = "explicit development services read-only check; requires GAIS_TEST_URLS and GAIS_TEST_TOKEN"]
-    fn development_services_read_only() {
-        let token = std::env::var("GAIS_TEST_TOKEN").unwrap();
+    fn system_bypass_matches_addresses_networks_and_host_rules() {
+        let rules = [
+            "127.0.0.1",
+            "192.168.0.0/16",
+            "fd00::/8",
+            "*.local",
+            "service.example",
+            "<local>",
+        ]
+        .map(str::to_owned);
+        for host in [
+            "127.0.0.1",
+            "192.168.50.21",
+            "192.168.50.22",
+            "[fd01::1234]",
+            "Host.Local",
+            "service.example",
+            "machine",
+        ] {
+            assert!(system_proxy_bypasses(host, &rules, false), "{host}");
+        }
+        for host in [
+            "192.169.1.1",
+            "8.8.8.8",
+            "[2001:db8::1]",
+            "service.example.evil",
+            "public.example",
+        ] {
+            assert!(!system_proxy_bypasses(host, &rules, false), "{host}");
+        }
+        assert!(system_proxy_bypasses("machine", &[], true));
+        assert!(!system_proxy_bypasses("::1", &[], true));
+    }
+
+    #[test]
+    fn discovery_recovers_on_fourth_attempt_and_stops_after_success() {
+        let (server, join) = mock(5, |index, request| {
+            if index < 4 {
+                assert_eq!(request.url(), "/api/v1/host");
+                if index < 3 {
+                    return tiny_http::Response::from_string("temporary failure")
+                        .with_status_code(503);
+                }
+                return reply(json!({"server_id":"0000000a","server_name":"recovered"}));
+            }
+            assert_eq!(request.url(), "/api/v1/models");
+            reply(json!({"models":[]}))
+        });
+        let value = execute_configured(
+            &Settings {
+                servers: vec![server.settings],
+            },
+            Path::new("."),
+            "Models",
+            json!({"id":"0000000a"}),
+            &mut || false,
+        )
+        .unwrap();
+        assert_eq!(value["data"]["models"], json!([]));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn exhausted_probes_report_details_and_do_not_hide_other_services() {
+        let (bad, bad_join) = mock(8, |_, request| {
+            assert_eq!(request.url(), "/api/v1/host");
+            tiny_http::Response::from_string(json!({"protocol_version":"1.0","ok":false,
+                "request_id":"req-retry","error":{"code":"BUSY","message":"temporary test-secret","retryable":true}}).to_string()).with_status_code(503)
+        });
+        let (good, good_join) = mock(2, |_, request| {
+            assert_eq!(request.url(), "/api/v1/host");
+            reply(json!({"server_id":"0000000b","server_name":"healthy"}))
+        });
         let settings = Settings {
-            servers: std::env::var("GAIS_TEST_URLS")
-                .unwrap()
-                .split(',')
-                .map(|url| Credentials {
-                    url: url.into(),
-                    token: token.clone(),
-                })
-                .collect(),
+            servers: vec![bad.settings, good.settings],
         };
-        assert!(settings.servers.len() >= 2);
         let available = execute_configured(
             &settings,
             Path::new("."),
@@ -1797,20 +2112,203 @@ mod tests {
             &mut || false,
         )
         .unwrap();
-        assert_eq!(available["unavailable"], 0);
-        let servers = available["servers"].as_array().unwrap();
-        assert_eq!(servers.len(), settings.servers.len());
-        for server in servers {
-            let input = json!({"id": server["id"]});
-            validate_input("Models", &input).unwrap();
-            let result =
-                execute_configured(&settings, Path::new("."), "Models", input, &mut || false)
+        assert_eq!(available["servers"].as_array().unwrap().len(), 1);
+        let failure = &available["failures"][0];
+        assert_eq!(failure["attempts"], 4);
+        assert_eq!(failure["code"], "BUSY");
+        let details = available.to_string();
+        assert!(details.contains("503") && details.contains("req-retry"));
+        assert!(!details.contains("test-secret"));
+        let failure = execute_configured(
+            &settings,
+            Path::new("."),
+            "Models",
+            json!({"id":"0000000a"}),
+            &mut || false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(failure.contains("gais_discovery_failed") && failure.contains("4 attempts"));
+        assert!(failure.contains("BUSY") && !failure.contains("may have restarted"));
+        assert!(!failure.contains("test-secret"));
+        bad_join.join().unwrap();
+        good_join.join().unwrap();
+    }
+
+    #[test]
+    fn actual_requests_are_not_retried_and_stale_ids_never_reroute() {
+        let (server, join) = mock(3, |index, request| {
+            if index == 1 {
+                assert_eq!(request.url(), "/api/v1/models");
+                return tiny_http::Response::from_string("not json or request body")
+                    .with_status_code(502)
+                    .with_header(Header::from_bytes("X-Request-ID", "req-actual").unwrap());
+            }
+            assert_eq!(request.url(), "/api/v1/host");
+            reply(json!({"server_id":"0000000a","server_name":"healthy"}))
+        });
+        let settings = Settings {
+            servers: vec![server.settings],
+        };
+        let failure = execute_configured(
+            &settings,
+            Path::new("."),
+            "Models",
+            json!({"id":"0000000a"}),
+            &mut || false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            failure.contains("502")
+                && failure.contains("req-actual")
+                && failure.contains("invalid JSON")
+        );
+        assert!(!failure.contains("not json or request body"));
+        let failure = execute_configured(
+            &settings,
+            Path::new("."),
+            "Models",
+            json!({"id":"0000000b"}),
+            &mut || false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(failure.contains("gais_server_not_found"));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn discovery_cancellation_stops_before_retry() {
+        let (server, join) = mock(1, |_, _| {
+            tiny_http::Response::from_string("unavailable").with_status_code(503)
+        });
+        let mut checks = 0;
+        let result = discover(
+            &Settings {
+                servers: vec![server.settings],
+            },
+            &mut || {
+                checks += 1;
+                checks > 1
+            },
+        );
+        assert!(matches!(result, Err(ToolboxExecutionError::Interrupted(_))));
+        join.join().unwrap();
+    }
+
+    #[test]
+    fn network_failures_include_causes_without_query_or_credentials() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        drop(listener);
+        let mut connection = Connection::new(Credentials {
+            url: format!("http://{address}"),
+            token: "test-secret".into(),
+        })
+        .unwrap();
+        connection.client = Client::builder()
+            .no_proxy()
+            .connect_timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let failure = connection
+            .json(
+                Method::GET,
+                "models",
+                &[("private".into(), "sensitive-query".into())],
+                None,
+                Duration::from_secs(1),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("Sending GET") && failure.contains("Connection refused"));
+        assert!(!failure.contains("test-secret") && !failure.contains("sensitive-query"));
+    }
+
+    #[test]
+    fn response_read_errors_keep_details_without_sensitive_query() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let join = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = [0u8; 4096];
+            let _ = stream.read(&mut bytes).unwrap();
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\nX-Request-ID: short-body\r\n\r\n{}",
+                )
+                .unwrap();
+        });
+        let mut connection = Connection::new(Credentials {
+            url,
+            token: "test-secret".into(),
+        })
+        .unwrap();
+        connection.client = Client::builder().no_proxy().build().unwrap();
+        let failure = connection
+            .json(
+                Method::GET,
+                "models",
+                &[("private".into(), "sensitive-query".into())],
+                None,
+                Duration::from_secs(1),
+            )
+            .unwrap_err()
+            .to_string();
+        assert!(failure.contains("Reading response") && failure.contains("short-body"));
+        assert!(!failure.contains("test-secret") && !failure.contains("sensitive-query"));
+        join.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "explicit read-only check against the two configured development services"]
+    fn development_services_read_only() {
+        let settings = Settings::load().unwrap();
+        assert_eq!(settings.servers.len(), 2);
+        for credentials in &settings.servers {
+            let url = Url::parse(&credentials.url).unwrap();
+            assert!(matches!(
+                url.host_str(),
+                Some("192.168.50.21" | "192.168.50.22")
+            ));
+            #[cfg(target_os = "macos")]
+            assert!(macos_system_bypass(&url));
+        }
+        for round in 1..=3 {
+            let available = execute_configured(
+                &settings,
+                Path::new("."),
+                "Available",
+                json!({}),
+                &mut || false,
+            )
+            .unwrap();
+            assert_eq!(available["unavailable"], 0);
+            let servers = available["servers"].as_array().unwrap();
+            assert_eq!(servers.len(), 2);
+            for server in servers {
+                for name in ["Models", "Host"] {
+                    let started = Instant::now();
+                    let result = execute_configured(
+                        &settings,
+                        Path::new("."),
+                        name,
+                        json!({"id":server["id"]}),
+                        &mut || false,
+                    )
                     .unwrap();
-            let identity = server_identity(&result).unwrap();
-            assert_eq!(identity.id, server["id"]);
-            assert_eq!(identity.name, server["name"]);
-            assert!(result["data"]["models"].is_array());
-            println!("read-only Models: {} · {}", identity.name, identity.id);
+                    let identity = server_identity(&result).unwrap();
+                    assert_eq!(identity.id, server["id"]);
+                    println!(
+                        "read-only round {round} {name}: {} · {} ({:?})",
+                        identity.name,
+                        identity.id,
+                        started.elapsed()
+                    );
+                    thread::sleep(Duration::from_millis(500));
+                }
+            }
         }
     }
 }

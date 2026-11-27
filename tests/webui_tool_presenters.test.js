@@ -53,6 +53,14 @@ describe("shared WebUI tool presenters", () => {
     expect(model).toContain("服务 ID"); expect(model).toContain("图像 服务");
   });
 
+  test("GAIS discovery shows detailed failures as escaped text", () => {
+    const html = presenters.renderDetails(presenters.describe("GAIS.Available", {}, succeeded({ servers: [], unavailable: 1,
+      failures: [{ target: "http://service", attempts: 4, code: "gais_connection", message: "Connection refused <script>" }] })));
+    expect(html).toContain("连接失败"); expect(html).toContain("尝试次数");
+    expect(html).toContain("http://service"); expect(html).toContain("Connection refused &lt;script&gt;");
+    expect(html).not.toContain("<script>");
+  });
+
   test("GAIS models display ordered descriptions as text and tolerate historical records without them", () => {
     const result = succeeded({ protocol_version: "1.0", ok: true, data: {
       server_id: "03a7f2bc", server_name: "图像 服务",

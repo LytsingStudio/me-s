@@ -147,7 +147,8 @@ impl TruncationState {
             return false;
         };
         if self.tool_name == "GAIS.Available" {
-            return self.truncate_detail_prefix(root, "servers", "servers");
+            return self.truncate_detail_prefix(root, "servers", "servers")
+                || self.truncate_detail_prefix(root, "failures", "failures");
         }
         for field in ["items", "models"] {
             if let Some(items) = detail
@@ -1704,6 +1705,24 @@ mod tests {
         assert!(!retained.is_empty() && retained.len() < servers.len());
         assert_eq!(retained, &servers[servers.len() - retained.len()..]);
         assert_eq!(original["result"]["detail"]["servers"], json!(servers));
+    }
+
+    #[test]
+    fn gais_available_crops_complete_failure_entries() {
+        let failures: Vec<_> = (0..100)
+            .map(|i| {
+                json!({"target":format!("http://host{i}"),
+            "attempts":4,"code":"gais_connection","message":"connection refused ".repeat(20)})
+            })
+            .collect();
+        let original = wrapper(json!({"servers":[],"unavailable":100,"failures":failures}));
+        let result = truncate_for_model_with_limit("GAIS.Available", original.clone(), 1500);
+        assert_eq!(result["truncate"], true);
+        assert_eq!(result["result"]["detail"]["unavailable"], 100);
+        let retained = result["result"]["detail"]["failures"].as_array().unwrap();
+        assert!(!retained.is_empty() && retained.len() < failures.len());
+        assert_eq!(retained, &failures[failures.len() - retained.len()..]);
+        assert_eq!(original["result"]["detail"]["failures"], json!(failures));
     }
 
     #[test]

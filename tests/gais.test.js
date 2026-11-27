@@ -116,6 +116,22 @@ describe("ME-GAIS settings", () => {
     expect(modal.indexOf("${localPreferenceSettingsHtml()}")).toBeLessThan(modal.indexOf("settings-model-section"));
     expect(read("src/webui/style.css")).toMatch(/\.gais-settings\s*\{[^}]*padding-top:\s*12px/);
   });
+  test("service settings use compact accessible actions and preserve form controls", async () => {
+    const f = fixture(); f.container.innerHTML = f.api.settingsHtml();
+    expect(f.container.innerHTML).toContain('aria-label="添加服务"');
+    expect(f.container.innerHTML).toContain('gais-icon-button');
+    const form = f.container.querySelector("[data-gais-settings]"); form.innerHTML = f.api.settingsHtml();
+    await f.api.bindSettings(f.container, { current: () => true, onUnauthorized() {}, onSaved() {}, onDraft() {},
+      draft: { servers: [{ url: "http://one", token: "dummy" }, { url: "http://two", token: "dummy" }] }, request() { throw new Error("unexpected request"); } });
+    const rows = form.querySelector("[data-gais-entries]").children;
+    expect(rows).toHaveLength(2);
+    expect(rows[0].innerHTML).toContain('aria-label="移除服务"');
+    expect(rows[0].innerHTML).toContain('gais-entry-actions');
+    expect(rows[0].querySelector("[data-gais-test]")).not.toBeNull();
+    const css = read("src/webui/style.css");
+    expect(css).toMatch(/\.gais-entry\s*\{[^}]*gap:\s*8px/);
+    expect(css).toMatch(/button\.gais-icon-button\s*\{[^}]*width:\s*30px/);
+  });
   test("test and save use the current form separately, with no direct GAIS URL requests", async () => {
     const f = fixture(); f.container.innerHTML = f.api.settingsHtml();
     const form = f.container.querySelector("[data-gais-settings]"); form.innerHTML = f.api.settingsHtml();

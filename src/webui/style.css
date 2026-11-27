@@ -1185,16 +1185,22 @@ me-image-gallery figcaption { display: flex; justify-content: flex-end; gap: 8px
 .gais-task-state { flex: none; color: var(--cyan); font-size: 12px; }
 .gais-task-meta, .gais-progress { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; margin-top: 10px; }
 .gais-task p, .gais-empty { color: var(--muted); font-size: 13px; }
-.gais-settings { display: grid; gap: 14px; padding-top: 12px; }
-.gais-entry { padding: 16px 0; border-bottom: 1px solid var(--border); display: grid; gap: 14px; }
+.gais-settings { display: grid; gap: 10px; padding-top: 12px; }
+.gais-entry { padding: 10px 0; border-bottom: 1px solid var(--border); display: grid; gap: 8px; }
 .gais-entry:first-child { padding-top: 0; }
-.gais-entry > header { display: flex; justify-content: space-between; align-items: center; gap: 12px; font-size: 13px; }
+.gais-entry > header { display: flex; justify-content: space-between; align-items: center; gap: 10px; font-size: 13px; }
 .gais-entry > header strong { min-width: 0; overflow-wrap: anywhere; }
-.gais-entry label { display: grid; gap: 7px; font-size: 13px; color: var(--muted); }
+.gais-entry label { display: grid; grid-template-columns: 44px minmax(0, 1fr); align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.gais-entry-actions { display: flex; align-items: center; gap: 4px; }
+.settings-gais-section .gais-entry-actions > button { padding: 5px 10px; font-size: 12px; min-height: 30px; }
+.settings-gais-section button.gais-icon-button { display: inline-flex; align-items: center; justify-content: center; flex: 0 0 30px; width: 30px; min-width: 30px; height: 30px; min-height: 30px; padding: 6px; border-radius: 7px; }
+.gais-icon-button svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.gais-entry-result { font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
+.gais-entry-result:empty { display: none; }
 .gais-heading select { min-width: 0; max-width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 8px; color: var(--text); background: var(--panel); }
-.gais-settings input { width: 100%; min-width: 0; padding: 10px 12px; border: 1px solid var(--border); border-radius: 8px; background: var(--panel-2); color: var(--text); font: inherit; }
+.gais-settings input { width: 100%; min-width: 0; padding: 7px 10px; border: 1px solid var(--border); border-radius: 7px; background: var(--panel-2); color: var(--text); font: inherit; }
 .gais-settings-actions { display: flex; justify-content: flex-end; align-items: center; gap: 8px; }
-.gais-settings-actions > button { padding: 9px 14px; border-radius: 8px; font-size: 13px; }
+.gais-settings-actions > button { padding: 6px 12px; border-radius: 7px; font-size: 12px; }
 .gais-settings-actions > span { margin-right: auto; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 @media (max-width: 600px) {
   .gais-page { padding: 20px 16px; }

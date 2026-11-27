@@ -1197,7 +1197,7 @@
         if (!resultSucceeded(output)) return [];
         const value = objectValue(resultValue(output));
         const data = objectValue(value.data || value);
-        if (name === "Available") return [tableBlock("可用服务", [{key:"id",label:"服务 ID"},{key:"name",label:"名称"}], data.servers || []), fieldBlock("服务状态", [["暂不可用",data.unavailable ?? 0]])];
+        if (name === "Available") return [tableBlock("可用服务", [{key:"id",label:"服务 ID"},{key:"name",label:"名称"}], data.servers || []), fieldBlock("服务状态", [["暂不可用",data.unavailable ?? 0]]), ...(data.failures?.length ? [tableBlock("连接失败", [{key:"target",label:"服务"},{key:"attempts",label:"尝试次数"},{key:"message",label:"原因"}], data.failures)] : [])];
         const server = fieldBlock("服务", [["服务 ID",data.server_id || input.id],["名称",data.server_name]]);
         if (name === "Wait") return [fieldBlock("等待结果", [["结束原因",({terminal:"任务已停止",deadline:"到达等待上限",query_error:"无法继续查询",interrupted:"等待已中断"})[data.reason] || data.reason],["等待耗时",`${Number(data.elapsed_seconds || 0).toFixed(2)} 秒`],["最后状态",gaisState(data.state)],["查询错误",data.query_error]]), ...gaisTaskBlocks(data.task_snapshot)];
         if (name === "Download") return [fieldBlock("已下载文件", [["资产",data.handle],["路径",data.path],["大小",formatBytes(data.size)],["SHA256",data.sha256]])];
